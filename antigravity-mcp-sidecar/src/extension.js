@@ -114,8 +114,51 @@ async function activate(context) {
     register();
     log(`Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
 
-    startAutoAccept(cdpPort, log);
-    log(`Started auto-accept loops on CDP port ${cdpPort}`);
+    let statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'antigravityMcpSidecar.toggle';
+    context.subscriptions.push(statusBarItem);
+
+    let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
+
+    function updateStatusBar() {
+        if (isEnabled) {
+            statusBarItem.text = '$(zap) Sidecar Auto: ON';
+            statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            statusBarItem.show();
+        } else {
+            statusBarItem.text = '$(circle-slash) Sidecar Auto: OFF';
+            statusBarItem.backgroundColor = undefined;
+            statusBarItem.show();
+        }
+    }
+
+    function syncState() {
+        if (isEnabled) {
+            const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
+            startAutoAccept(cdpPort, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500));
+            log(`Auto-accept loops running on port ${cdpPort}`);
+        } else {
+            stopAutoAccept();
+            log(`Auto-accept loops paused`);
+        }
+        updateStatusBar();
+    }
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
+        isEnabled = !isEnabled;
+        await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
+        syncState();
+    }));
+
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('antigravityMcpSidecar')) {
+            isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
+            stopAutoAccept();
+            syncState();
+        }
+    }));
+
+    syncState();
 
     context.subscriptions.push({
         dispose: () => {

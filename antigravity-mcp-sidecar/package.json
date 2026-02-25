@@ -4,6 +4,7 @@
     "description": "Registers currently open workspaces for proper MCP Server routing.",
     "version": "0.1.0",
     "publisher": "antigravity",
+    "icon": "icon.png",
     "engines": {
         "vscode": "^1.80.0"
     },
@@ -11,11 +12,37 @@
         "onStartupFinished"
     ],
     "main": "./src/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "antigravityMcpSidecar.toggle",
+                "title": "Toggle Antigravity Sidecar Auto-Accept"
+            }
+        ],
+        "configuration": {
+            "title": "Antigravity Sidecar",
+            "properties": {
+                "antigravityMcpSidecar.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable or disable the auto-accept feature."
+                },
+                "antigravityMcpSidecar.nativePollInterval": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "Polling interval in milliseconds for native VS Code commands (e.g. Accept, Run)."
+                },
+                "antigravityMcpSidecar.cdpPollInterval": {
+                    "type": "number",
+                    "default": 1500,
+                    "description": "Polling interval in milliseconds for CDP webview clicks (e.g. Always Allow)."
+                }
+            }
+        }
+    },
     "scripts": {
-        "vscode:prepublish": "npm run package",
         "compile": "tsc -p ./",
-        "watch": "tsc -watch -p ./",
-        "package": "vsce package"
+        "watch": "tsc -watch -p ./"
     },
     "dependencies": {
         "node-fetch": "^2.6.12",

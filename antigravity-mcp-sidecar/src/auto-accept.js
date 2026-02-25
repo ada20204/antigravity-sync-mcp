@@ -213,11 +213,11 @@ let pollIntervalId = null;
 let cdpIntervalId = null;
 let logger = console.log;
 
-function startAutoAccept(port, customLogger) {
+function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval = 1500) {
     if (pollIntervalId) return;
     if (customLogger) logger = customLogger;
 
-    // Fast loop for native VS Code commands (500ms)
+    // Fast loop for native VS Code commands
     pollIntervalId = setInterval(async () => {
         if (isAccepting) return;
         isAccepting = true;
@@ -231,9 +231,9 @@ function startAutoAccept(port, customLogger) {
             clearTimeout(safetyTimer);
             isAccepting = false;
         }
-    }, 500);
+    }, nativeInterval);
 
-    // Slower loop for CDP webview clicks (1500ms)
+    // Slower loop for CDP webview clicks
     cdpIntervalId = setInterval(async () => {
         if (isCdpBusy || !port) return;
         isCdpBusy = true;
@@ -244,7 +244,7 @@ function startAutoAccept(port, customLogger) {
         finally {
             isCdpBusy = false;
         }
-    }, 1500);
+    }, cdpInterval);
 }
 
 function stopAutoAccept() {
