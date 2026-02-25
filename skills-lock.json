@@ -46,6 +46,11 @@
       "sourceType": "github",
       "computedHash": "126f1ebf6ccd414f42544f6e83d8cc5adb089e1108eaffb7c400701e37eecd9f"
     },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "computedHash": "e688fcd4c5693e14ebd00d48e982dbd2be060fbea89f5f60531e79c704a1bc28"
+    },
     "using-git-worktrees": {
       "source": "obra/superpowers",
       "sourceType": "github",
@@ -60,6 +65,11 @@
       "source": "obra/superpowers",
       "sourceType": "github",
       "computedHash": "9b446f0c7fe1cfb560b1d34439523b1a76d5f177290007b2c053a1c749a4a8ba"
+    },
+    "vscode-extension-builder": {
+      "source": "kjgarza/marketplace-claude",
+      "sourceType": "github",
+      "computedHash": "db8784fee8a773116a36e88dcc028a61fc523b34f98d3fe63208dce17425f8c6"
     },
     "writing-plans": {
       "source": "obra/superpowers",
