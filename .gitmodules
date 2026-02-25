@@ -1,12 +1,12 @@
 [submodule "OmniAntigravityRemoteChat"]
-	path = OmniAntigravityRemoteChat
+	path = references/OmniAntigravityRemoteChat
 	url = https://github.com/diegosouzapw/OmniAntigravityRemoteChat
 [submodule "antigravity-agent"]
-	path = antigravity-agent
+	path = references/antigravity-agent
 	url = https://github.com/MonchiLin/antigravity-agent
 [submodule "gemini-mcp-tool"]
-	path = gemini-mcp-tool
+	path = references/gemini-mcp-tool
 	url = https://github.com/jamubc/gemini-mcp-tool
 [submodule "auto-accept-agent"]
-	path = auto-accept-agent
+	path = references/auto-accept-agent
 	url = https://github.com/Munkhin/auto-accept-agent.git
