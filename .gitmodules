@@ -10,3 +10,12 @@
 [submodule "auto-accept-agent"]
 	path = references/auto-accept-agent
 	url = https://github.com/Munkhin/auto-accept-agent.git
+[submodule "references/AntiGravity-AutoAccept"]
+	path = references/AntiGravity-AutoAccept
+	url = https://github.com/yazanbaker94/AntiGravity-AutoAccept
+[submodule "references/antigravity-auto-run-pro"]
+	path = references/antigravity-auto-run-pro
+	url = https://github.com/MarcoDeliaBot/antigravity-auto-run-pro
+[submodule "references/AntigravityQuota"]
+	path = references/AntigravityQuota
+	url = https://github.com/Henrik-3/AntigravityQuota
