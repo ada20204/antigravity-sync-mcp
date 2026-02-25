@@ -189,7 +189,7 @@ function multiplexCdpWebviews(port) {
 
                             const dynamicScript = buildPermissionScript();
                             const evalMsg = await send('Runtime.evaluate', { expression: dynamicScript }, sessionId);
-                            
+
                             await send('Target.detachFromTarget', { sessionId }).catch(() => { });
                         } catch (e) { }
                     });
@@ -211,9 +211,11 @@ let isAccepting = false;
 let isCdpBusy = false;
 let pollIntervalId = null;
 let cdpIntervalId = null;
+let logger = console.log;
 
-function startAutoAccept(port) {
+function startAutoAccept(port, customLogger) {
     if (pollIntervalId) return;
+    if (customLogger) logger = customLogger;
 
     // Fast loop for native VS Code commands (500ms)
     pollIntervalId = setInterval(async () => {
@@ -224,7 +226,7 @@ function startAutoAccept(port) {
             await Promise.allSettled(
                 ACCEPT_COMMANDS.map(cmd => vscode.commands.executeCommand(cmd))
             );
-        } catch (e) {} 
+        } catch (e) { }
         finally {
             clearTimeout(safetyTimer);
             isAccepting = false;
@@ -236,8 +238,9 @@ function startAutoAccept(port) {
         if (isCdpBusy || !port) return;
         isCdpBusy = true;
         try {
-            await multiplexCdpWebviews(port);
-        } catch (e) {} 
+            const connected = await multiplexCdpWebviews(port);
+            if (!connected) logger("Failed to connect to CDP webview session");
+        } catch (e) { }
         finally {
             isCdpBusy = false;
         }

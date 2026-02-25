@@ -9,6 +9,17 @@ const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
 
 
+let outputChannel;
+
+function log(msg) {
+    const time = new Date().toLocaleTimeString();
+    const fullMsg = `[${time}] ${msg}`;
+    console.log(fullMsg);
+    if (outputChannel) {
+        outputChannel.appendLine(fullMsg);
+    }
+}
+
 function getJson(url) {
     return new Promise((resolve, reject) => {
         const req = http.get(url, { timeout: 1000 }, (res) => {
@@ -59,6 +70,10 @@ async function findCdpPort(workspaceName) {
 }
 
 async function activate(context) {
+    outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
+    context.subscriptions.push(outputChannel);
+    log('Extension activating...');
+
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         return;
@@ -69,7 +84,7 @@ async function activate(context) {
 
     const cdpPort = await findCdpPort(workspaceName);
     if (!cdpPort) {
-        console.error(`[antigravity-mcp-sidecar] Could not find CDP port for workspace: ${workspacePath}`);
+        log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
         return;
     }
 
@@ -97,10 +112,10 @@ async function activate(context) {
     };
 
     register();
-    console.log(`[antigravity-mcp-sidecar] Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
+    log(`Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
 
-    startAutoAccept(cdpPort);
-    console.log(`[antigravity-mcp-sidecar] Started auto-accept loops on CDP port ${cdpPort}`);
+    startAutoAccept(cdpPort, log);
+    log(`Started auto-accept loops on CDP port ${cdpPort}`);
 
     context.subscriptions.push({
         dispose: () => {
@@ -111,7 +126,7 @@ async function activate(context) {
                     if (registry[workspacePath] && registry[workspacePath].pid === process.pid) {
                         delete registry[workspacePath];
                         fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
-                        console.log(`[antigravity-mcp-sidecar] Deregistered workspace ${workspacePath}`);
+                        log(`Deregistered workspace ${workspacePath}`);
                     }
                 } catch { }
             }
