@@ -18,7 +18,8 @@
         "package": "vsce package"
     },
     "dependencies": {
-        "node-fetch": "^2.6.12"
+        "node-fetch": "^2.6.12",
+        "ws": "^8.19.0"
     },
     "devDependencies": {
         "@types/node": "18.x",

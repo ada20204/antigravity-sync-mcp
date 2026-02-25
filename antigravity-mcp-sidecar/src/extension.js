@@ -3,9 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const http = require('http');
+const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 
 const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
+
 
 function getJson(url) {
     return new Promise((resolve, reject) => {
@@ -97,8 +99,12 @@ async function activate(context) {
     register();
     console.log(`[antigravity-mcp-sidecar] Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
 
+    startAutoAccept(cdpPort);
+    console.log(`[antigravity-mcp-sidecar] Started auto-accept loops on CDP port ${cdpPort}`);
+
     context.subscriptions.push({
         dispose: () => {
+            stopAutoAccept();
             if (fs.existsSync(REGISTRY_FILE)) {
                 try {
                     const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
@@ -113,7 +119,9 @@ async function activate(context) {
     });
 }
 
-function deactivate() { }
+function deactivate() {
+    stopAutoAccept();
+}
 
 module.exports = {
     activate,
