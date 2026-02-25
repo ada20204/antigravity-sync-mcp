@@ -44,10 +44,12 @@ export interface CDPConnection {
  */
 export async function discoverCDP(targetDir?: string): Promise<{
     port: number;
+    ip: string;
     target: CDPTarget;
 } | null> {
     // 1. Resolve Target Directory Map from Registry
     let cdpPort: number | undefined;
+    let cdpIp: string = '127.0.0.1';
 
     // Option A: Use environment override if explicitly provided
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
@@ -63,11 +65,13 @@ export async function discoverCDP(targetDir?: string): Promise<{
                 // Exact match
                 if (registry[targetAbsPath]) {
                     cdpPort = registry[targetAbsPath].port;
+                    if (registry[targetAbsPath].ip) cdpIp = registry[targetAbsPath].ip;
                 } else {
                     // Fallback: Prefix match (e.g. if target is a subfolder)
                     for (const key of Object.keys(registry)) {
                         if (targetAbsPath.startsWith(key)) {
                             cdpPort = registry[key].port;
+                            if (registry[key].ip) cdpIp = registry[key].ip;
                             break;
                         }
                     }
@@ -85,6 +89,7 @@ export async function discoverCDP(targetDir?: string): Promise<{
                 const keys = Object.keys(registry);
                 if (keys.length > 0) {
                     cdpPort = registry[keys[0]].port;
+                    if (registry[keys[0]].ip) cdpIp = registry[keys[0]].ip;
                 }
             }
         } catch { }
@@ -94,9 +99,9 @@ export async function discoverCDP(targetDir?: string): Promise<{
         return null;
     }
 
-    // 2. Fetch target from the exact port
+    // 2. Fetch target from the exact port and IP
     try {
-        const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+        const response = await fetch(`http://${cdpIp}:${cdpPort}/json/list`);
         const list: CDPTarget[] = await response.json() as any;
 
         const workbench = list.find((t) =>
@@ -106,10 +111,10 @@ export async function discoverCDP(targetDir?: string): Promise<{
         );
 
         if (workbench) {
-            return { port: cdpPort, target: workbench };
+            return { port: cdpPort, ip: cdpIp, target: workbench };
         }
     } catch (e) {
-        console.error(`[CDP] Port ${cdpPort} from registry is unreachable.`);
+        console.error(`[CDP] Target ${cdpIp}:${cdpPort} from registry is unreachable.`);
     }
 
     return null;

@@ -99,9 +99,9 @@ function buildPermissionScript() {
 `;
 }
 
-function cdpGetBrowserWsUrl(port) {
+function cdpGetBrowserWsUrl(port, ip = '127.0.0.1') {
     return new Promise((resolve, reject) => {
-        const req = http.get({ hostname: '127.0.0.1', port, path: '/json/version', timeout: 800 }, (res) => {
+        const req = http.get({ hostname: ip, port, path: '/json/version', timeout: 800 }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
@@ -116,10 +116,10 @@ function cdpGetBrowserWsUrl(port) {
     });
 }
 
-function multiplexCdpWebviews(port) {
+function multiplexCdpWebviews(port, ip = '127.0.0.1') {
     return new Promise(async (resolve) => {
         try {
-            const browserWsUrl = await cdpGetBrowserWsUrl(port);
+            const browserWsUrl = await cdpGetBrowserWsUrl(port, ip);
             if (!browserWsUrl) return resolve(false);
 
             const ws = new WebSocket(browserWsUrl);
@@ -213,7 +213,7 @@ let pollIntervalId = null;
 let cdpIntervalId = null;
 let logger = console.log;
 
-function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval = 1500) {
+function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval = 1500, ip = '127.0.0.1') {
     if (pollIntervalId) return;
     if (customLogger) logger = customLogger;
 
@@ -238,8 +238,8 @@ function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval =
         if (isCdpBusy || !port) return;
         isCdpBusy = true;
         try {
-            const connected = await multiplexCdpWebviews(port);
-            if (!connected) logger("Failed to connect to CDP webview session");
+            const connected = await multiplexCdpWebviews(port, ip);
+            if (!connected) logger(`Failed to connect to CDP webview session on ${ip}:${port}`);
         } catch (e) { }
         finally {
             isCdpBusy = false;

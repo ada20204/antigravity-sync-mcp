@@ -41,7 +41,20 @@ function getJson(url) {
     });
 }
 
-async function findCdpPort(workspaceName) {
+function getHostIps() {
+    const ips = ['127.0.0.1'];
+    // In WSL, Windows host is often nameserver in resolv.conf
+    try {
+        if (fs.existsSync('/etc/resolv.conf')) {
+            const resolv = fs.readFileSync('/etc/resolv.conf', 'utf8');
+            const match = resolv.match(/^nameserver\s+([\d.]+)/m);
+            if (match && match[1]) ips.push(match[1]);
+        }
+    } catch { }
+    return ips;
+}
+
+async function findCdpTarget(workspaceName) {
     // Standard Chromium/Electron debug ports + Antigravity common ranges
     const PORTS = [
         9222, 9229,                                              // standard --remote-debugging-port defaults
@@ -50,23 +63,27 @@ async function findCdpPort(workspaceName) {
         ...Array.from({ length: 51 }, (_, i) => 7800 + i),      // 7800-7850
     ];
 
-    for (const port of PORTS) {
-        try {
-            const list = await getJson(`http://127.0.0.1:${port}/json/list`);
+    const ips = getHostIps();
 
-            const workbench = list.find((t) =>
-                t.url && t.url.includes('workbench.html') &&
-                t.type === 'page' &&
-                !(t.url && t.url.includes('jetski'))
-            );
+    for (const ip of ips) {
+        for (const port of PORTS) {
+            try {
+                const list = await getJson(`http://${ip}:${port}/json/list`);
 
-            if (workbench) {
-                if (!workspaceName || workbench.title.includes(workspaceName)) {
-                    return port;
+                const workbench = list.find((t) =>
+                    t.url && t.url.includes('workbench.html') &&
+                    t.type === 'page' &&
+                    !(t.url && t.url.includes('jetski'))
+                );
+
+                if (workbench) {
+                    if (!workspaceName || workbench.title.includes(workspaceName)) {
+                        return { port, ip };
+                    }
                 }
+            } catch {
+                // Ignore
             }
-        } catch {
-            // Ignore
         }
     }
 
@@ -84,10 +101,10 @@ async function activate(context) {
     context.subscriptions.push(statusBarItem);
 
     let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
-    let cdpPort = null;
+    let cdpTarget = null;
 
     function updateStatusBar() {
-        if (!cdpPort) {
+        if (!cdpTarget) {
             statusBarItem.text = '$(warning) Sidecar: No CDP';
             statusBarItem.backgroundColor = undefined;
             statusBarItem.tooltip = 'CDP port not found — auto-accept unavailable';
@@ -106,14 +123,14 @@ async function activate(context) {
     }
 
     function syncState() {
-        if (isEnabled && cdpPort) {
+        if (isEnabled && cdpTarget) {
             const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
-            startAutoAccept(cdpPort, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500));
-            log(`Auto-accept loops running on port ${cdpPort}`);
+            startAutoAccept(cdpTarget.port, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500), cdpTarget.ip);
+            log(`Auto-accept loops running on ${cdpTarget.ip}:${cdpTarget.port}`);
         } else {
             stopAutoAccept();
-            if (!cdpPort) {
-                log('Auto-accept unavailable: no CDP port');
+            if (!cdpTarget) {
+                log('Auto-accept unavailable: no CDP debug port found');
             } else {
                 log('Auto-accept paused');
             }
@@ -123,7 +140,7 @@ async function activate(context) {
 
     // ─── Toggle Command (always registered) ───────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
-        if (!cdpPort) {
+        if (!cdpTarget) {
             vscode.window.showWarningMessage('Sidecar: No CDP port found. Cannot toggle auto-accept.');
             return;
         }
@@ -152,8 +169,8 @@ async function activate(context) {
     const workspacePath = workspaceFolders[0].uri.fsPath;
     const workspaceName = vscode.workspace.name || "";
 
-    cdpPort = await findCdpPort(workspaceName);
-    if (!cdpPort) {
+    cdpTarget = await findCdpTarget(workspaceName);
+    if (!cdpTarget) {
         log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
         updateStatusBar();
 
@@ -163,12 +180,12 @@ async function activate(context) {
         if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
 
         vscode.window.showErrorMessage(
-            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with --remote-debugging-port=9222 for auto-accept to work.',
+            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 for auto-accept to work natively and in WSL.',
             ...actions
         ).then(action => {
             if (action === 'How to Fix') {
                 const guide = platform === 'linux'
-                    ? 'Find your Antigravity .desktop file (usually in ~/.local/share/applications/) and add --remote-debugging-port=9222 to the Exec line. Then restart Antigravity.'
+                    ? 'Find your Antigravity .desktop file (usually in ~/.local/share/applications/) or launch command and append: --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0. Then restart.'
                     : platform === 'darwin'
                         ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9222'
                         : 'Right-click your Antigravity shortcut → Properties → add --remote-debugging-port=9222 to the Target field.';
@@ -197,7 +214,8 @@ async function activate(context) {
         }
 
         registry[workspacePath] = {
-            port: cdpPort,
+            port: cdpTarget.port,
+            ip: cdpTarget.ip,
             pid: process.pid,
             lastActive: Date.now()
         };
@@ -206,7 +224,7 @@ async function activate(context) {
     };
 
     register();
-    log(`Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
+    log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port}`);
 
     syncState();
 

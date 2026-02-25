@@ -266,7 +266,7 @@ async function handlePing(
 ): Promise<string> {
     const discovered = await discoverCDP(targetDir);
     const cdpStatus = discovered
-        ? `Connected — ${discovered.target.title} on port ${discovered.port}`
+        ? `Connected — ${discovered.target.title} on ${discovered.ip}:${discovered.port}`
         : "Not found — ensure Antigravity is running with debug ports";
 
     return [
