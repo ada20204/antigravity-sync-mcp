@@ -25,10 +25,13 @@ This proposes to build `antigravity-mcp-server` using TypeScript, a CDP-over-Web
 
 ## Decisions
 
-### CDP Port Discovery
-- **Default port**: `9000 ± 3` (range `8997-9003`). This is the default debug port used by Antigravity internally, as confirmed by `auto-accept-agent`'s `cdp-handler.js` (`BASE_PORT = 9000`).
-- **Fallback ports**: `7800-7850`. These are non-default ports that require the user to launch Antigravity with `--remote-debugging-port=7800` (as documented in `OmniAntigravityRemoteChat`).
-- Discovery order: Try `8997-9003` first, then `7800-7850` if nothing found.
+### CDP Port Discovery & WSL Support (The Sidecar Architecture)
+- **Problem**: Port scanning is brittle and slow. In WSL setups, port scanning completely fails because the Windows host (where the UI runs) and WSL (where the MCP server runs) have different network interfaces and 127.0.0.1 loopbacks.
+- **Solution (antigravity-mcp-sidecar)**: We built a dedicated VS Code companion extension (`antigravity-mcp-sidecar`). By running natively inside the Antigravity extension host:
+  1. It handles the auto-accept looping far more efficiently (combining native `vscode.commands` and CDP webview clicks).
+  2. It dynamically reads its own CDP debug port and explicitly detects the Windows host IP (via `/etc/resolv.conf` nameserver) if running in WSL.
+  3. It writes the `[Workspace Path] -> {port, ip}` mapping to a flat JSON file at `~/.antigravity-mcp/registry.json`.
+- **MCP Server Discovery**: The `antigravity-mcp-server` simply reads `registry.json`. It looks up the target directory and instantly gets the exact IP and port to connect to. No scanning required.
 
 ### MCP Transport
 - We'll use `@modelcontextprotocol/sdk` to construct the `Server` object over `StdioServerTransport` (same as gemini-mcp-tool).
@@ -40,11 +43,10 @@ This proposes to build `antigravity-mcp-server` using TypeScript, a CDP-over-Web
   1. **Is generation active?** — Look for the Cancel/Stop button (`[data-tooltip-id="input-send-button-cancel-tooltip"]`).
   2. **Are there blocking confirmation dialogs?** — Look for accept-class buttons using the selectors from `auto-accept-agent` (`.bg-ide-button-background` for Antigravity, text matching `['accept', 'run', 'apply', 'execute', 'confirm', 'allow']`). Auto-click them with banned-command safety checks intact.
 
-### Auto-Accept Pipeline (CDP DOM Track Only)
-- We can **only** use the CDP DOM approach (find buttons in DOM, dispatch click events).
-- We **cannot** use the Extension Command approach (`antigravity.agent.acceptAgentStep` etc.) because our server is a standalone Node process, not a VSCode extension.
-- We port the `isAcceptButton()`, `performClick()`, and `isCommandBanned()` logic from `auto-accept-agent/extension/main_scripts/modules/03_clicking.js`.
-- Default banned command list: `['rm -rf /', 'rm -rf ~', 'rm -rf *', 'format c:', 'dd if=', 'mkfs.', '> /dev/sda', 'chmod -R 777 /']`.
+### Auto-Accept Pipeline (Delegated to Sidecar)
+- The initial plan was to run auto-accept inside the MCP server via CDP DOM clicks.
+- **Revised Run-Time Decision**: To improve reliability and reduce coupling on the MCP server, the entire Auto-Accept pipeline (native commands + CDP webview clicks for Always Allow) was migrated into `antigravity-mcp-sidecar` directly. 
+- The external MCP Server only focuses on prompt injection (`ask-antigravity`), progress polling, and result extraction.
 
 ### Result Parsing Strategy (⚠️ Requires Reverse Engineering)
 - Once generation finishes, a final CDP Evaluate call will extract the text content of the last AI response.

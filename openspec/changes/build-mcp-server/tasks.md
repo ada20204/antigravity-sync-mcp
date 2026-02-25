@@ -1,15 +1,16 @@
-## 1. Project Initialization & Setup
+## 1. Project Initialization & Setup (Completed)
 
-- [x] 1.1 Create `antigravity-mcp-server` directory with `npm init -y` and TS setup (mirror `gemini-mcp-tool` pattern: `"type": "module"`, `"main": "dist/index.js"`)
+- [x] 1.1 Create `antigravity-mcp-server` directory with `npm init -y` and TS setup
 - [x] 1.2 Add dependencies: `@modelcontextprotocol/sdk`, `ws`, `typescript`, `@types/node`, `@types/ws`
-- [x] 1.3 Configure `tsconfig.json` for ES2022 / Node16 module resolution (copy from `gemini-mcp-tool/tsconfig.json`)
-- [x] 1.4 Add npm scripts: `build` (tsc), `start` (node dist/index.js), `dev` (tsc && node dist/index.js)
+- [x] 1.3 Configure `tsconfig.json` for ES2022 / Node16 module resolution
+- [x] 1.4 Add npm scripts: `build` (tsc)
 
-## 2. CDP Discovery & Connection (Port from OmniRemote + Auto-Accept)
+## 2. CDP Discovery & Connection (Registry Architecture - Completed)
 
-- [x] 2.1 Implement `discoverCDP()`: scan `8997-9003` first (Antigravity default), then `7800-7850` (user-configured), then check `ANTIGRAVITY_CDP_PORT` env var override. Return first `workbench.html` target's WebSocket URL.
-- [x] 2.2 Implement `connectCDP(url)`: establish WebSocket, enable `Runtime.enable`, track execution contexts via `Runtime.executionContextCreated/Destroyed` events. Port from `OmniRemote/src/server.js` lines 241-300.
-- [x] 2.3 Implement `evaluateInAllContexts(script)`: iterate all contexts, try `Runtime.evaluate` in each, return first successful result. Port from Omni's pattern used in `captureSnapshot`/`injectMessage`.
+- [x] 2.1 Develop `antigravity-mcp-sidecar` extension to run natively inside Antigravity.
+- [x] 2.2 Sidecar writes `[Workspace Path] -> {port, ip}` mappings (`~/.antigravity-mcp/registry.json`), including WSL host detection via `/etc/resolv.conf`.
+- [x] 2.3 `discoverCDP` in the MCP Server directly reads the registry to bypass port scanning and cross network barriers entirely.
+- [x] 2.4 Implement `connectCDP(url)`: establish WebSocket, tracking execution contexts.
 
 ## 3. DOM Injection & Interaction Scripts
 
