@@ -1,19 +1,17 @@
 /**
- * CDP Discovery & Connection Module
+ * CDP Registry Routing & Connection Module
  *
- * Ported from:
- * - OmniAntigravityRemoteChat/src/server.js (discoverCDP, connectCDP)
- * - auto-accept-agent/extension/main_scripts/cdp-handler.js (port ranges)
+ * Replaces the previous port-scanning logic.
+ * Now reads the CDP port for a specific target directory
+ * from the registry managed by antigravity-mcp-sidecar.
  */
 
-import http from "http";
+import fs from "fs";
+import path from "path";
+import os from "os";
 import WebSocket from "ws";
 
-// --- Port Ranges ---
-// Antigravity's internal default debug port (confirmed by auto-accept-agent)
-const DEFAULT_PORTS = Array.from({ length: 7 }, (_, i) => 8997 + i); // 8997-9003
-// User-configured via --remote-debugging-port (documented in OmniRemoteChat)
-const FALLBACK_PORTS = Array.from({ length: 51 }, (_, i) => 7800 + i); // 7800-7850
+const REGISTRY_FILE = path.join(os.homedir(), ".antigravity-mcp", "registry.json");
 
 // --- Types ---
 
@@ -38,89 +36,80 @@ export interface CDPConnection {
     close: () => void;
 }
 
-// --- Helper: HTTP GET JSON ---
-
-function getJson(url: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const req = http.get(url, { timeout: 1000 }, (res) => {
-            let data = "";
-            res.on("data", (chunk) => (data += chunk));
-            res.on("end", () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-        req.on("error", reject);
-        req.on("timeout", () => {
-            req.destroy();
-            reject(new Error("timeout"));
-        });
-    });
-}
-
-// --- discoverCDP ---
+// --- discoverCDP (Registry-based) ---
 
 /**
- * Scan ports to find an Antigravity workbench CDP target.
- * Priority: ANTIGRAVITY_CDP_PORT env var > default 9000±3 > fallback 7800-7850
+ * Find the CDP WebSocket URL for the given target directory.
+ * Reads from ~/.antigravity-mcp/registry.json instead of port scanning.
  */
-export async function discoverCDP(): Promise<{
+export async function discoverCDP(targetDir?: string): Promise<{
     port: number;
     target: CDPTarget;
 } | null> {
-    // Build port list with priority
-    const ports: number[] = [];
+    // 1. Resolve Target Directory Map from Registry
+    let cdpPort: number | undefined;
 
-    // 1. Environment variable override
+    // Option A: Use environment override if explicitly provided
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
     if (envPort) {
-        const p = parseInt(envPort, 10);
-        if (!isNaN(p)) ports.push(p);
+        cdpPort = parseInt(envPort, 10);
+    } else if (targetDir) {
+        // Option B: Registry lookup
+        try {
+            if (fs.existsSync(REGISTRY_FILE)) {
+                const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
+                const targetAbsPath = path.resolve(targetDir);
+
+                // Exact match
+                if (registry[targetAbsPath]) {
+                    cdpPort = registry[targetAbsPath].port;
+                } else {
+                    // Fallback: Prefix match (e.g. if target is a subfolder)
+                    for (const key of Object.keys(registry)) {
+                        if (targetAbsPath.startsWith(key)) {
+                            cdpPort = registry[key].port;
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.error(`[CDP] Failed to read registry: ${(e as Error).message}`);
+        }
+    } else {
+        // Option C: Legacy fallback (No target/env provided)
+        // Just take the first one in the registry
+        try {
+            if (fs.existsSync(REGISTRY_FILE)) {
+                const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
+                const keys = Object.keys(registry);
+                if (keys.length > 0) {
+                    cdpPort = registry[keys[0]].port;
+                }
+            }
+        } catch { }
     }
 
-    // 2. Default ports (Antigravity internal: 9000±3)
-    ports.push(...DEFAULT_PORTS);
+    if (!cdpPort) {
+        return null;
+    }
 
-    // 3. Fallback ports (user-configured: 7800-7850)
-    ports.push(...FALLBACK_PORTS);
+    // 2. Fetch target from the exact port
+    try {
+        const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+        const list: CDPTarget[] = await response.json() as any;
 
-    // Deduplicate
-    const uniquePorts = [...new Set(ports)];
+        const workbench = list.find((t) =>
+            t.url?.includes("workbench.html") &&
+            t.type === "page" &&
+            !t.url?.includes("jetski")
+        );
 
-    for (const port of uniquePorts) {
-        try {
-            const list: CDPTarget[] = await getJson(
-                `http://127.0.0.1:${port}/json/list`
-            );
-
-            // Filter: only page/webview types with a WebSocket URL
-            const pages = list.filter(
-                (t) =>
-                    t.webSocketDebuggerUrl &&
-                    (t.type === "page" || t.type === "webview") &&
-                    !(t.url || "").startsWith("devtools://") &&
-                    !(t.url || "").startsWith("chrome-devtools://")
-            );
-
-            // Priority 1: workbench.html (main editor window)
-            const workbench = pages.find(
-                (t) =>
-                    t.url?.includes("workbench.html") && !t.url?.includes("jetski")
-            );
-            if (workbench) {
-                return { port, target: workbench };
-            }
-
-            // Priority 2: Any non-internal page as fallback
-            if (pages.length > 0) {
-                return { port, target: pages[0] };
-            }
-        } catch {
-            // Port not responding, continue
+        if (workbench) {
+            return { port: cdpPort, target: workbench };
         }
+    } catch (e) {
+        console.error(`[CDP] Port ${cdpPort} from registry is unreachable.`);
     }
 
     return null;
@@ -128,11 +117,6 @@ export async function discoverCDP(): Promise<{
 
 // --- connectCDP ---
 
-/**
- * Establish a CDP WebSocket connection.
- * Enables Runtime domain and tracks execution contexts.
- * Ported from OmniRemoteChat server.js lines 241-300.
- */
 export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
     const ws = new WebSocket(wsUrl);
 
@@ -153,12 +137,10 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
     const contexts: ExecutionContext[] = [];
     const CDP_CALL_TIMEOUT = 30000;
 
-    // Single centralized message handler
     ws.on("message", (msg) => {
         try {
             const data = JSON.parse(msg.toString());
 
-            // Handle CDP method responses
             if (data.id !== undefined && pendingCalls.has(data.id)) {
                 const pending = pendingCalls.get(data.id)!;
                 clearTimeout(pending.timeoutId);
@@ -168,7 +150,6 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
                 else pending.resolve(data.result);
             }
 
-            // Handle execution context events
             if (data.method === "Runtime.executionContextCreated") {
                 contexts.push(data.params.context);
             } else if (data.method === "Runtime.executionContextDestroyed") {
@@ -178,9 +159,7 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
             } else if (data.method === "Runtime.executionContextsCleared") {
                 contexts.length = 0;
             }
-        } catch {
-            // Ignore parse errors
-        }
+        } catch { }
     });
 
     const call = (
@@ -192,9 +171,7 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
             const timeoutId = setTimeout(() => {
                 if (pendingCalls.has(id)) {
                     pendingCalls.delete(id);
-                    reject(
-                        new Error(`CDP call ${method} timed out after ${CDP_CALL_TIMEOUT}ms`)
-                    );
+                    reject(new Error(`CDP call ${method} timed out`));
                 }
             }, CDP_CALL_TIMEOUT);
 
@@ -202,13 +179,10 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
             ws.send(JSON.stringify({ id, method, params }));
         });
 
-    // Enable Runtime to discover contexts
     await call("Runtime.enable", {});
-    // Give contexts time to populate
     await new Promise((r) => setTimeout(r, 1000));
 
     const close = () => {
-        // Clean up pending calls
         for (const [, pending] of pendingCalls) {
             clearTimeout(pending.timeoutId);
             pending.reject(new Error("Connection closed"));
@@ -220,13 +194,6 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
     return { ws, call, contexts, close };
 }
 
-// --- evaluateInAllContexts ---
-
-/**
- * Try evaluating a script in every known execution context.
- * Returns the first successful non-error result.
- * Ported from Omni's captureSnapshot / injectMessage pattern.
- */
 export async function evaluateInAllContexts(
     cdp: CDPConnection,
     expression: string,
@@ -248,10 +215,7 @@ export async function evaluateInAllContexts(
                 if (val && typeof val === "object" && val.error) continue;
                 return val;
             }
-        } catch {
-            // Context may be dead, try next
-        }
+        } catch { }
     }
-
     return null;
 }

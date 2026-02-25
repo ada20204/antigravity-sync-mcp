@@ -125,17 +125,18 @@ async function sendProgressNotification(
 
 async function handleAskAntigravity(
     prompt: string,
+    targetDir?: string,
     progressToken?: string | number
 ): Promise<string> {
     // 1. Discover CDP
-    log("Discovering CDP target...");
+    log("Discovering CDP target for " + (targetDir || "default registry entry") + "...");
     await sendProgressNotification(progressToken, 0, "🔍 Discovering Antigravity...");
 
-    const discovered = await discoverCDP();
+    const discovered = await discoverCDP(targetDir);
     if (!discovered) {
         throw new Error(
-            "CDP not found. Ensure Antigravity is running with debug ports enabled. " +
-            "Default: port 9000. Or set ANTIGRAVITY_CDP_PORT environment variable."
+            "CDP not found for target dir. Ensure Antigravity is running with debug ports enabled, " +
+            "and the sidecar extension has registered the workspace."
         );
     }
     log(`Found target: ${discovered.target.title} on port ${discovered.port}`);
@@ -191,17 +192,6 @@ async function handleAskAntigravity(
             // Poll completion status
             const status = await pollCompletionStatus(cdp);
 
-            // Auto-accept any blocking dialogs
-            const acceptResult = await autoAcceptPoll(cdp, DEFAULT_BANNED_COMMANDS);
-            if (acceptResult.clicked > 0) {
-                totalAccepted += acceptResult.clicked;
-                log(`Auto-accepted ${acceptResult.clicked} action(s) (total: ${totalAccepted})`);
-            }
-            if (acceptResult.blocked > 0) {
-                totalBlocked += acceptResult.blocked;
-                log(`Blocked ${acceptResult.blocked} dangerous command(s) (total: ${totalBlocked})`);
-            }
-
             // Check if generation completed
             if (!status.isGenerating) {
                 // Wait a bit more to ensure it's truly done (not just a brief pause)
@@ -217,12 +207,10 @@ async function handleAskAntigravity(
             if (elapsed % KEEPALIVE_INTERVAL < POLL_INTERVAL) {
                 progressCount = Math.min(progressCount + 5, 90);
                 const msg = progressMessages[msgIdx % progressMessages.length];
-                const detail =
-                    totalAccepted > 0 ? ` (auto-accepted ${totalAccepted} actions)` : "";
                 await sendProgressNotification(
                     progressToken,
                     progressCount,
-                    `${msg}${detail}`
+                    msg
                 );
                 msgIdx++;
             }
@@ -247,22 +235,17 @@ async function handleAskAntigravity(
             "✅ Task complete"
         );
 
-        const summary =
-            totalAccepted > 0 || totalBlocked > 0
-                ? `\n\n[MCP Bridge: Auto-accepted ${totalAccepted} action(s), blocked ${totalBlocked} dangerous command(s)]`
-                : "";
-
-        return response + summary;
+        return response;
     } finally {
         cdp.close();
         log("CDP connection closed.");
     }
 }
 
-async function handleStop(): Promise<string> {
-    const discovered = await discoverCDP();
+async function handleStop(targetDir?: string): Promise<string> {
+    const discovered = await discoverCDP(targetDir);
     if (!discovered) {
-        return "No Antigravity CDP target found.";
+        return "No Antigravity CDP target found for target directory.";
     }
 
     const cdp = await connectCDP(discovered.target.webSocketDebuggerUrl);
@@ -278,9 +261,10 @@ async function handleStop(): Promise<string> {
 }
 
 async function handlePing(
-    message?: string
+    message?: string,
+    targetDir?: string
 ): Promise<string> {
-    const discovered = await discoverCDP();
+    const discovered = await discoverCDP(targetDir);
     const cdpStatus = discovered
         ? `Connected — ${discovered.target.title} on port ${discovered.port}`
         : "Not found — ensure Antigravity is running with debug ports";
@@ -293,6 +277,10 @@ async function handlePing(
         .filter(Boolean)
         .join("\n");
 }
+
+// --- Parse CLI Args ---
+const argvTargetDirIndex = process.argv.indexOf("--target-dir");
+const globalTargetDir = argvTargetDirIndex !== -1 ? process.argv[argvTargetDirIndex + 1] : undefined;
 
 // --- MCP Request Handlers ---
 
@@ -320,15 +308,15 @@ server.setRequestHandler(
                     if (!args.prompt || typeof args.prompt !== "string") {
                         throw new Error("Missing required argument: prompt");
                     }
-                    resultText = await handleAskAntigravity(args.prompt, progressToken);
+                    resultText = await handleAskAntigravity(args.prompt, globalTargetDir, progressToken);
                     break;
 
                 case "antigravity-stop":
-                    resultText = await handleStop();
+                    resultText = await handleStop(globalTargetDir);
                     break;
 
                 case "ping":
-                    resultText = await handlePing(args.message);
+                    resultText = await handlePing(args.message, globalTargetDir);
                     break;
 
                 default:

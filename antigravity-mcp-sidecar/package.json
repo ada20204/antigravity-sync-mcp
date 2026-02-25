@@ -1,0 +1,28 @@
+{
+    "name": "antigravity-mcp-sidecar",
+    "displayName": "Antigravity MCP Sidecar",
+    "description": "Registers currently open workspaces for proper MCP Server routing.",
+    "version": "0.1.0",
+    "publisher": "antigravity",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./src/extension.js",
+    "scripts": {
+        "vscode:prepublish": "npm run package",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "package": "vsce package"
+    },
+    "dependencies": {
+        "node-fetch": "^2.6.12"
+    },
+    "devDependencies": {
+        "@types/node": "18.x",
+        "@types/vscode": "^1.80.0",
+        "typescript": "^5.1.3"
+    }
+}
