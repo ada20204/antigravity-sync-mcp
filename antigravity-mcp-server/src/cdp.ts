@@ -11,7 +11,11 @@ import path from "path";
 import os from "os";
 import WebSocket from "ws";
 
-const REGISTRY_FILE = path.join(os.homedir(), ".antigravity-mcp", "registry.json");
+const REGISTRY_DIR = ".antigravity-mcp";
+const REGISTRY_FILE_NAME = "registry.json";
+const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
+const WSL_ROUTE_FILE = "/proc/net/route";
+const WSL_RESOLV_CONF = "/etc/resolv.conf";
 
 // --- Types ---
 
@@ -36,6 +40,173 @@ export interface CDPConnection {
     close: () => void;
 }
 
+interface RegistryEntry {
+    port?: number;
+    ip?: string;
+}
+
+function isWslRuntime(): boolean {
+    return os.release().toLowerCase().includes("microsoft");
+}
+
+function isLocalhost(ip?: string): boolean {
+    if (!ip) return false;
+    const lower = ip.toLowerCase();
+    return lower === "127.0.0.1" || lower === "localhost" || lower === "::1";
+}
+
+function toWslPathFromWindowsPath(inputPath: string): string | null {
+    const normalized = inputPath.replace(/\\/g, "/");
+    const match = normalized.match(/^([A-Za-z]):\/(.*)$/);
+    if (!match) return null;
+    const drive = match[1].toLowerCase();
+    const rest = match[2];
+    return path.posix.normalize(`/mnt/${drive}/${rest}`);
+}
+
+export function normalizeRegistryPath(rawPath: string): string {
+    const trimmed = rawPath.trim();
+    const windowsAsWsl = toWslPathFromWindowsPath(trimmed);
+    if (windowsAsWsl) {
+        return windowsAsWsl;
+    }
+
+    let normalized = trimmed.replace(/\\/g, "/");
+    if (!normalized.startsWith("/")) {
+        normalized = `/${normalized}`;
+    }
+    return path.posix.normalize(normalized);
+}
+
+function dedupe(items: Array<string | undefined | null>): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of items) {
+        if (!item) continue;
+        const value = item.trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        out.push(value);
+    }
+    return out;
+}
+
+function getRegistryFileCandidates(): string[] {
+    const candidates: Array<string | undefined> = [LOCAL_REGISTRY_FILE];
+
+    if (!isWslRuntime()) {
+        return dedupe(candidates);
+    }
+
+    if (process.env.USERPROFILE) {
+        const converted = toWslPathFromWindowsPath(process.env.USERPROFILE);
+        if (converted) {
+            candidates.push(path.posix.join(converted, REGISTRY_DIR, REGISTRY_FILE_NAME));
+        }
+    }
+
+    if (process.env.HOMEDRIVE && process.env.HOMEPATH) {
+        const converted = toWslPathFromWindowsPath(
+            `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`
+        );
+        if (converted) {
+            candidates.push(path.posix.join(converted, REGISTRY_DIR, REGISTRY_FILE_NAME));
+        }
+    }
+
+    // Fallback: probe all Windows user profiles under /mnt/c/Users.
+    const usersDir = "/mnt/c/Users";
+    try {
+        if (fs.existsSync(usersDir)) {
+            for (const entry of fs.readdirSync(usersDir, { withFileTypes: true })) {
+                if (!entry.isDirectory()) continue;
+                candidates.push(
+                    path.posix.join(usersDir, entry.name, REGISTRY_DIR, REGISTRY_FILE_NAME)
+                );
+            }
+        }
+    } catch {
+        // Ignore candidate expansion failures.
+    }
+
+    return dedupe(candidates);
+}
+
+function readRegistryObject(): Record<string, RegistryEntry> | null {
+    for (const filePath of getRegistryFileCandidates()) {
+        try {
+            if (!fs.existsSync(filePath)) continue;
+            const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            if (parsed && typeof parsed === "object") {
+                return parsed as Record<string, RegistryEntry>;
+            }
+        } catch (e) {
+            console.error(`[CDP] Failed to read registry '${filePath}': ${(e as Error).message}`);
+        }
+    }
+    return null;
+}
+
+export function inferWslGatewayFromRouteTable(routeTable: string): string | null {
+    const lines = routeTable.split(/\r?\n/).filter(Boolean);
+    for (const line of lines.slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 3) continue;
+        const destination = parts[1];
+        const gatewayHex = parts[2];
+        if (destination !== "00000000" || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
+
+        const b1 = parseInt(gatewayHex.slice(6, 8), 16);
+        const b2 = parseInt(gatewayHex.slice(4, 6), 16);
+        const b3 = parseInt(gatewayHex.slice(2, 4), 16);
+        const b4 = parseInt(gatewayHex.slice(0, 2), 16);
+        return `${b1}.${b2}.${b3}.${b4}`;
+    }
+    return null;
+}
+
+function readWslGatewayIp(): string | undefined {
+    if (!isWslRuntime()) return undefined;
+    try {
+        if (!fs.existsSync(WSL_ROUTE_FILE)) return undefined;
+        const routeTable = fs.readFileSync(WSL_ROUTE_FILE, "utf-8");
+        return inferWslGatewayFromRouteTable(routeTable) || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function readNameserverIp(): string | undefined {
+    try {
+        if (!fs.existsSync(WSL_RESOLV_CONF)) return undefined;
+        const content = fs.readFileSync(WSL_RESOLV_CONF, "utf-8");
+        const match = content.match(/^nameserver\s+([0-9.]+)\s*$/m);
+        return match?.[1];
+    } catch {
+        return undefined;
+    }
+}
+
+export function getCandidateCdpIps(params: {
+    registryIp?: string;
+    isWsl: boolean;
+    nameserverIp?: string;
+    gatewayIp?: string;
+}): string[] {
+    const { registryIp, isWsl, nameserverIp, gatewayIp } = params;
+    const ip = registryIp?.trim();
+
+    if (isWsl && (!ip || isLocalhost(ip))) {
+        return dedupe([gatewayIp, nameserverIp, ip, "127.0.0.1", "localhost"]);
+    }
+
+    if (isWsl) {
+        return dedupe([ip, gatewayIp, nameserverIp, "127.0.0.1", "localhost"]);
+    }
+
+    return dedupe([ip, "127.0.0.1"]);
+}
+
 // --- discoverCDP (Registry-based) ---
 
 /**
@@ -47,76 +218,90 @@ export async function discoverCDP(targetDir?: string): Promise<{
     ip: string;
     target: CDPTarget;
 } | null> {
-    // 1. Resolve Target Directory Map from Registry
-    let cdpPort: number | undefined;
-    let cdpIp: string = '127.0.0.1';
+    // 1. Resolve target mapping from env/registry
+    const isWsl = isWslRuntime();
+    const nameserverIp = readNameserverIp();
+    const gatewayIp = readWslGatewayIp();
 
-    // Option A: Use environment override if explicitly provided
+    let cdpPort: number | undefined;
+    let cdpIp: string | undefined;
+
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
     if (envPort) {
         cdpPort = parseInt(envPort, 10);
-    } else if (targetDir) {
-        // Option B: Registry lookup
-        try {
-            if (fs.existsSync(REGISTRY_FILE)) {
-                const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
-                const targetAbsPath = path.resolve(targetDir);
+    } else {
+        const registry = readRegistryObject();
+        if (registry) {
+            const entries = Object.entries(registry);
+            const targetAbsPath = targetDir ? normalizeRegistryPath(path.resolve(targetDir)) : undefined;
 
-                // Exact match
-                if (registry[targetAbsPath]) {
-                    cdpPort = registry[targetAbsPath].port;
-                    if (registry[targetAbsPath].ip) cdpIp = registry[targetAbsPath].ip;
-                } else {
-                    // Fallback: Prefix match (e.g. if target is a subfolder)
-                    for (const key of Object.keys(registry)) {
-                        if (targetAbsPath.startsWith(key)) {
-                            cdpPort = registry[key].port;
-                            if (registry[key].ip) cdpIp = registry[key].ip;
-                            break;
-                        }
+            let matched: RegistryEntry | undefined;
+            if (targetAbsPath) {
+                // Exact match first
+                for (const [rawKey, entry] of entries) {
+                    if (normalizeRegistryPath(rawKey) === targetAbsPath) {
+                        matched = entry;
+                        break;
                     }
                 }
+
+                // Longest prefix match for subfolders
+                if (!matched) {
+                    let bestPrefixLength = -1;
+                    for (const [rawKey, entry] of entries) {
+                        const normalizedKey = normalizeRegistryPath(rawKey);
+                        if (!targetAbsPath.startsWith(normalizedKey)) continue;
+                        if (normalizedKey.length <= bestPrefixLength) continue;
+                        bestPrefixLength = normalizedKey.length;
+                        matched = entry;
+                    }
+                }
+            } else if (entries.length > 0) {
+                matched = entries[0][1];
             }
-        } catch (e) {
-            console.error(`[CDP] Failed to read registry: ${(e as Error).message}`);
-        }
-    } else {
-        // Option C: Legacy fallback (No target/env provided)
-        // Just take the first one in the registry
-        try {
-            if (fs.existsSync(REGISTRY_FILE)) {
-                const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
-                const keys = Object.keys(registry);
-                if (keys.length > 0) {
-                    cdpPort = registry[keys[0]].port;
-                    if (registry[keys[0]].ip) cdpIp = registry[keys[0]].ip;
+
+            if (matched?.port && Number.isFinite(matched.port)) {
+                cdpPort = matched.port;
+                if (matched.ip) {
+                    cdpIp = matched.ip;
                 }
             }
-        } catch { }
+        }
     }
 
     if (!cdpPort) {
         return null;
     }
 
-    // 2. Fetch target from the exact port and IP
-    try {
-        const response = await fetch(`http://${cdpIp}:${cdpPort}/json/list`);
-        const list: CDPTarget[] = await response.json() as any;
+    // 2. Probe candidate IPs until one yields a valid workbench target
+    const candidateIps = getCandidateCdpIps({
+        registryIp: cdpIp,
+        isWsl,
+        nameserverIp,
+        gatewayIp,
+    });
 
-        const workbench = list.find((t) =>
-            t.url?.includes("workbench.html") &&
-            t.type === "page" &&
-            !t.url?.includes("jetski")
-        );
+    for (const ip of candidateIps) {
+        try {
+            const response = await fetch(`http://${ip}:${cdpPort}/json/list`);
+            const list: CDPTarget[] = await response.json() as any;
+            const workbench = list.find((t) =>
+                t.url?.includes("workbench.html") &&
+                t.type === "page" &&
+                !t.url?.includes("jetski")
+            );
 
-        if (workbench) {
-            return { port: cdpPort, ip: cdpIp, target: workbench };
+            if (workbench) {
+                return { port: cdpPort, ip, target: workbench };
+            }
+        } catch {
+            // Try next candidate.
         }
-    } catch (e) {
-        console.error(`[CDP] Target ${cdpIp}:${cdpPort} from registry is unreachable.`);
     }
 
+    console.error(
+        `[CDP] Target ${candidateIps.join(",")}:${cdpPort} from registry is unreachable.`
+    );
     return null;
 }
 

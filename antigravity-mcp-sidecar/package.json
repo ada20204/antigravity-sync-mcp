@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -10,6 +10,9 @@
     },
     "activationEvents": [
         "onStartupFinished"
+    ],
+    "extensionKind": [
+        "ui"
     ],
     "main": "./src/extension.js",
     "contributes": {

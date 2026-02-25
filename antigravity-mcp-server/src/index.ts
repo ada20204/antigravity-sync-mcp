@@ -226,7 +226,7 @@ async function handleAskAntigravity(
             95,
             "📋 Extracting Antigravity's response..."
         );
-        const response = await extractLatestResponse(cdp);
+        const response = await extractLatestResponse(cdp, prompt);
 
         // Final progress
         await sendProgressNotification(
@@ -343,6 +343,8 @@ server.setRequestHandler(
 
 async function main() {
     log("Initializing antigravity-mcp-server...");
+    // Keep stdio MCP server alive even when stdin starts paused in some Node runtimes.
+    process.stdin.resume();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     log("antigravity-mcp-server listening on stdio");

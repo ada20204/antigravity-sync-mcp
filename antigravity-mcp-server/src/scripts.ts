@@ -11,6 +11,58 @@
 
 import { CDPConnection, evaluateInAllContexts } from "./cdp.js";
 
+const COMPOSER_MARKER = "Ask anything, @ to mention, / for workflows";
+
+function isNoiseSegment(segment: string): boolean {
+    const s = segment.trim();
+    if (!s) return true;
+    if (s.includes(COMPOSER_MARKER)) return true;
+    if (/^Good\s*$/i.test(s) || /^Bad\s*$/i.test(s) || /^Good\s+Bad\s*$/i.test(s)) return true;
+    if (/^Thought for\b/i.test(s)) return true;
+    if (/^Fast\b[\s\S]*\bSend$/i.test(s)) return true;
+    if (/^```$/.test(s)) return true;
+    return false;
+}
+
+function pickLastAnswerSegment(text: string): string {
+    const segments = text
+        .split(/\n{2,}/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    for (let i = segments.length - 1; i >= 0; i--) {
+        if (!isNoiseSegment(segments[i])) return segments[i];
+    }
+    return text.trim();
+}
+
+export function cleanExtractedResponseText(rawText: string, prompt?: string): string {
+    let text = (rawText || "").trim();
+    if (!text) return "";
+
+    // Drop trailing composer panel text if present.
+    const composerIdx = text.lastIndexOf(COMPOSER_MARKER);
+    if (composerIdx !== -1) {
+        text = text.slice(0, composerIdx).trim();
+    }
+
+    // Remove trailing feedback controls if captured with the response.
+    text = text
+        .replace(/\n+\s*Good\s*\n+\s*Bad\s*$/i, "")
+        .replace(/\n+\s*Good\s+Bad\s*$/i, "")
+        .trim();
+
+    // Keep only the latest turn when the original prompt is visible in transcript.
+    if (prompt) {
+        const promptIdx = text.lastIndexOf(prompt);
+        if (promptIdx !== -1) {
+            text = text.slice(promptIdx + prompt.length).trim();
+        }
+    }
+
+    return pickLastAnswerSegment(text);
+}
+
 // --- injectMessage ---
 
 /**
@@ -110,9 +162,20 @@ export async function pollCompletionStatus(
  * that appears to be from the assistant (not user-authored).
  */
 export async function extractLatestResponse(
-    cdp: CDPConnection
+    cdp: CDPConnection,
+    prompt?: string
 ): Promise<string> {
     const expression = `(() => {
+    const COMPOSER_MARKER = "Ask anything, @ to mention, / for workflows";
+    const isComposerText = (text) => {
+      if (!text) return true;
+      const trimmed = text.trim();
+      if (!trimmed) return true;
+      if (trimmed.includes(COMPOSER_MARKER)) return true;
+      if (/^Fast\\s+[\\s\\S]*\\s+Send$/.test(trimmed)) return true;
+      return false;
+    };
+
     // Find the main chat container
     const container = document.getElementById('conversation')
       || document.getElementById('chat')
@@ -123,26 +186,24 @@ export async function extractLatestResponse(
     const messages = container.querySelectorAll('[data-role="assistant"], [data-message-author="assistant"]');
     if (messages.length > 0) {
       const last = messages[messages.length - 1];
-      return { text: last.innerText || last.textContent || '' };
+      const text = last.innerText || last.textContent || '';
+      if (!isComposerText(text)) return { text };
     }
 
-    // Strategy 2: Look for all top-level message-like divs, take the last one
-    // Antigravity typically alternates user/assistant messages
+    // Strategy 2: Look for all top-level message-like divs, skipping composer-like blocks.
     const allBlocks = container.querySelectorAll(':scope > div > div, :scope > div');
-    if (allBlocks.length > 0) {
-      const last = allBlocks[allBlocks.length - 1];
+    for (let i = allBlocks.length - 1; i >= 0; i--) {
+      const last = allBlocks[i];
       const text = last.innerText || last.textContent || '';
-      // Only return if it has substantial content (not just a toolbar)
-      if (text.length > 20) {
+      if (text.length > 20 && !isComposerText(text)) {
         return { text };
       }
     }
 
-    // Strategy 3: Grab everything and return the tail portion
+    // Strategy 3: Grab everything (for post-processing on Node side).
     const fullText = container.innerText || '';
     if (fullText.length > 0) {
-      // Return last 5000 chars as a fallback
-      return { text: fullText.slice(-5000), partial: true };
+      return { text: fullText.slice(-12000), partial: true };
     }
 
     return { error: 'no_response_found' };
@@ -158,7 +219,10 @@ export async function extractLatestResponse(
         return `Antigravity completed the task but response extraction failed (${result.error}). Check the Antigravity window directly.`;
     }
 
-    return result.text || "";
+    const cleaned = cleanExtractedResponseText(result.text || "", prompt);
+    if (cleaned) return cleaned;
+
+    return "Antigravity completed the task but response text could not be extracted. Check the Antigravity window directly.";
 }
 
 // --- stopGeneration ---
