@@ -40,9 +40,51 @@ export interface CDPConnection {
     close: () => void;
 }
 
-interface RegistryEntry {
+export interface RegistryQuotaModel {
+    label?: string;
+    modelId?: string;
+    remainingFraction?: number;
+    remainingPercentage?: number;
+    isExhausted?: boolean;
+    resetTime?: string;
+    resetInMs?: number;
+}
+
+export interface RegistryQuotaSnapshot {
+    timestamp?: number;
+    source?: string;
+    promptCredits?: {
+        available?: number;
+        monthly?: number;
+        usedPercentage?: number;
+        remainingPercentage?: number;
+    };
+    models?: RegistryQuotaModel[];
+    lastError?: string;
+}
+
+export interface RegistryLsEndpoint {
+    port?: number;
+    csrfToken?: string;
+    lastDetectedAt?: number;
+    sourceHost?: string;
+}
+
+export interface RegistryEntry {
     port?: number;
     ip?: string;
+    pid?: number;
+    lastActive?: number;
+    ls?: RegistryLsEndpoint;
+    quota?: RegistryQuotaSnapshot;
+    quotaError?: string;
+}
+
+export interface DiscoveredCDP {
+    port: number;
+    ip: string;
+    target: CDPTarget;
+    registry?: RegistryEntry;
 }
 
 function isWslRuntime(): boolean {
@@ -217,6 +259,7 @@ export async function discoverCDP(targetDir?: string): Promise<{
     port: number;
     ip: string;
     target: CDPTarget;
+    registry?: RegistryEntry;
 } | null> {
     // 1. Resolve target mapping from env/registry
     const isWsl = isWslRuntime();
@@ -225,6 +268,7 @@ export async function discoverCDP(targetDir?: string): Promise<{
 
     let cdpPort: number | undefined;
     let cdpIp: string | undefined;
+    let matchedRegistryEntry: RegistryEntry | undefined;
 
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
     if (envPort) {
@@ -262,6 +306,7 @@ export async function discoverCDP(targetDir?: string): Promise<{
 
             if (matched?.port && Number.isFinite(matched.port)) {
                 cdpPort = matched.port;
+                matchedRegistryEntry = matched;
                 if (matched.ip) {
                     cdpIp = matched.ip;
                 }
@@ -292,7 +337,7 @@ export async function discoverCDP(targetDir?: string): Promise<{
             );
 
             if (workbench) {
-                return { port: cdpPort, ip, target: workbench };
+                return { port: cdpPort, ip, target: workbench, registry: matchedRegistryEntry };
             }
         } catch {
             // Try next candidate.

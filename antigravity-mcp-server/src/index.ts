@@ -25,6 +25,7 @@ import {
 
 import { discoverCDP, connectCDP, type CDPConnection } from "./cdp.js";
 import {
+    applyModeAndModelSelection,
     injectMessage,
     pollCompletionStatus,
     extractLatestResponse,
@@ -41,6 +42,8 @@ import {
     withRetry,
     withTimeout,
 } from "./task-runtime.js";
+import { selectModelWithQuotaPolicy } from "./quota-policy.js";
+import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
 
 // --- Constants ---
 
@@ -107,6 +110,14 @@ const TOOLS: Tool[] = [
                     type: "string",
                     description: "The task or question to send to Antigravity",
                 },
+                mode: {
+                    type: "string",
+                    description: "Optional routing mode hint: fast or plan",
+                },
+                model: {
+                    type: "string",
+                    description: "Optional preferred model hint (for example: gemini-3-flash, gemini-3-pro-high, opus-4.6)",
+                },
             },
             required: ["prompt"],
         },
@@ -157,10 +168,11 @@ async function sendProgressNotification(
 // --- Tool Handlers ---
 
 async function handleAskAntigravity(
-    prompt: string,
+    params: { prompt: string; mode?: string; model?: string },
     targetDir?: string,
     progressToken?: string | number
 ): Promise<string> {
+    const prompt = params.prompt;
     if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
         throw new Error(
             `Another ask-antigravity task is running (id=${activeAskTask.id}, status=${activeAskTask.status}). ` +
@@ -184,6 +196,7 @@ async function handleAskAntigravity(
     };
 
     let cdp: CDPConnection | null = null;
+    let waitEngine: WaitStateEngine | null = null;
 
     try {
         // 1. Discover CDP
@@ -242,7 +255,27 @@ async function handleAskAntigravity(
             throw new Error("CDP connection was not established");
         }
 
-        // 3. Inject message
+        // 3. Apply mode/model routing (policy + best-effort UI selection).
+        const selection = selectModelWithQuotaPolicy({
+            requestedModel: params.model,
+            mode: params.mode,
+            quota: discovered.registry?.quota,
+        });
+        log(
+            `[${task.id}] Model policy => selected=${selection.selectedModel}, mode=${selection.mode}, ` +
+            `staleQuota=${selection.staleQuota}, skipped=${selection.skipped.length}`
+        );
+
+        const selectionResult = await applyModeAndModelSelection(liveCdp, {
+            mode: selection.mode,
+            model: selection.selectedModel,
+        });
+        log(
+            `[${task.id}] UI selection => modeApplied=${selectionResult.modeApplied}, ` +
+            `modelApplied=${selectionResult.modelApplied} (${selectionResult.details.join(",") || "no-details"})`
+        );
+
+        // 4. Inject message
         setStatus("injecting");
         log(`[${task.id}] Injecting prompt (${prompt.length} chars)...`);
         await sendProgressNotification(
@@ -275,7 +308,18 @@ async function handleAskAntigravity(
         );
         log(`[${task.id}] Message injected via ${injectResult.method}`);
 
-        // 4. Polling loop
+        // 5. Initialize LS-first wait engine.
+        waitEngine = await createWaitStateEngine({
+            discovered,
+            log: (message) => log(`[${task.id}] ${message}`),
+        });
+        if (waitEngine.cascadeId) {
+            log(`[${task.id}] Active cascade resolved: ${waitEngine.cascadeId}`);
+        } else {
+            log(`[${task.id}] No cascadeId resolved; DOM wait fallback will be used.`);
+        }
+
+        // 6. Polling loop
         setStatus("running");
         log(`[${task.id}] Entering polling loop...`);
         const startTime = Date.now();
@@ -299,18 +343,27 @@ async function handleAskAntigravity(
                 break;
             }
 
-            // Poll completion status
-            const status = await pollCompletionStatus(liveCdp);
+            // LS-first completion checks.
+            const lsCheck = waitEngine ? await waitEngine.check(elapsed) : { completed: false, lsUsable: false };
+            if (lsCheck.completed) {
+                log(`[${task.id}] Generation complete via ${lsCheck.source}.`);
+                break;
+            }
 
-            // Check if generation completed
-            if (!status.isGenerating) {
-                // Wait a bit more to ensure it's truly done (not just a brief pause)
-                await new Promise((r) => setTimeout(r, 2000));
-                const recheck = await pollCompletionStatus(liveCdp);
-                if (!recheck.isGenerating) {
-                    log(`[${task.id}] Generation complete.`);
-                    break;
+            // DOM fallback when LS sources are unavailable/unreliable.
+            if (!lsCheck.lsUsable) {
+                const status = await pollCompletionStatus(liveCdp);
+                if (!status.isGenerating) {
+                    // Wait a bit more to ensure it's truly done (not just a brief pause)
+                    await new Promise((r) => setTimeout(r, 2000));
+                    const recheck = await pollCompletionStatus(liveCdp);
+                    if (!recheck.isGenerating) {
+                        log(`[${task.id}] Generation complete via DOM fallback.`);
+                        break;
+                    }
                 }
+            } else if (lsCheck.note && elapsed % KEEPALIVE_INTERVAL < POLL_INTERVAL) {
+                log(`[${task.id}] LS wait note: ${lsCheck.note}`);
             }
 
             // Progress keepalive (every ~25 seconds)
@@ -329,7 +382,7 @@ async function handleAskAntigravity(
             await new Promise((r) => setTimeout(r, POLL_INTERVAL));
         }
 
-        // 5. Extract response
+        // 7. Extract response
         setStatus("extracting");
         log(`[${task.id}] Extracting response...`);
         await sendProgressNotification(
@@ -356,6 +409,7 @@ async function handleAskAntigravity(
         setStatus("failed", toErrorMessage(error));
         throw error;
     } finally {
+        waitEngine?.close();
         if (cdp) {
             cdp.close();
             log(`[${task.id}] CDP connection closed.`);
@@ -433,7 +487,15 @@ server.setRequestHandler(
                     if (!args.prompt || typeof args.prompt !== "string") {
                         throw new Error("Missing required argument: prompt");
                     }
-                    resultText = await handleAskAntigravity(args.prompt, globalTargetDir, progressToken);
+                    resultText = await handleAskAntigravity(
+                        {
+                            prompt: args.prompt,
+                            mode: typeof args.mode === "string" ? args.mode : undefined,
+                            model: typeof args.model === "string" ? args.model : undefined,
+                        },
+                        globalTargetDir,
+                        progressToken
+                    );
                     break;
 
                 case "antigravity-stop":

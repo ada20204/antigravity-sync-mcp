@@ -6,8 +6,8 @@ MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a loca
 
 1. **Node.js 18+**
 2. **Antigravity** running with debug port enabled:
-   - Default: Antigravity typically exposes CDP on port `9000` (auto-detected)
-   - Manual: `antigravity . --remote-debugging-port=7800`
+   - `--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0`
+3. **antigravity-mcp-sidecar** extension enabled in your active workspace (writes CDP/LS/quota registry)
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ Add to your MCP config:
 
 | Tool | Description |
 |------|-------------|
-| `ask-antigravity` | Send a prompt to Antigravity and wait for the AI response. Auto-accepts file changes and safe commands. |
+| `ask-antigravity` | Send a prompt to Antigravity and wait for the AI response. Supports optional `mode` (`fast`/`plan`) and `model`; server applies quota-aware model fallback. |
 | `antigravity-stop` | Stop the current AI generation in Antigravity. |
 | `ping` | Test connectivity and check CDP availability. |
 
@@ -55,13 +55,19 @@ Add to your MCP config:
 |---------------------|---------|-------------|
 | `ANTIGRAVITY_CDP_PORT` | auto-detect | Override CDP port (skips port scanning) |
 
+`ask-antigravity` input schema:
+- `prompt` (required): prompt text
+- `mode` (optional): `fast` or `plan`
+- `model` (optional): preferred model (for example `gemini-3-flash`, `gemini-3-pro-high`, `opus-4.6`)
+
 ## How It Works
 
 1. External agent calls `ask-antigravity` with a prompt
-2. Server discovers Antigravity via CDP port scan (9000±3, then 7800-7850)
-3. Connects via WebSocket and injects the prompt into the chat input
-4. Polls for completion while auto-accepting confirmation dialogs
-5. Extracts the final AI response and returns it to the calling agent
+2. Server discovers target workspace via sidecar registry (`~/.antigravity-mcp/registry.json`)
+3. Server applies mode/model policy with quota-aware fallback (using registry quota snapshot when fresh)
+4. Connects via WebSocket and injects the prompt through CDP (send path unchanged)
+5. Waits for completion with LS-first strategy: reactive stream -> cascade trajectory -> DOM fallback
+6. Extracts the final answer segment and returns it to the calling agent
 
 ## Safety
 

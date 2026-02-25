@@ -63,6 +63,127 @@ export function cleanExtractedResponseText(rawText: string, prompt?: string): st
     return pickLastAnswerSegment(text);
 }
 
+const MODEL_UI_LABELS: Record<string, string[]> = {
+    "gemini-3-flash": ["Gemini 3 Flash", "Gemini Flash", "Flash"],
+    "gemini-3-pro-low": ["Gemini 3 Pro (Low)", "Gemini Pro Low", "Pro (Low)"],
+    "gemini-3-pro-high": ["Gemini 3 Pro", "Gemini Pro", "Pro (High)", "Pro"],
+    "opus-4.5": ["Claude Opus 4.5", "Opus 4.5", "Claude 4.5"],
+    "opus-4.6": ["Claude Opus 4.6", "Opus 4.6", "Claude Opus"],
+};
+
+function toModeKeyword(mode?: string): string | undefined {
+    const normalized = (mode || "").trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized === "plan" || normalized === "planning" || normalized === "deep") {
+        return "plan";
+    }
+    return "fast";
+}
+
+function modelCandidates(model?: string): string[] {
+    const normalized = (model || "").trim().toLowerCase();
+    if (!normalized) return [];
+    return MODEL_UI_LABELS[normalized] || [model as string];
+}
+
+export async function applyModeAndModelSelection(
+    cdp: CDPConnection,
+    options: { mode?: string; model?: string }
+): Promise<{ modeApplied: boolean; modelApplied: boolean; details: string[] }> {
+    const mode = toModeKeyword(options.mode);
+    const modelLabels = modelCandidates(options.model);
+    if (!mode && modelLabels.length === 0) {
+        return { modeApplied: false, modelApplied: false, details: [] };
+    }
+
+    const safeMode = JSON.stringify(mode || "");
+    const safeModelLabels = JSON.stringify(modelLabels);
+
+    const expression = `(async () => {
+      const visible = (el) => !!el && el.offsetParent !== null;
+      const normalize = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const details = [];
+      let modeApplied = false;
+      let modelApplied = false;
+
+      const clickByText = (texts) => {
+        const tokens = texts.map((t) => normalize(t)).filter(Boolean);
+        if (!tokens.length) return false;
+        const nodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        for (const node of nodes) {
+          if (!visible(node)) continue;
+          const text = normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          if (!text) continue;
+          if (tokens.some((token) => text === token || text.includes(token))) {
+            node.click();
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const mode = ${safeMode};
+      if (mode) {
+        const modeTokens = mode === 'plan' ? ['plan', 'planning'] : ['fast'];
+        modeApplied = clickByText(modeTokens);
+        details.push(modeApplied ? 'mode_applied' : 'mode_not_found');
+      }
+
+      const targetLabels = ${safeModelLabels};
+      if (targetLabels.length) {
+        // Step 1: open model picker if available.
+        const triggerCandidates = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        let pickerOpened = false;
+        for (const node of triggerCandidates) {
+          if (!visible(node)) continue;
+          const text = normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          const looksModelTrigger =
+            text.includes('model') || text.includes('gemini') || text.includes('claude') || text.includes('gpt');
+          const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
+          if (looksModelTrigger || hasPopup === 'listbox' || hasPopup === 'menu') {
+            node.click();
+            pickerOpened = true;
+            break;
+          }
+        }
+        if (pickerOpened) {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+
+        const targets = targetLabels.map((t) => normalize(t)).filter(Boolean);
+        const options = [
+          ...document.querySelectorAll('[role="option"]'),
+          ...document.querySelectorAll('[role="menuitem"]'),
+          ...document.querySelectorAll('[data-value]'),
+          ...document.querySelectorAll('button,li,div[role="button"]')
+        ];
+        for (const option of options) {
+          if (!visible(option)) continue;
+          const text = normalize(option.innerText || option.textContent || option.getAttribute('aria-label') || option.getAttribute('data-value') || '');
+          if (!text) continue;
+          if (targets.some((t) => text === t || text.includes(t))) {
+            option.click();
+            modelApplied = true;
+            break;
+          }
+        }
+        details.push(modelApplied ? 'model_applied' : 'model_not_found');
+      }
+
+      return { modeApplied, modelApplied, details };
+    })()`;
+
+    const result = await evaluateInAllContexts(cdp, expression, true);
+    if (!result || typeof result !== "object") {
+        return { modeApplied: false, modelApplied: false, details: ["selection_no_context"] };
+    }
+    return {
+        modeApplied: !!result.modeApplied,
+        modelApplied: !!result.modelApplied,
+        details: Array.isArray(result.details) ? result.details : [],
+    };
+}
+
 // --- injectMessage ---
 
 /**
