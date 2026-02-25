@@ -156,6 +156,28 @@ async function activate(context) {
     if (!cdpPort) {
         log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
         updateStatusBar();
+
+        // ─── CDP Auto-Fix Prompt ──────────────────────────────────────
+        const platform = process.platform;
+        const actions = ['How to Fix'];
+        if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
+
+        vscode.window.showErrorMessage(
+            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with --remote-debugging-port=9222 for auto-accept to work.',
+            ...actions
+        ).then(action => {
+            if (action === 'How to Fix') {
+                const guide = platform === 'linux'
+                    ? 'Find your Antigravity .desktop file (usually in ~/.local/share/applications/) and add --remote-debugging-port=9222 to the Exec line. Then restart Antigravity.'
+                    : platform === 'darwin'
+                        ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9222'
+                        : 'Right-click your Antigravity shortcut → Properties → add --remote-debugging-port=9222 to the Target field.';
+                vscode.window.showInformationMessage(guide, { modal: true });
+            } else if (action === 'Auto-Fix Shortcut (Windows)') {
+                autoFixWindowsShortcut();
+            }
+        });
+
         return;
     }
 
@@ -201,6 +223,75 @@ async function activate(context) {
                     }
                 } catch { }
             }
+        }
+    });
+}
+
+function autoFixWindowsShortcut() {
+    if (process.platform !== 'win32') {
+        vscode.window.showInformationMessage('Auto-fix is Windows-only. See the "How to Fix" option for your platform.');
+        return;
+    }
+
+    const cp = require('child_process');
+    const psFile = path.join(os.tmpdir(), 'antigravity_patch_shortcut.ps1');
+    const psContent = `
+$flag = "--remote-debugging-port=9222"
+$WshShell = New-Object -comObject WScript.Shell
+$paths = @(
+    "$env:USERPROFILE\\Desktop",
+    "$env:PUBLIC\\Desktop",
+    "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs",
+    "$env:ALLUSERSPROFILE\\Microsoft\\Windows\\Start Menu\\Programs"
+)
+$patched = $false
+foreach ($dir in $paths) {
+    if (Test-Path $dir) {
+        $files = Get-ChildItem -Path $dir -Filter "*.lnk" -Recurse -ErrorAction SilentlyContinue
+        foreach ($file in $files) {
+            $shortcut = $WshShell.CreateShortcut($file.FullName)
+            if ($shortcut.TargetPath -like "*Antigravity*" -or $shortcut.TargetPath -like "*Cursor*") {
+                if ($shortcut.Arguments -notlike "*remote-debugging-port*") {
+                    $shortcut.Arguments = ($shortcut.Arguments + " " + $flag).Trim()
+                    $shortcut.Save()
+                    $patched = $true
+                    Write-Output "PATCHED: $($file.FullName)"
+                }
+            }
+        }
+    }
+}
+if ($patched) { Write-Output "SUCCESS" } else { Write-Output "NOT_FOUND" }
+`;
+
+    try {
+        fs.writeFileSync(psFile, psContent, 'utf8');
+    } catch (e) {
+        log(`[CDP] Failed to write patcher script: ${e.message}`);
+        vscode.window.showWarningMessage('Could not create patcher script. Please add the flag manually.');
+        return;
+    }
+
+    log('[CDP] Running shortcut patcher...');
+    cp.exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, (err, stdout, stderr) => {
+        try { fs.unlinkSync(psFile); } catch (e) { }
+
+        if (err) {
+            log(`[CDP] Patcher error: ${err.message}`);
+            vscode.window.showWarningMessage('Shortcut patching failed. Please add the flag manually.');
+            return;
+        }
+        log(`[CDP] Patcher output: ${stdout.trim()}`);
+        if (stdout.includes('SUCCESS')) {
+            log('[CDP] ✓ Shortcut patched!');
+            vscode.window.showInformationMessage(
+                '✅ Shortcut updated! Restart Antigravity for the fix to take effect.',
+                'OK'
+            );
+        } else {
+            vscode.window.showWarningMessage(
+                'No Antigravity/Cursor shortcut found. Add --remote-debugging-port=9222 to your shortcut manually.'
+            );
         }
     });
 }
