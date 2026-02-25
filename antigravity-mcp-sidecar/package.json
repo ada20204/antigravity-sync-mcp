@@ -1,8 +1,8 @@
 {
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
-    "description": "Registers currently open workspaces for proper MCP Server routing.",
-    "version": "0.1.0",
+    "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
+    "version": "0.1.1",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -30,22 +30,17 @@
                 "antigravityMcpSidecar.nativePollInterval": {
                     "type": "number",
                     "default": 500,
-                    "description": "Polling interval in milliseconds for native VS Code commands (e.g. Accept, Run)."
+                    "description": "Polling interval (ms) for native VS Code commands (Accept, Run)."
                 },
                 "antigravityMcpSidecar.cdpPollInterval": {
                     "type": "number",
                     "default": 1500,
-                    "description": "Polling interval in milliseconds for CDP webview clicks (e.g. Always Allow)."
+                    "description": "Polling interval (ms) for CDP webview button clicks (Always Allow)."
                 }
             }
         }
     },
-    "scripts": {
-        "compile": "tsc -p ./",
-        "watch": "tsc -watch -p ./"
-    },
     "dependencies": {
-        "node-fetch": "^2.6.12",
         "ws": "^8.19.0"
     },
     "devDependencies": {

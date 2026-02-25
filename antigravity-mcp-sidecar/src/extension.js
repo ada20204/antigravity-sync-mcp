@@ -42,9 +42,13 @@ function getJson(url) {
 }
 
 async function findCdpPort(workspaceName) {
-    const PORTS = Array.from({ length: 7 }, (_, i) => 8997 + i).concat(
-        Array.from({ length: 51 }, (_, i) => 7800 + i)
-    );
+    // Standard Chromium/Electron debug ports + Antigravity common ranges
+    const PORTS = [
+        9222, 9229,                                              // standard --remote-debugging-port defaults
+        ...Array.from({ length: 15 }, (_, i) => 9000 + i),      // 9000-9014 (Antigravity common)
+        ...Array.from({ length: 7 }, (_, i) => 8997 + i),       // 8997-9003
+        ...Array.from({ length: 51 }, (_, i) => 7800 + i),      // 7800-7850
+    ];
 
     for (const port of PORTS) {
         try {
@@ -74,20 +78,88 @@ async function activate(context) {
     context.subscriptions.push(outputChannel);
     log('Extension activating...');
 
+    // ─── Status Bar (always registered, regardless of CDP) ────────────
+    let statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'antigravityMcpSidecar.toggle';
+    context.subscriptions.push(statusBarItem);
+
+    let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
+    let cdpPort = null;
+
+    function updateStatusBar() {
+        if (!cdpPort) {
+            statusBarItem.text = '$(warning) Sidecar: No CDP';
+            statusBarItem.backgroundColor = undefined;
+            statusBarItem.tooltip = 'CDP port not found — auto-accept unavailable';
+            statusBarItem.show();
+        } else if (isEnabled) {
+            statusBarItem.text = '$(zap) Sidecar: ON';
+            statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            statusBarItem.tooltip = 'Auto-accept is ACTIVE — click to disable';
+            statusBarItem.show();
+        } else {
+            statusBarItem.text = '$(circle-slash) Sidecar: OFF';
+            statusBarItem.backgroundColor = undefined;
+            statusBarItem.tooltip = 'Auto-accept is OFF — click to enable';
+            statusBarItem.show();
+        }
+    }
+
+    function syncState() {
+        if (isEnabled && cdpPort) {
+            const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
+            startAutoAccept(cdpPort, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500));
+            log(`Auto-accept loops running on port ${cdpPort}`);
+        } else {
+            stopAutoAccept();
+            if (!cdpPort) {
+                log('Auto-accept unavailable: no CDP port');
+            } else {
+                log('Auto-accept paused');
+            }
+        }
+        updateStatusBar();
+    }
+
+    // ─── Toggle Command (always registered) ───────────────────────────
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
+        if (!cdpPort) {
+            vscode.window.showWarningMessage('Sidecar: No CDP port found. Cannot toggle auto-accept.');
+            return;
+        }
+        isEnabled = !isEnabled;
+        await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
+        syncState();
+        vscode.window.showInformationMessage(`Sidecar Auto-Accept: ${isEnabled ? 'ENABLED ⚡' : 'DISABLED 🔴'}`);
+    }));
+
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('antigravityMcpSidecar')) {
+            isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
+            stopAutoAccept();
+            syncState();
+        }
+    }));
+
+    // ─── CDP Discovery ────────────────────────────────────────────────
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
+        log('No workspace folders found');
+        updateStatusBar();
         return;
     }
 
     const workspacePath = workspaceFolders[0].uri.fsPath;
     const workspaceName = vscode.workspace.name || "";
 
-    const cdpPort = await findCdpPort(workspaceName);
+    cdpPort = await findCdpPort(workspaceName);
     if (!cdpPort) {
         log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
+        updateStatusBar();
         return;
     }
 
+    // ─── Registry ─────────────────────────────────────────────────────
     if (!fs.existsSync(REGISTRY_DIR)) {
         fs.mkdirSync(REGISTRY_DIR, { recursive: true });
     }
@@ -113,50 +185,6 @@ async function activate(context) {
 
     register();
     log(`Registered workspace ${workspacePath} with CDP port ${cdpPort}`);
-
-    let statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'antigravityMcpSidecar.toggle';
-    context.subscriptions.push(statusBarItem);
-
-    let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
-
-    function updateStatusBar() {
-        if (isEnabled) {
-            statusBarItem.text = '$(zap) Sidecar Auto: ON';
-            statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-            statusBarItem.show();
-        } else {
-            statusBarItem.text = '$(circle-slash) Sidecar Auto: OFF';
-            statusBarItem.backgroundColor = undefined;
-            statusBarItem.show();
-        }
-    }
-
-    function syncState() {
-        if (isEnabled) {
-            const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
-            startAutoAccept(cdpPort, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500));
-            log(`Auto-accept loops running on port ${cdpPort}`);
-        } else {
-            stopAutoAccept();
-            log(`Auto-accept loops paused`);
-        }
-        updateStatusBar();
-    }
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
-        isEnabled = !isEnabled;
-        await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
-        syncState();
-    }));
-
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
-        if (e.affectsConfiguration('antigravityMcpSidecar')) {
-            isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
-            stopAutoAccept();
-            syncState();
-        }
-    }));
 
     syncState();
 
