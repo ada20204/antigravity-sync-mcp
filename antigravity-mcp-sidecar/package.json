@@ -28,6 +28,10 @@
             {
                 "command": "antigravityMcpSidecar.showQuotaTable",
                 "title": "Show Antigravity Model Quota Table"
+            },
+            {
+                "command": "antigravityMcpSidecar.refreshQuota",
+                "title": "Refresh Antigravity Quota Snapshot"
             }
         ],
         "configuration": {
@@ -47,6 +51,26 @@
                     "type": "number",
                     "default": 1500,
                     "description": "Polling interval (ms) for CDP webview button clicks (Always Allow)."
+                },
+                "antigravityMcpSidecar.quotaWarnThresholdPercent": {
+                    "type": "number",
+                    "default": 15,
+                    "description": "Show warning style/alert when tracked quota falls below this percent."
+                },
+                "antigravityMcpSidecar.quotaCriticalThresholdPercent": {
+                    "type": "number",
+                    "default": 5,
+                    "description": "Show critical style/alert when tracked quota falls below this percent."
+                },
+                "antigravityMcpSidecar.quotaAlertCooldownMinutes": {
+                    "type": "number",
+                    "default": 30,
+                    "description": "Minimum minutes between repeated low-quota alerts at the same level."
+                },
+                "antigravityMcpSidecar.quotaStaleMinutes": {
+                    "type": "number",
+                    "default": 3,
+                    "description": "Mark quota snapshot as stale if older than this many minutes."
                 }
             }
         }

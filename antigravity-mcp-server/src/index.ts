@@ -82,6 +82,18 @@ function isTransientError(error: unknown): boolean {
     );
 }
 
+function uniqueStrings(items: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of items) {
+        const value = (item || "").trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        out.push(value);
+    }
+    return out;
+}
+
 // --- MCP Server Setup ---
 
 const server = new Server(
@@ -265,15 +277,41 @@ async function handleAskAntigravity(
             `[${task.id}] Model policy => selected=${selection.selectedModel}, mode=${selection.mode}, ` +
             `staleQuota=${selection.staleQuota}, skipped=${selection.skipped.length}`
         );
-
-        const selectionResult = await applyModeAndModelSelection(liveCdp, {
-            mode: selection.mode,
-            model: selection.selectedModel,
-        });
-        log(
-            `[${task.id}] UI selection => modeApplied=${selectionResult.modeApplied}, ` +
-            `modelApplied=${selectionResult.modelApplied} (${selectionResult.details.join(",") || "no-details"})`
+        const skippedByQuota = new Set(selection.skipped.map((item) => item.model));
+        const candidateModels = uniqueStrings(
+            selection.staleQuota
+                ? selection.chain
+                : selection.chain.filter((candidate) => !skippedByQuota.has(candidate))
         );
+
+        let selectedModel = selection.selectedModel;
+        let selectionResult: Awaited<ReturnType<typeof applyModeAndModelSelection>> | null = null;
+        for (const candidate of candidateModels) {
+            selectionResult = await applyModeAndModelSelection(liveCdp, {
+                mode: selection.mode,
+                model: candidate,
+            });
+            const details = selectionResult.details.join(",") || "no-details";
+            log(
+                `[${task.id}] UI selection attempt (${candidate}) => modeApplied=${selectionResult.modeApplied}, ` +
+                `modelApplied=${selectionResult.modelApplied} (${details})`
+            );
+            if (selectionResult.modelApplied) {
+                selectedModel = candidate;
+                break;
+            }
+        }
+
+        if (!selectionResult?.modelApplied) {
+            log(
+                `[${task.id}] UI model selection was not confirmed for candidates=[${candidateModels.join(",")}]. ` +
+                "Proceeding with currently active UI model."
+            );
+        } else if (selectedModel !== selection.selectedModel) {
+            log(
+                `[${task.id}] Model fallback applied: requested=${selection.selectedModel}, selected=${selectedModel}`
+            );
+        }
 
         // 4. Inject message
         setStatus("injecting");

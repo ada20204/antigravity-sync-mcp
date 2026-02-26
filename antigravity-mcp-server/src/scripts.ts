@@ -102,6 +102,7 @@ export async function applyModeAndModelSelection(
     const expression = `(async () => {
       const visible = (el) => !!el && el.offsetParent !== null;
       const normalize = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const textFor = (node) => normalize(node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || node?.getAttribute?.('data-value') || '');
       const details = [];
       let modeApplied = false;
       let modelApplied = false;
@@ -131,12 +132,22 @@ export async function applyModeAndModelSelection(
 
       const targetLabels = ${safeModelLabels};
       if (targetLabels.length) {
+        const targets = targetLabels.map((t) => normalize(t)).filter(Boolean);
+        const matchesTarget = (text) => targets.some((t) => text === t || text.includes(t));
+        const actionNodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        const activeMatch = actionNodes.find((node) => visible(node) && matchesTarget(textFor(node)));
+        if (activeMatch) {
+          modelApplied = true;
+          details.push('model_already_active');
+        }
+
         // Step 1: open model picker if available.
-        const triggerCandidates = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        const triggerCandidates = actionNodes;
         let pickerOpened = false;
         for (const node of triggerCandidates) {
+          if (modelApplied) break;
           if (!visible(node)) continue;
-          const text = normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          const text = textFor(node);
           const looksModelTrigger =
             text.includes('model') || text.includes('gemini') || text.includes('claude') || text.includes('gpt');
           const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
@@ -150,24 +161,27 @@ export async function applyModeAndModelSelection(
           await new Promise((resolve) => setTimeout(resolve, 120));
         }
 
-        const targets = targetLabels.map((t) => normalize(t)).filter(Boolean);
-        const options = [
-          ...document.querySelectorAll('[role="option"]'),
-          ...document.querySelectorAll('[role="menuitem"]'),
-          ...document.querySelectorAll('[data-value]'),
-          ...document.querySelectorAll('button,li,div[role="button"]')
-        ];
-        for (const option of options) {
-          if (!visible(option)) continue;
-          const text = normalize(option.innerText || option.textContent || option.getAttribute('aria-label') || option.getAttribute('data-value') || '');
-          if (!text) continue;
-          if (targets.some((t) => text === t || text.includes(t))) {
-            option.click();
-            modelApplied = true;
-            break;
+        if (!modelApplied) {
+          const options = [
+            ...document.querySelectorAll('[role="option"]'),
+            ...document.querySelectorAll('[role="menuitem"]'),
+            ...document.querySelectorAll('[data-value]'),
+            ...document.querySelectorAll('button,li,div[role="button"]')
+          ];
+          for (const option of options) {
+            if (!visible(option)) continue;
+            const text = textFor(option);
+            if (!text) continue;
+            if (matchesTarget(text)) {
+              option.click();
+              modelApplied = true;
+              break;
+            }
           }
         }
-        details.push(modelApplied ? 'model_applied' : 'model_not_found');
+        if (details.indexOf('model_already_active') === -1) {
+          details.push(modelApplied ? 'model_applied' : 'model_not_found');
+        }
       }
 
       return { modeApplied, modelApplied, details };

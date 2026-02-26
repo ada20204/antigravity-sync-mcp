@@ -11,13 +11,26 @@ const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
 const QUOTA_POLL_INTERVAL_MS = 60_000;
-const QUOTA_WARN_THRESHOLD_PERCENT = 15;
-const QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
-const QUOTA_ALERT_COOLDOWN_MS = 30 * 60_000;
+const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
+const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
+const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
 const execAsync = promisify(exec);
 
 
 let outputChannel;
+
+function clampNumber(value, min, max) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return min;
+    return Math.min(max, Math.max(min, n));
+}
+
+function formatAgeMs(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return 'unknown';
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+    if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+    return `${Math.round(ms / 3_600_000)}h`;
+}
 
 function log(msg) {
     const time = new Date().toLocaleTimeString();
@@ -370,6 +383,9 @@ function formatQuotaTooltip(quota, quotaError) {
         lines.push('No snapshot yet.');
         return lines.join('\n');
     }
+    if (quota && quota.timestamp) {
+        lines.push(`Snapshot age: ${formatAgeMs(Date.now() - Number(quota.timestamp))}`);
+    }
     if (summary.promptRemaining !== null) {
         lines.push(`Prompt credits remaining: ${summary.promptRemaining.toFixed(1)}%`);
     }
@@ -396,6 +412,7 @@ function formatQuotaReport(quota, quotaError) {
 
     if (quota.timestamp) {
         lines.push(`timestamp: ${new Date(quota.timestamp).toISOString()}`);
+        lines.push(`snapshotAge: ${formatAgeMs(Date.now() - Number(quota.timestamp))}`);
     }
     if (quota.source) {
         lines.push(`source: ${quota.source}`);
@@ -491,6 +508,65 @@ async function activate(context) {
 
     let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
     let cdpTarget = null;
+    let quotaWarnThresholdPercent = DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT;
+    let quotaCriticalThresholdPercent = DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT;
+    let quotaAlertCooldownMs = DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES * 60_000;
+    let quotaStaleMinutes = 3;
+
+    function reloadQuotaUiConfig() {
+        const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
+        quotaWarnThresholdPercent = clampNumber(
+            config.get('quotaWarnThresholdPercent', DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT),
+            0,
+            100
+        );
+        quotaCriticalThresholdPercent = clampNumber(
+            config.get('quotaCriticalThresholdPercent', DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT),
+            0,
+            100
+        );
+        if (quotaCriticalThresholdPercent > quotaWarnThresholdPercent) {
+            const tmp = quotaWarnThresholdPercent;
+            quotaWarnThresholdPercent = quotaCriticalThresholdPercent;
+            quotaCriticalThresholdPercent = tmp;
+        }
+        quotaStaleMinutes = clampNumber(config.get('quotaStaleMinutes', 3), 1, 120);
+        const cooldownMinutes = clampNumber(
+            config.get('quotaAlertCooldownMinutes', DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES),
+            1,
+            720
+        );
+        quotaAlertCooldownMs = cooldownMinutes * 60_000;
+    }
+
+    reloadQuotaUiConfig();
+
+    function getQuotaLevel(summary) {
+        if (!summary) return { level: 'none', watchedPercent: null, target: 'quota' };
+
+        if (summary.activeModelRemaining !== null) {
+            const percent = summary.activeModelRemaining;
+            const target = summary.activeModelName ? `model ${summary.activeModelName}` : 'active model';
+            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
+            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
+            return { level: 'none', watchedPercent: percent, target };
+        }
+        if (summary.promptRemaining !== null) {
+            const percent = summary.promptRemaining;
+            const target = 'prompt credits';
+            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
+            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
+            return { level: 'none', watchedPercent: percent, target };
+        }
+        if (summary.minModelRemaining !== null) {
+            const percent = summary.minModelRemaining;
+            const target = 'lowest model quota';
+            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
+            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
+            return { level: 'none', watchedPercent: percent, target };
+        }
+        return { level: 'none', watchedPercent: null, target: 'quota' };
+    }
 
     function updateQuotaStatusBar() {
         if (!cdpTarget) {
@@ -499,17 +575,28 @@ async function activate(context) {
         }
 
         const summary = summarizeQuota(latestQuota);
+        const snapshotAgeMs = latestQuota && latestQuota.timestamp
+            ? Date.now() - Number(latestQuota.timestamp)
+            : Number.POSITIVE_INFINITY;
+        const isStale = !Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000;
+        const level = getQuotaLevel(summary).level;
         if (summary && summary.activeModelName && summary.activeModelRemaining !== null) {
             const modelShort = summary.activeModelName.replace(/^.*\//, '').slice(0, 16);
-            quotaStatusBarItem.text = `$(graph) ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
+            quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
         } else if (summary && summary.primaryPercent !== null) {
-            quotaStatusBarItem.text = `$(graph) Quota ${Math.max(0, summary.primaryPercent).toFixed(0)}%`;
+            quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} Quota ${Math.max(0, summary.primaryPercent).toFixed(0)}%`;
         } else if (latestQuotaError) {
             quotaStatusBarItem.text = '$(warning) Quota N/A';
         } else {
             quotaStatusBarItem.text = '$(sync~spin) Quota ...';
         }
-        quotaStatusBarItem.backgroundColor = undefined;
+        if (level === 'critical') {
+            quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+        } else if (level === 'warning') {
+            quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        } else {
+            quotaStatusBarItem.backgroundColor = undefined;
+        }
         quotaStatusBarItem.tooltip = formatQuotaTooltip(latestQuota, latestQuotaError);
         quotaStatusBarItem.show();
     }
@@ -537,34 +624,29 @@ async function activate(context) {
     function maybeNotifyLowQuota() {
         const summary = summarizeQuota(latestQuota);
         if (!summary) return;
-
-        const watchedPercent = summary.activeModelRemaining !== null
-            ? summary.activeModelRemaining
-            : summary.minModelRemaining;
-        if (watchedPercent === null) return;
-
-        let level = 'none';
-        if (watchedPercent <= QUOTA_CRITICAL_THRESHOLD_PERCENT) {
-            level = 'critical';
-        } else if (watchedPercent <= QUOTA_WARN_THRESHOLD_PERCENT) {
-            level = 'warning';
+        const snapshotAgeMs = latestQuota && latestQuota.timestamp
+            ? Date.now() - Number(latestQuota.timestamp)
+            : Number.POSITIVE_INFINITY;
+        if (!Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000) {
+            return;
         }
+        const levelInfo = getQuotaLevel(summary);
+        const level = levelInfo.level;
+        const watchedPercent = levelInfo.watchedPercent;
 
         if (level === 'none') {
             lastQuotaAlertLevel = 'none';
             return;
         }
+        if (watchedPercent === null) return;
 
         const now = Date.now();
         const shouldNotify =
             level !== lastQuotaAlertLevel ||
-            (now - lastQuotaAlertAt) > QUOTA_ALERT_COOLDOWN_MS;
+            (now - lastQuotaAlertAt) > quotaAlertCooldownMs;
         if (!shouldNotify) return;
 
-        const target = summary.activeModelName
-            ? `model ${summary.activeModelName}`
-            : 'lowest model quota';
-        const message = `Antigravity quota low: ${target} remaining ${watchedPercent.toFixed(1)}%`;
+        const message = `Antigravity quota low: ${levelInfo.target} remaining ${watchedPercent.toFixed(1)}%`;
 
         if (level === 'critical') {
             vscode.window.showErrorMessage(message);
@@ -653,11 +735,28 @@ async function activate(context) {
         });
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.refreshQuota', async () => {
+        try {
+            await refreshQuota();
+            const summary = summarizeQuota(latestQuota);
+            if (summary && summary.primaryPercent !== null) {
+                vscode.window.showInformationMessage(`Quota refreshed: ${summary.primaryPercent.toFixed(1)}% (${summary.primaryLabel})`);
+            } else {
+                vscode.window.showInformationMessage('Quota refreshed.');
+            }
+        } catch (e) {
+            const message = e && e.message ? e.message : String(e);
+            vscode.window.showWarningMessage(`Quota refresh failed: ${message}`);
+        }
+    }));
+
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('antigravityMcpSidecar')) {
             isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
+            reloadQuotaUiConfig();
             stopAutoAccept();
             syncState();
+            updateQuotaStatusBar();
         }
     }));
 
