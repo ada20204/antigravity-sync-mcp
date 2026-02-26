@@ -20,6 +20,14 @@
             {
                 "command": "antigravityMcpSidecar.toggle",
                 "title": "Toggle Antigravity Sidecar Auto-Accept"
+            },
+            {
+                "command": "antigravityMcpSidecar.showQuota",
+                "title": "Show Antigravity Quota Snapshot"
+            },
+            {
+                "command": "antigravityMcpSidecar.showQuotaTable",
+                "title": "Show Antigravity Model Quota Table"
             }
         ],
         "configuration": {

@@ -11,6 +11,9 @@ const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
 const QUOTA_POLL_INTERVAL_MS = 60_000;
+const QUOTA_WARN_THRESHOLD_PERCENT = 15;
+const QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
+const QUOTA_ALERT_COOLDOWN_MS = 30 * 60_000;
 const execAsync = promisify(exec);
 
 
@@ -191,7 +194,50 @@ async function detectLanguageServer() {
     return null;
 }
 
-function normalizeQuotaSnapshot(data) {
+function normalizeModelKey(value) {
+    return String(value || '').trim().toLowerCase().replace(/[\s_()-]+/g, '');
+}
+
+function modelIdMatches(a, b) {
+    const left = normalizeModelKey(a);
+    const right = normalizeModelKey(b);
+    if (!left || !right) return false;
+    return left === right || left.includes(right) || right.includes(left);
+}
+
+function collectStringByKeys(value, keysLowerSet) {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = collectStringByKeys(item, keysLowerSet);
+            if (found) return found;
+        }
+        return null;
+    }
+    const obj = value;
+    for (const [key, raw] of Object.entries(obj)) {
+        const keyLower = key.toLowerCase();
+        if (keysLowerSet.has(keyLower) && typeof raw === 'string' && raw.trim()) {
+            return raw.trim();
+        }
+        const nested = collectStringByKeys(raw, keysLowerSet);
+        if (nested) return nested;
+    }
+    return null;
+}
+
+function extractActiveModelId(conversation) {
+    const candidate = collectStringByKeys(conversation, new Set([
+        'model',
+        'modelid',
+        'selectedmodel',
+        'activemodel',
+        'modelalias',
+    ]));
+    return candidate || null;
+}
+
+function normalizeQuotaSnapshot(data, activeModelId) {
     const userStatus = (data && data.userStatus) || {};
     const planStatus = userStatus.planStatus || {};
     const planInfo = planStatus.planInfo || {};
@@ -222,16 +268,22 @@ function normalizeQuotaSnapshot(data) {
             .map((m) => {
                 const resetTime = String(m.quotaInfo.resetTime || '');
                 const resetMs = resetTime ? Date.parse(resetTime) : NaN;
+                const modelId = String((m.modelOrAlias && m.modelOrAlias.model) || m.model || '');
+                const label = String(m.label || '');
+                const selectedHint = m.isSelected === true || m.selected === true || m.current === true || m.isCurrent === true;
+                const selectedByActiveId = !!activeModelId && (modelIdMatches(modelId, activeModelId) || modelIdMatches(label, activeModelId));
                 return {
-                    label: String(m.label || ''),
-                    modelId: String((m.modelOrAlias && m.modelOrAlias.model) || ''),
+                    label,
+                    modelId,
                     remainingFraction: typeof m.quotaInfo.remainingFraction === 'number' ? m.quotaInfo.remainingFraction : undefined,
                     remainingPercentage: typeof m.quotaInfo.remainingFraction === 'number' ? m.quotaInfo.remainingFraction * 100 : undefined,
                     isExhausted: m.quotaInfo.remainingFraction === 0,
+                    isSelected: selectedHint || selectedByActiveId,
                     resetTime,
                     resetInMs: Number.isFinite(resetMs) ? resetMs - now : undefined,
                 };
             }),
+        activeModelId: activeModelId || undefined,
     };
 }
 
@@ -245,6 +297,13 @@ async function fetchQuotaSnapshot() {
             locale: 'en',
         },
     }, 3000);
+    let activeModelId = null;
+    try {
+        const conversation = await postLsJson('127.0.0.1', ls.port, ls.csrfToken, 'GetBrowserOpenConversation', {}, 2000);
+        activeModelId = extractActiveModelId(conversation);
+    } catch {
+        // Best effort only.
+    }
     return {
         ls: {
             port: ls.port,
@@ -252,9 +311,126 @@ async function fetchQuotaSnapshot() {
             lastDetectedAt: Date.now(),
             sourceHost: '127.0.0.1',
         },
-        quota: normalizeQuotaSnapshot(data),
+        quota: normalizeQuotaSnapshot(data, activeModelId),
         error: null,
     };
+}
+
+function summarizeQuota(quota) {
+    if (!quota || typeof quota !== 'object') return null;
+
+    const prompt = quota.promptCredits && typeof quota.promptCredits === 'object'
+        ? quota.promptCredits
+        : null;
+    const models = Array.isArray(quota.models) ? quota.models : [];
+
+    const modelPercents = models
+        .map((m) => (m && typeof m.remainingPercentage === 'number' ? m.remainingPercentage : null))
+        .filter((v) => typeof v === 'number');
+    const exhaustedCount = models.filter((m) => m && m.isExhausted === true).length;
+    const activeModel = models.find((m) => m && m.isSelected) || models.find((m) => modelIdMatches((m && m.modelId) || (m && m.label), quota.activeModelId));
+
+    const promptRemaining = prompt && typeof prompt.remainingPercentage === 'number'
+        ? prompt.remainingPercentage
+        : null;
+    const minModelRemaining = modelPercents.length > 0 ? Math.min(...modelPercents) : null;
+    const activeModelRemaining = activeModel && typeof activeModel.remainingPercentage === 'number'
+        ? activeModel.remainingPercentage
+        : null;
+    const activeModelName = activeModel
+        ? (activeModel.label || activeModel.modelId || quota.activeModelId || null)
+        : (quota.activeModelId || null);
+
+    const primaryPercent = activeModelRemaining !== null
+        ? activeModelRemaining
+        : (promptRemaining !== null ? promptRemaining : minModelRemaining);
+    const primaryLabel = activeModelName
+        ? `model ${activeModelName}`
+        : (promptRemaining !== null ? 'prompt credits' : 'model quota');
+
+    return {
+        primaryPercent,
+        primaryLabel,
+        promptRemaining,
+        minModelRemaining,
+        activeModelName,
+        activeModelRemaining,
+        modelCount: models.length,
+        exhaustedCount,
+    };
+}
+
+function formatQuotaTooltip(quota, quotaError) {
+    const lines = ['Quota snapshot (click to view details)'];
+    if (quotaError) {
+        lines.push(`Last error: ${quotaError}`);
+    }
+    const summary = summarizeQuota(quota);
+    if (!summary) {
+        lines.push('No snapshot yet.');
+        return lines.join('\n');
+    }
+    if (summary.promptRemaining !== null) {
+        lines.push(`Prompt credits remaining: ${summary.promptRemaining.toFixed(1)}%`);
+    }
+    if (summary.activeModelName) {
+        lines.push(`Active model: ${summary.activeModelName}`);
+    }
+    if (summary.activeModelRemaining !== null) {
+        lines.push(`Active model remaining: ${summary.activeModelRemaining.toFixed(1)}%`);
+    }
+    if (summary.minModelRemaining !== null) {
+        lines.push(`Lowest model remaining: ${summary.minModelRemaining.toFixed(1)}%`);
+    }
+    lines.push(`Models tracked: ${summary.modelCount}, exhausted: ${summary.exhaustedCount}`);
+    return lines.join('\n');
+}
+
+function formatQuotaReport(quota, quotaError) {
+    const lines = ['=== Antigravity Quota Snapshot ==='];
+    if (quotaError) lines.push(`lastError: ${quotaError}`);
+    if (!quota || typeof quota !== 'object') {
+        lines.push('No quota snapshot available yet.');
+        return lines.join('\n');
+    }
+
+    if (quota.timestamp) {
+        lines.push(`timestamp: ${new Date(quota.timestamp).toISOString()}`);
+    }
+    if (quota.source) {
+        lines.push(`source: ${quota.source}`);
+    }
+    if (quota.activeModelId) {
+        lines.push(`activeModelId: ${quota.activeModelId}`);
+    }
+    const prompt = quota.promptCredits;
+    if (prompt && typeof prompt === 'object') {
+        lines.push(
+            `promptCredits: available=${prompt.available ?? 'n/a'} ` +
+            `monthly=${prompt.monthly ?? 'n/a'} ` +
+            `remaining=${typeof prompt.remainingPercentage === 'number' ? prompt.remainingPercentage.toFixed(1) + '%' : 'n/a'}`
+        );
+    }
+
+    const models = Array.isArray(quota.models) ? quota.models : [];
+    if (models.length > 0) {
+        lines.push('models:');
+        const sorted = [...models].sort((a, b) =>
+            String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
+        );
+        for (const model of sorted) {
+            const id = model.modelId || model.label || 'unknown';
+            const remaining = typeof model.remainingPercentage === 'number'
+                ? `${model.remainingPercentage.toFixed(1)}%`
+                : 'n/a';
+            const selected = model.isSelected ? ', selected=yes' : '';
+            lines.push(`- ${id}: remaining=${remaining}, exhausted=${model.isExhausted ? 'yes' : 'no'}${selected}`);
+        }
+    } else {
+        lines.push('models: none');
+    }
+
+    return lines.join('\n');
 }
 
 async function findCdpTarget(workspaceName) {
@@ -298,13 +474,45 @@ async function activate(context) {
     context.subscriptions.push(outputChannel);
     log('Extension activating...');
 
+    let latestLs = null;
+    let latestQuota = null;
+    let latestQuotaError = null;
+    let lastQuotaAlertLevel = 'none';
+    let lastQuotaAlertAt = 0;
+
     // ─── Status Bar (always registered, regardless of CDP) ────────────
     let statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'antigravityMcpSidecar.toggle';
     context.subscriptions.push(statusBarItem);
 
+    let quotaStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+    quotaStatusBarItem.command = 'antigravityMcpSidecar.showQuota';
+    context.subscriptions.push(quotaStatusBarItem);
+
     let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
     let cdpTarget = null;
+
+    function updateQuotaStatusBar() {
+        if (!cdpTarget) {
+            quotaStatusBarItem.hide();
+            return;
+        }
+
+        const summary = summarizeQuota(latestQuota);
+        if (summary && summary.activeModelName && summary.activeModelRemaining !== null) {
+            const modelShort = summary.activeModelName.replace(/^.*\//, '').slice(0, 16);
+            quotaStatusBarItem.text = `$(graph) ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
+        } else if (summary && summary.primaryPercent !== null) {
+            quotaStatusBarItem.text = `$(graph) Quota ${Math.max(0, summary.primaryPercent).toFixed(0)}%`;
+        } else if (latestQuotaError) {
+            quotaStatusBarItem.text = '$(warning) Quota N/A';
+        } else {
+            quotaStatusBarItem.text = '$(sync~spin) Quota ...';
+        }
+        quotaStatusBarItem.backgroundColor = undefined;
+        quotaStatusBarItem.tooltip = formatQuotaTooltip(latestQuota, latestQuotaError);
+        quotaStatusBarItem.show();
+    }
 
     function updateStatusBar() {
         if (!cdpTarget) {
@@ -323,6 +531,49 @@ async function activate(context) {
             statusBarItem.tooltip = 'Auto-accept is OFF — click to enable';
             statusBarItem.show();
         }
+        updateQuotaStatusBar();
+    }
+
+    function maybeNotifyLowQuota() {
+        const summary = summarizeQuota(latestQuota);
+        if (!summary) return;
+
+        const watchedPercent = summary.activeModelRemaining !== null
+            ? summary.activeModelRemaining
+            : summary.minModelRemaining;
+        if (watchedPercent === null) return;
+
+        let level = 'none';
+        if (watchedPercent <= QUOTA_CRITICAL_THRESHOLD_PERCENT) {
+            level = 'critical';
+        } else if (watchedPercent <= QUOTA_WARN_THRESHOLD_PERCENT) {
+            level = 'warning';
+        }
+
+        if (level === 'none') {
+            lastQuotaAlertLevel = 'none';
+            return;
+        }
+
+        const now = Date.now();
+        const shouldNotify =
+            level !== lastQuotaAlertLevel ||
+            (now - lastQuotaAlertAt) > QUOTA_ALERT_COOLDOWN_MS;
+        if (!shouldNotify) return;
+
+        const target = summary.activeModelName
+            ? `model ${summary.activeModelName}`
+            : 'lowest model quota';
+        const message = `Antigravity quota low: ${target} remaining ${watchedPercent.toFixed(1)}%`;
+
+        if (level === 'critical') {
+            vscode.window.showErrorMessage(message);
+        } else {
+            vscode.window.showWarningMessage(message);
+        }
+        log(`Quota alert (${level}): ${message}`);
+        lastQuotaAlertLevel = level;
+        lastQuotaAlertAt = now;
     }
 
     function syncState() {
@@ -351,6 +602,55 @@ async function activate(context) {
         await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
         syncState();
         vscode.window.showInformationMessage(`Sidecar Auto-Accept: ${isEnabled ? 'ENABLED ⚡' : 'DISABLED 🔴'}`);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuota', async () => {
+        const report = formatQuotaReport(latestQuota, latestQuotaError);
+        outputChannel.show(true);
+        for (const line of report.split('\n')) {
+            outputChannel.appendLine(line);
+        }
+        if (!latestQuota && latestQuotaError) {
+            vscode.window.showWarningMessage(`Quota snapshot unavailable: ${latestQuotaError}`);
+            return;
+        }
+        const summary = summarizeQuota(latestQuota);
+        if (summary && summary.primaryPercent !== null) {
+            vscode.window.showInformationMessage(`Quota: ${summary.primaryPercent.toFixed(1)}% remaining (${summary.primaryLabel})`);
+        } else {
+            vscode.window.showInformationMessage('Quota snapshot has been written to output channel.');
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuotaTable', async () => {
+        const models = Array.isArray(latestQuota && latestQuota.models) ? latestQuota.models : [];
+        if (models.length === 0) {
+            vscode.window.showWarningMessage('No model quota snapshot available yet.');
+            return;
+        }
+
+        const sorted = [...models].sort((a, b) =>
+            String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
+        );
+        const items = sorted.map((model) => {
+            const id = model.modelId || model.label || 'unknown';
+            const remaining = typeof model.remainingPercentage === 'number'
+                ? `${model.remainingPercentage.toFixed(1)}%`
+                : 'n/a';
+            const selectedMark = model.isSelected ? ' [active]' : '';
+            return {
+                label: `${id}${selectedMark}`,
+                description: `remaining=${remaining} exhausted=${model.isExhausted ? 'yes' : 'no'}`,
+                detail: model.resetTime ? `reset=${model.resetTime}` : '',
+            };
+        });
+
+        await vscode.window.showQuickPick(items, {
+            title: 'Antigravity Model Quota',
+            placeHolder: 'Sorted by model id/label',
+            matchOnDescription: true,
+            matchOnDetail: true,
+        });
     }));
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
@@ -406,10 +706,6 @@ async function activate(context) {
         fs.mkdirSync(REGISTRY_DIR, { recursive: true });
     }
 
-    let latestLs = null;
-    let latestQuota = null;
-    let latestQuotaError = null;
-
     const register = () => {
         let registry = {};
         if (fs.existsSync(REGISTRY_FILE)) {
@@ -453,10 +749,13 @@ async function activate(context) {
             } else if (result.error) {
                 log(`Quota snapshot unavailable: ${result.error}`);
             }
+            updateQuotaStatusBar();
+            maybeNotifyLowQuota();
         } catch (e) {
             latestQuotaError = e && e.message ? e.message : String(e);
             register();
             log(`Quota refresh failed: ${latestQuotaError}`);
+            updateQuotaStatusBar();
         }
     };
 
