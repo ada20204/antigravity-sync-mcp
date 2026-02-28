@@ -5,8 +5,7 @@ MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a loca
 ## Prerequisites
 
 1. **Node.js 18+**
-2. **Antigravity** running with debug port enabled:
-   - `--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0`
+2. **Antigravity** running with debug port enabled, or allow cold-start auto launch (see Configuration)
 3. **antigravity-mcp-sidecar** extension enabled in your active workspace (writes CDP/LS/quota registry)
 
 ## Quick Start
@@ -54,6 +53,10 @@ Add to your MCP config:
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `ANTIGRAVITY_CDP_PORT` | auto-detect | Override CDP port (skips port scanning) |
+| `ANTIGRAVITY_CDP_HOST` | auto-detect | Override CDP host (used with port overrides) |
+| `ANTIGRAVITY_EXECUTABLE` | auto-detect | Absolute path to Antigravity executable for cold-start launch |
+| `ANTIGRAVITY_LAUNCH_PORT` | `9000` | Port used when server cold-starts Antigravity |
+| `ANTIGRAVITY_LAUNCH_EXTRA_ARGS` | empty | Extra args appended on cold-start launch |
 
 `ask-antigravity` input schema:
 - `prompt` (required): prompt text
@@ -64,10 +67,11 @@ Add to your MCP config:
 
 1. External agent calls `ask-antigravity` with a prompt
 2. Server discovers target workspace via sidecar registry (`~/.antigravity-mcp/registry.json`)
-3. Server applies mode/model policy with quota-aware fallback (using registry quota snapshot when fresh)
-4. Connects via WebSocket and injects the prompt through CDP (send path unchanged)
-5. Waits for completion with LS-first strategy: reactive stream -> cascade trajectory -> DOM fallback
-6. Extracts the final answer segment and returns it to the calling agent
+3. If CDP is unavailable, server performs one cold-start launch attempt (`<targetDir> --new-window --remote-debugging-port=<port>`)
+4. Server applies mode/model policy with quota-aware fallback (using registry quota snapshot when fresh)
+5. Connects via WebSocket and injects the prompt through CDP (send path unchanged)
+6. Waits for completion with LS-first strategy: reactive stream -> cascade trajectory -> DOM fallback
+7. Extracts the final answer segment and returns it to the calling agent
 
 ## Safety
 

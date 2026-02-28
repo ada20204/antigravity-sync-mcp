@@ -11,6 +11,11 @@ const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
 const QUOTA_POLL_INTERVAL_MS = 60_000;
+const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
+const CDP_PROBE_TIMEOUT_MS = 250;
+const CDP_MAX_HOSTS = 8;
+const CDP_PROBE_SUMMARY_LIMIT = 40;
+const DEFAULT_CDP_PORT_SPEC = '9222,9229,9000-9014,8997-9003,7800-7850';
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
@@ -41,9 +46,9 @@ function log(msg) {
     }
 }
 
-function getJson(url) {
+function getJson(url, timeoutMs = 1000) {
     return new Promise((resolve, reject) => {
-        const req = http.get(url, { timeout: 1000 }, (res) => {
+        const req = http.get(url, { timeout: timeoutMs }, (res) => {
             let data = '';
             res.on('data', (chunk) => (data += chunk));
             res.on('end', () => {
@@ -62,17 +67,188 @@ function getJson(url) {
     });
 }
 
-function getHostIps() {
-    const ips = ['127.0.0.1'];
-    // In WSL, Windows host is often nameserver in resolv.conf
+function dedupeStrings(values) {
+    const seen = new Set();
+    const out = [];
+    for (const value of values) {
+        const v = String(value || '').trim();
+        if (!v || seen.has(v)) continue;
+        seen.add(v);
+        out.push(v);
+    }
+    return out;
+}
+
+function parsePortCandidates(spec) {
+    const source = String(spec || '').trim();
+    if (!source) return [];
+    const out = [];
+    for (const tokenRaw of source.split(',')) {
+        const token = tokenRaw.trim();
+        if (!token) continue;
+        const range = token.match(/^(\d+)\s*-\s*(\d+)$/);
+        if (range) {
+            const start = Number(range[1]);
+            const end = Number(range[2]);
+            if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+            const lo = Math.max(1, Math.min(start, end));
+            const hi = Math.min(65535, Math.max(start, end));
+            for (let p = lo; p <= hi; p++) out.push(p);
+            continue;
+        }
+        const port = Number(token);
+        if (!Number.isFinite(port)) continue;
+        if (port >= 1 && port <= 65535) out.push(port);
+    }
+    return [...new Set(out)];
+}
+
+function trimProbeSummary(summary) {
+    if (!Array.isArray(summary)) return [];
+    if (summary.length <= CDP_PROBE_SUMMARY_LIMIT) return summary;
+    return summary.slice(summary.length - CDP_PROBE_SUMMARY_LIMIT);
+}
+
+function buildCandidateMatrix(hosts, ports, limit = CDP_PROBE_SUMMARY_LIMIT) {
+    const out = [];
+    for (const host of hosts || []) {
+        for (const port of ports || []) {
+            out.push({ host, port });
+            if (out.length >= limit) return out;
+        }
+    }
+    return out;
+}
+
+function shortError(error) {
+    const message = error && error.message ? error.message : String(error || 'unknown');
+    return message.slice(0, 180);
+}
+
+function inferGatewayIpFromRouteTable(routeTable) {
+    const lines = String(routeTable || '').split(/\r?\n/).filter(Boolean);
+    for (const line of lines.slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 3) continue;
+        const destination = parts[1];
+        const gatewayHex = parts[2];
+        if (destination !== '00000000' || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
+
+        const b1 = parseInt(gatewayHex.slice(6, 8), 16);
+        const b2 = parseInt(gatewayHex.slice(4, 6), 16);
+        const b3 = parseInt(gatewayHex.slice(2, 4), 16);
+        const b4 = parseInt(gatewayHex.slice(0, 2), 16);
+        return `${b1}.${b2}.${b3}.${b4}`;
+    }
+    return null;
+}
+
+function isRoutablePrivateHost(ip) {
+    const v = String(ip || '').trim();
+    if (!v) return false;
+    if (v === '127.0.0.1' || v === 'localhost') return true;
+    if (v === '::1') return true;
+
+    const m = v.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (!m) return false;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT range (often tailscale local)
+    if (a === 169 && b === 254) return true;
+    return false;
+}
+
+function getHostIps(fixedHost) {
+    const ips = ['127.0.0.1', 'localhost'];
+    if (fixedHost && String(fixedHost).trim()) ips.unshift(String(fixedHost).trim());
+
+    const envHosts = []
+        .concat(String(process.env.ANTIGRAVITY_CDP_HOSTS || '').split(','))
+        .concat(String(process.env.ANTIGRAVITY_CDP_HOST || '').split(','))
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+    ips.push(...envHosts);
+
+    // In WSL, the Windows host gateway from /proc/net/route is the most stable probe target.
+    try {
+        if (fs.existsSync('/proc/net/route')) {
+            const routeTable = fs.readFileSync('/proc/net/route', 'utf8');
+            const gatewayIp = inferGatewayIpFromRouteTable(routeTable);
+            if (gatewayIp) ips.push(gatewayIp);
+        }
+    } catch { }
+
+    // In some environments the host still appears as nameserver in resolv.conf.
     try {
         if (fs.existsSync('/etc/resolv.conf')) {
             const resolv = fs.readFileSync('/etc/resolv.conf', 'utf8');
-            const match = resolv.match(/^nameserver\s+([\d.]+)/m);
-            if (match && match[1]) ips.push(match[1]);
+            const matches = [...resolv.matchAll(/^nameserver\s+([\d.]+)/gm)];
+            for (const match of matches) {
+                const candidate = match && match[1] ? match[1] : '';
+                if (isRoutablePrivateHost(candidate)) ips.push(candidate);
+            }
         }
     } catch { }
-    return ips;
+
+    // Add local interface addresses (useful for Tailscale and non-localhost bindings).
+    try {
+        const interfaces = os.networkInterfaces();
+        for (const rows of Object.values(interfaces)) {
+            for (const row of rows || []) {
+                if (!row || row.family !== 'IPv4' || row.internal) continue;
+                if (isRoutablePrivateHost(row.address)) ips.push(row.address);
+            }
+        }
+    } catch { }
+    return dedupeStrings(ips);
+}
+
+function readRegistryIps(workspacePath) {
+    try {
+        if (!fs.existsSync(REGISTRY_FILE)) return [];
+        const parsed = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
+        if (!parsed || typeof parsed !== 'object') return [];
+
+        const ips = [];
+        const entries = Object.entries(parsed);
+        const normalizedWorkspacePath = String(workspacePath || '').replace(/\\/g, '/');
+
+        for (const [rawKey, value] of entries) {
+            if (!value || typeof value !== 'object') continue;
+            const entryIp = String(value.ip || '').trim();
+            if (!entryIp) continue;
+
+            const normalizedKey = String(rawKey || '').replace(/\\/g, '/');
+            const sameWorkspace = normalizedWorkspacePath && normalizedKey === normalizedWorkspacePath;
+            if (sameWorkspace) {
+                ips.unshift(entryIp); // Prefer exact workspace hit.
+            } else {
+                ips.push(entryIp);
+            }
+        }
+        return dedupeStrings(ips);
+    } catch {
+        return [];
+    }
+}
+
+function readRegistryObject() {
+    try {
+        if (!fs.existsSync(REGISTRY_FILE)) return {};
+        const parsed = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
+        if (parsed && typeof parsed === 'object') return parsed;
+    } catch { }
+    return {};
+}
+
+function writeRegistryObject(registry) {
+    if (!fs.existsSync(REGISTRY_DIR)) {
+        fs.mkdirSync(REGISTRY_DIR, { recursive: true });
+    }
+    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
 }
 
 function extractArgValue(cmdline, name) {
@@ -450,40 +626,178 @@ function formatQuotaReport(quota, quotaError) {
     return lines.join('\n');
 }
 
-async function findCdpTarget(workspaceName) {
-    // Standard Chromium/Electron debug ports + Antigravity common ranges
-    const PORTS = [
-        9222, 9229,                                              // standard --remote-debugging-port defaults
-        ...Array.from({ length: 15 }, (_, i) => 9000 + i),      // 9000-9014 (Antigravity common)
-        ...Array.from({ length: 7 }, (_, i) => 8997 + i),       // 8997-9003
-        ...Array.from({ length: 51 }, (_, i) => 7800 + i),      // 7800-7850
-    ];
+function looksLikeAntigravityVersion(versionPayload) {
+    if (!versionPayload || typeof versionPayload !== 'object') return false;
+    const browser = String(versionPayload.Browser || '');
+    const ua = String(versionPayload['User-Agent'] || versionPayload.userAgent || '');
+    const wsUrl = String(versionPayload.webSocketDebuggerUrl || '');
+    const marker = `${browser} ${ua} ${wsUrl}`.toLowerCase();
+    return (
+        marker.includes('antigravity') ||
+        marker.includes('cursor') ||
+        marker.includes('codeium')
+    );
+}
 
-    const ips = getHostIps();
+async function findCdpTarget(params) {
+    const { workspaceName, hosts, ports } = params;
+    const summary = [];
+    let lastError = '';
 
-    for (const ip of ips) {
-        for (const port of PORTS) {
+    for (const ip of hosts) {
+        for (const port of ports) {
+            let version = null;
             try {
-                const list = await getJson(`http://${ip}:${port}/json/list`);
+                version = await getJson(`http://${ip}:${port}/json/version`, CDP_PROBE_TIMEOUT_MS);
+            } catch (error) {
+                const message = shortError(error);
+                summary.push({ host: ip, port, stage: 'version', ok: false, error: message });
+                lastError = `${ip}:${port} version ${message}`;
+                continue;
+            }
 
-                const workbench = list.find((t) =>
-                    t.url && t.url.includes('workbench.html') &&
-                    t.type === 'page' &&
-                    !(t.url && t.url.includes('jetski'))
+            if (looksLikeAntigravityVersion(version)) {
+                summary.push({ host: ip, port, stage: 'version', ok: true, source: 'version' });
+                return {
+                    target: { ip, port, source: 'version', version },
+                    summary: trimProbeSummary(summary),
+                    lastError: '',
+                };
+            }
+
+            // Fallback for variants where version marker is not explicit.
+            try {
+                const list = await getJson(`http://${ip}:${port}/json/list`, CDP_PROBE_TIMEOUT_MS);
+                const pages = Array.isArray(list)
+                    ? list.filter((t) => t && t.type === 'page' && !(t.url && t.url.includes('jetski')))
+                    : [];
+                const workbenches = pages.filter((t) => t.url && t.url.includes('workbench.html'));
+
+                const matchingWorkbench = workbenches.find((t) =>
+                    !workspaceName || String(t.title || '').includes(workspaceName)
                 );
+                const workbench = matchingWorkbench || workbenches[0] || pages[0];
 
                 if (workbench) {
-                    if (!workspaceName || workbench.title.includes(workspaceName)) {
-                        return { port, ip };
-                    }
+                    summary.push({ host: ip, port, stage: 'list', ok: true, source: 'list' });
+                    return {
+                        target: { ip, port, source: 'list', version },
+                        summary: trimProbeSummary(summary),
+                        lastError: '',
+                    };
                 }
-            } catch {
-                // Ignore
+
+                summary.push({ host: ip, port, stage: 'list', ok: false, error: 'no_page_target' });
+                lastError = `${ip}:${port} list no_page_target`;
+            } catch (error) {
+                const message = shortError(error);
+                summary.push({ host: ip, port, stage: 'list', ok: false, error: message });
+                lastError = `${ip}:${port} list ${message}`;
             }
         }
     }
 
-    return null;
+    return { target: null, summary: trimProbeSummary(summary), lastError: lastError || 'no_cdp_target' };
+}
+
+function buildCdpProbePlan(params) {
+    const { workspacePath, fixedHost, fixedPort, portSpec } = params;
+    const allHosts = dedupeStrings([
+        ...readRegistryIps(workspacePath),
+        ...getHostIps(fixedHost),
+    ]);
+    const hosts = allHosts.slice(0, CDP_MAX_HOSTS);
+
+    const parsedPorts = parsePortCandidates(portSpec || DEFAULT_CDP_PORT_SPEC);
+    const fallbackPorts = parsePortCandidates(DEFAULT_CDP_PORT_SPEC);
+    const basePorts = parsedPorts.length > 0 ? parsedPorts : fallbackPorts;
+    const fixed = Number(fixedPort);
+    const ports = Number.isFinite(fixed) && fixed > 0 && fixed <= 65535
+        ? [fixed, ...basePorts.filter((p) => p !== fixed)]
+        : basePorts;
+
+    return { hosts, ports };
+}
+
+function splitArgs(raw) {
+    const source = String(raw || '').trim();
+    if (!source) return [];
+    return source.split(/\s+/).filter(Boolean);
+}
+
+function resolveDefaultExecutablePath() {
+    if (process.platform === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA || path.win32.join(os.homedir(), 'AppData', 'Local');
+        const candidates = [
+            path.win32.join(localAppData, 'Programs', 'Antigravity', 'Antigravity.exe'),
+            path.win32.join(localAppData, 'Programs', 'Cursor', 'Cursor.exe'),
+        ];
+        for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) return candidate;
+        }
+        return '';
+    }
+
+    const candidates = [];
+    const usersRoot = '/mnt/c/Users';
+    try {
+        if (fs.existsSync(usersRoot)) {
+            const users = fs.readdirSync(usersRoot, { withFileTypes: true });
+            for (const user of users) {
+                if (!user.isDirectory()) continue;
+                candidates.push(path.posix.join(usersRoot, user.name, 'AppData/Local/Programs/Antigravity/Antigravity.exe'));
+                candidates.push(path.posix.join(usersRoot, user.name, 'AppData/Local/Programs/Cursor/Cursor.exe'));
+            }
+        }
+    } catch { }
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+    return '';
+}
+
+function psQuote(value) {
+    return String(value || '').replace(/'/g, "''");
+}
+
+function buildLaunchArgsForWorkspace(workspacePath, port, extraArgs) {
+    return [
+        workspacePath,
+        '--new-window',
+        `--remote-debugging-port=${port}`,
+        '--remote-debugging-address=0.0.0.0',
+        ...extraArgs,
+    ];
+}
+
+function launchAntigravityDetached(params) {
+    const { executable, args, restart } = params;
+    if (process.platform === 'win32') {
+        const exe = psQuote(executable);
+        const argList = args.map((item) => `'${psQuote(item)}'`).join(',');
+        const script = restart
+            ? `$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity,Cursor | Stop-Process -Force; Start-Sleep -Milliseconds 500; Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`
+            : `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
+
+        const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
+            detached: true,
+            stdio: 'ignore',
+        });
+        child.unref();
+        return;
+    }
+
+    if (restart) {
+        try {
+            spawn('pkill', ['-f', 'Antigravity|Cursor'], { stdio: 'ignore' });
+        } catch { }
+    }
+    const child = spawn(executable, args, {
+        detached: true,
+        stdio: 'ignore',
+        shell: false,
+    });
+    child.unref();
 }
 
 async function activate(context) {
@@ -508,6 +822,25 @@ async function activate(context) {
 
     let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
     let cdpTarget = null;
+    let cdpGeneration = 0;
+    let cdpProbeSummary = [];
+    let cdpLastError = null;
+    let cdpState = 'idle';
+    let cdpVerifiedAt = 0;
+    let cdpSource = null;
+    let cdpHeartbeatRunning = false;
+    let cdpFixedHost = '';
+    let cdpFixedPort = 0;
+    let cdpPortSpec = DEFAULT_CDP_PORT_SPEC;
+    let antigravityExecutablePath = '';
+    let antigravityLaunchExtraArgs = [];
+    let antigravityLaunchPort = 9000;
+    let cdpProbeHosts = [];
+    let cdpProbePorts = [];
+    let register = () => { };
+    let negotiateCdp = async () => false;
+    let workspacePath = '';
+    let workspaceName = '';
     let quotaWarnThresholdPercent = DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT;
     let quotaCriticalThresholdPercent = DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT;
     let quotaAlertCooldownMs = DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES * 60_000;
@@ -540,6 +873,19 @@ async function activate(context) {
     }
 
     reloadQuotaUiConfig();
+
+    function reloadCdpConfig() {
+        const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
+        cdpFixedHost = String(config.get('cdpFixedHost', '') || '').trim();
+        cdpFixedPort = clampNumber(config.get('cdpFixedPort', 0), 0, 65535);
+        cdpPortSpec = String(config.get('cdpPortCandidates', DEFAULT_CDP_PORT_SPEC) || DEFAULT_CDP_PORT_SPEC);
+        const configuredExe = String(config.get('antigravityExecutablePath', '') || '').trim();
+        antigravityExecutablePath = configuredExe || resolveDefaultExecutablePath();
+        antigravityLaunchExtraArgs = splitArgs(config.get('antigravityLaunchExtraArgs', ''));
+        antigravityLaunchPort = clampNumber(config.get('antigravityLaunchPort', 9000), 1, 65535);
+    }
+
+    reloadCdpConfig();
 
     function getQuotaLevel(summary) {
         if (!summary) return { level: 'none', watchedPercent: null, target: 'quota' };
@@ -674,6 +1020,57 @@ async function activate(context) {
         updateStatusBar();
     }
 
+    async function executeManualLaunch(action) {
+        if (!workspacePath) {
+            vscode.window.showWarningMessage('No workspace folder available for Antigravity launch.');
+            return;
+        }
+        if (!antigravityExecutablePath || !fs.existsSync(antigravityExecutablePath)) {
+            vscode.window.showWarningMessage(
+                'Antigravity executable not found. Configure antigravityMcpSidecar.antigravityExecutablePath first.'
+            );
+            return;
+        }
+
+        const selectedPort = cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort;
+        const launchArgs = buildLaunchArgsForWorkspace(workspacePath, selectedPort, antigravityLaunchExtraArgs);
+        try {
+            launchAntigravityDetached({
+                executable: antigravityExecutablePath,
+                args: launchArgs,
+                restart: action === 'restart',
+            });
+            log(
+                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${selectedPort} workspace=${workspacePath}`
+            );
+        } catch (error) {
+            const message = shortError(error);
+            vscode.window.showErrorMessage(`Failed to ${action} Antigravity: ${message}`);
+            return;
+        }
+
+        cdpState = 'probing';
+        cdpLastError = null;
+        cdpSource = action === 'restart' ? 'manual-restart' : 'manual-launch';
+        register();
+
+        // Give new process a short head start before probing.
+        await new Promise((resolve) => setTimeout(resolve, action === 'restart' ? 1500 : 800));
+        const ok = await negotiateCdp();
+        stopAutoAccept();
+        syncState();
+        updateQuotaStatusBar();
+        if (ok) {
+            vscode.window.showInformationMessage(
+                `Antigravity ${action === 'restart' ? 'restarted' : 'launched'} and CDP is ready on ${cdpTarget.ip}:${cdpTarget.port}.`
+            );
+            return;
+        }
+        vscode.window.showWarningMessage(
+            `Antigravity ${action} command sent, but CDP is still unavailable. Check launch args and retry.`
+        );
+    }
+
     // ─── Toggle Command (always registered) ───────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
         if (!cdpTarget) {
@@ -684,6 +1081,20 @@ async function activate(context) {
         await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
         syncState();
         vscode.window.showInformationMessage(`Sidecar Auto-Accept: ${isEnabled ? 'ENABLED ⚡' : 'DISABLED 🔴'}`);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.launchAntigravity', async () => {
+        await executeManualLaunch('launch');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.restartAntigravity', async () => {
+        const confirm = await vscode.window.showWarningMessage(
+            'Restart Antigravity now? This may interrupt your current window/session.',
+            { modal: true },
+            'Restart'
+        );
+        if (confirm !== 'Restart') return;
+        await executeManualLaunch('restart');
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuota', async () => {
@@ -752,8 +1163,33 @@ async function activate(context) {
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('antigravityMcpSidecar')) {
+            const prevFixedHost = cdpFixedHost;
+            const prevFixedPort = cdpFixedPort;
+            const prevPortSpec = cdpPortSpec;
             isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
             reloadQuotaUiConfig();
+            reloadCdpConfig();
+            const cdpConfigChanged =
+                prevFixedHost !== cdpFixedHost ||
+                prevFixedPort !== cdpFixedPort ||
+                prevPortSpec !== cdpPortSpec;
+            if (cdpConfigChanged) {
+                cdpState = 'probing';
+                register();
+                negotiateCdp()
+                    .then(() => {
+                        stopAutoAccept();
+                        syncState();
+                        updateQuotaStatusBar();
+                    })
+                    .catch((error) => {
+                        log(`CDP renegotiation failed after config change: ${shortError(error)}`);
+                        stopAutoAccept();
+                        syncState();
+                        updateQuotaStatusBar();
+                    });
+                return;
+            }
             stopAutoAccept();
             syncState();
             updateQuotaStatusBar();
@@ -768,12 +1204,106 @@ async function activate(context) {
         return;
     }
 
-    const workspacePath = workspaceFolders[0].uri.fsPath;
-    const workspaceName = vscode.workspace.name || "";
+    workspacePath = workspaceFolders[0].uri.fsPath;
+    workspaceName = vscode.workspace.name || "";
+    if (!fs.existsSync(REGISTRY_DIR)) {
+        fs.mkdirSync(REGISTRY_DIR, { recursive: true });
+    }
 
-    cdpTarget = await findCdpTarget(workspaceName);
-    if (!cdpTarget) {
+    register = () => {
+        const registry = readRegistryObject();
+        const previous = (registry[workspacePath] && typeof registry[workspacePath] === 'object')
+            ? registry[workspacePath]
+            : {};
+
+        const previousCdp = previous.cdp && typeof previous.cdp === 'object' ? previous.cdp : {};
+        const activeHost = cdpTarget ? cdpTarget.ip : (previousCdp.active && previousCdp.active.host) || previous.ip;
+        const activePort = cdpTarget ? cdpTarget.port : (previousCdp.active && previousCdp.active.port) || previous.port;
+
+        registry[workspacePath] = {
+            ...previous,
+            port: cdpTarget ? cdpTarget.port : previous.port,
+            ip: cdpTarget ? cdpTarget.ip : previous.ip,
+            pid: process.pid,
+            lastActive: Date.now(),
+            ls: latestLs || previous.ls,
+            quota: latestQuota || previous.quota,
+            quotaError: latestQuotaError,
+            cdp: {
+                ...previousCdp,
+                generation: cdpGeneration,
+                state: cdpState,
+                updatedAt: Date.now(),
+                verifiedAt: cdpVerifiedAt || previousCdp.verifiedAt,
+                active: (activeHost && activePort)
+                    ? {
+                        host: activeHost,
+                        port: activePort,
+                        source: cdpSource || (previousCdp.active && previousCdp.active.source) || 'registry',
+                        verifiedAt: cdpVerifiedAt || (previousCdp.active && previousCdp.active.verifiedAt) || Date.now(),
+                    }
+                    : undefined,
+                candidates: buildCandidateMatrix(cdpProbeHosts, cdpProbePorts),
+                probeSummary: trimProbeSummary(cdpProbeSummary),
+                lastError: cdpLastError || undefined,
+            },
+        };
+
+        writeRegistryObject(registry);
+    };
+
+    negotiateCdp = async () => {
+        const previous = readRegistryObject()[workspacePath];
+        const previousGeneration = previous && previous.cdp && Number.isFinite(previous.cdp.generation)
+            ? Number(previous.cdp.generation)
+            : 0;
+        cdpGeneration = previousGeneration + 1;
+
+        const plan = buildCdpProbePlan({
+            workspacePath,
+            fixedHost: cdpFixedHost,
+            fixedPort: cdpFixedPort,
+            portSpec: cdpPortSpec,
+        });
+        cdpProbeHosts = plan.hosts;
+        cdpProbePorts = plan.ports;
+        cdpProbeSummary = [];
+        cdpLastError = null;
+        cdpState = 'probing';
+        cdpSource = null;
+        cdpVerifiedAt = 0;
+        register();
+
+        log(`Probing CDP hosts: ${cdpProbeHosts.join(',') || 'none'} ports=${cdpProbePorts.slice(0, 8).join(',')}${cdpProbePorts.length > 8 ? ',...' : ''}`);
+        const result = await findCdpTarget({
+            workspaceName,
+            hosts: cdpProbeHosts,
+            ports: cdpProbePorts,
+        });
+        cdpProbeSummary = result.summary || [];
+
+        if (result.target) {
+            cdpTarget = { ip: result.target.ip, port: result.target.port };
+            cdpState = 'ready';
+            cdpSource = result.target.source || 'probe';
+            cdpVerifiedAt = Date.now();
+            cdpLastError = null;
+            register();
+            log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port} (source=${cdpSource})`);
+            return true;
+        }
+
+        cdpTarget = null;
+        cdpState = 'error';
+        cdpLastError = result.lastError || 'no_cdp_target';
+        register();
         log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
+        log(`Probe hosts: ${cdpProbeHosts.join(',')}`);
+        log(`CDP last error: ${cdpLastError}`);
+        return false;
+    };
+
+    if (!(await negotiateCdp())) {
         updateStatusBar();
 
         // ─── CDP Auto-Fix Prompt ──────────────────────────────────────
@@ -782,15 +1312,15 @@ async function activate(context) {
         if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
 
         vscode.window.showErrorMessage(
-            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 for auto-accept to work natively and in WSL.',
+            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with an available --remote-debugging-port (for example 9000) and --remote-debugging-address=0.0.0.0.',
             ...actions
         ).then(action => {
             if (action === 'How to Fix') {
                 const guide = platform === 'linux'
-                    ? 'Find your Antigravity .desktop file (usually in ~/.local/share/applications/) or launch command and append: --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0. Then restart.'
+                    ? 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then restart VS Code window.'
                     : platform === 'darwin'
-                        ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9222'
-                        : 'Right-click your Antigravity shortcut → Properties → add --remote-debugging-port=9222 to the Target field.';
+                        ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0'
+                        : 'Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
                 vscode.window.showInformationMessage(guide, { modal: true });
             } else if (action === 'Auto-Fix Shortcut (Windows)') {
                 autoFixWindowsShortcut();
@@ -799,42 +1329,6 @@ async function activate(context) {
 
         return;
     }
-
-    // ─── Registry ─────────────────────────────────────────────────────
-    if (!fs.existsSync(REGISTRY_DIR)) {
-        fs.mkdirSync(REGISTRY_DIR, { recursive: true });
-    }
-
-    const register = () => {
-        let registry = {};
-        if (fs.existsSync(REGISTRY_FILE)) {
-            try {
-                registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
-            } catch {
-                registry = {};
-            }
-        }
-
-        const previous = (registry[workspacePath] && typeof registry[workspacePath] === 'object')
-            ? registry[workspacePath]
-            : {};
-
-        registry[workspacePath] = {
-            ...previous,
-            port: cdpTarget.port,
-            ip: cdpTarget.ip,
-            pid: process.pid,
-            lastActive: Date.now(),
-            ls: latestLs || previous.ls,
-            quota: latestQuota || previous.quota,
-            quotaError: latestQuotaError,
-        };
-
-        fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
-    };
-
-    register();
-    log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port}`);
 
     const refreshQuota = async () => {
         try {
@@ -864,6 +1358,48 @@ async function activate(context) {
     }, QUOTA_POLL_INTERVAL_MS);
     context.subscriptions.push({
         dispose: () => clearInterval(quotaTimer),
+    });
+
+    const heartbeatCdp = async () => {
+        if (cdpHeartbeatRunning) return;
+        if (!cdpTarget) return;
+        cdpHeartbeatRunning = true;
+        try {
+            const version = await getJson(`http://${cdpTarget.ip}:${cdpTarget.port}/json/version`, CDP_PROBE_TIMEOUT_MS);
+            if (!looksLikeAntigravityVersion(version)) {
+                throw new Error('version_not_antigravity');
+            }
+            cdpState = 'ready';
+            cdpSource = cdpSource || 'heartbeat';
+            cdpVerifiedAt = Date.now();
+            cdpLastError = null;
+            register();
+        } catch (error) {
+            cdpState = 'probing';
+            cdpLastError = `heartbeat ${shortError(error)}`;
+            register();
+            const recovered = await negotiateCdp();
+            if (!recovered) {
+                cdpTarget = null;
+                log(`CDP heartbeat recovery failed: ${cdpLastError || 'unknown'}`);
+            } else {
+                log(`CDP heartbeat recovered endpoint ${cdpTarget.ip}:${cdpTarget.port}`);
+            }
+            stopAutoAccept();
+            syncState();
+            updateQuotaStatusBar();
+        } finally {
+            cdpHeartbeatRunning = false;
+        }
+    };
+
+    const cdpHeartbeatTimer = setInterval(() => {
+        heartbeatCdp().catch((error) => {
+            log(`CDP heartbeat error: ${shortError(error)}`);
+        });
+    }, CDP_HEARTBEAT_INTERVAL_MS);
+    context.subscriptions.push({
+        dispose: () => clearInterval(cdpHeartbeatTimer),
     });
 
     syncState();

@@ -44,6 +44,7 @@ import {
 } from "./task-runtime.js";
 import { selectModelWithQuotaPolicy } from "./quota-policy.js";
 import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
+import { launchAntigravityForWorkspace } from "./launch-antigravity.js";
 
 // --- Constants ---
 
@@ -56,6 +57,7 @@ const INJECT_TIMEOUT_MS = 10000;
 const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
+const COLD_START_WAIT_MS = 45_000;
 const VERSION = "0.1.0";
 let activeAskTask: AskTask | null = null;
 
@@ -92,6 +94,20 @@ function uniqueStrings(items: string[]): string[] {
         out.push(value);
     }
     return out;
+}
+
+async function waitForDiscoveredCdp(
+    targetDir: string | undefined,
+    timeoutMs: number,
+    intervalMs = 1000
+): Promise<Awaited<ReturnType<typeof discoverCDP>>> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+        const found = await discoverCDP(targetDir);
+        if (found) return found;
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return null;
 }
 
 // --- MCP Server Setup ---
@@ -216,11 +232,39 @@ async function handleAskAntigravity(
         log(`[${task.id}] Discovering CDP target for ${targetDir || "default registry entry"}...`);
         await sendProgressNotification(progressToken, 0, "🔍 Discovering Antigravity...");
 
+        let launchAttempted = false;
         const discovered = await withRetry(
             async () => {
                 incrementTaskAttempt(task, "discover");
                 const found = await withTimeout(discoverCDP(targetDir), DISCOVER_TIMEOUT_MS, "discoverCDP");
                 if (!found) {
+                    if (!launchAttempted) {
+                        launchAttempted = true;
+                        const launch = await launchAntigravityForWorkspace({
+                            targetDir: targetDir || process.cwd(),
+                            log: (message) => log(`[${task.id}] ${message}`),
+                        });
+                        if (launch.started) {
+                            await sendProgressNotification(
+                                progressToken,
+                                2,
+                                "🚀 Launching Antigravity..."
+                            );
+                            const recovered = await waitForDiscoveredCdp(targetDir, COLD_START_WAIT_MS);
+                            if (recovered) {
+                                log(
+                                    `[${task.id}] CDP recovered after cold-start on ${recovered.ip}:${recovered.port}`
+                                );
+                                return recovered;
+                            }
+                            throw new RetryableError(
+                                `Antigravity launched but CDP did not become ready within ${Math.round(
+                                    COLD_START_WAIT_MS / 1000
+                                )}s`
+                            );
+                        }
+                        log(`[${task.id}] Cold-start launch skipped/failed: ${launch.error || "unknown"}`);
+                    }
                     throw new RetryableError(
                         "CDP not found for target dir. Ensure Antigravity is running with debug ports enabled, " +
                         "and the sidecar extension has registered the workspace."

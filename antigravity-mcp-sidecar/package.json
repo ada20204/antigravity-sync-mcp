@@ -32,6 +32,14 @@
             {
                 "command": "antigravityMcpSidecar.refreshQuota",
                 "title": "Refresh Antigravity Quota Snapshot"
+            },
+            {
+                "command": "antigravityMcpSidecar.launchAntigravity",
+                "title": "Launch Antigravity (New Window)"
+            },
+            {
+                "command": "antigravityMcpSidecar.restartAntigravity",
+                "title": "Restart Antigravity (Confirm)"
             }
         ],
         "configuration": {
@@ -51,6 +59,36 @@
                     "type": "number",
                     "default": 1500,
                     "description": "Polling interval (ms) for CDP webview button clicks (Always Allow)."
+                },
+                "antigravityMcpSidecar.cdpFixedHost": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional fixed CDP host override. When set, this host is probed first."
+                },
+                "antigravityMcpSidecar.cdpFixedPort": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Optional fixed CDP port override (0 means auto)."
+                },
+                "antigravityMcpSidecar.cdpPortCandidates": {
+                    "type": "string",
+                    "default": "9222,9229,9000-9014,8997-9003,7800-7850",
+                    "description": "Comma-separated ports/ranges used for CDP probing, e.g. 9000,9222,7800-7810."
+                },
+                "antigravityMcpSidecar.antigravityExecutablePath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional absolute path to Antigravity executable. Leave empty to auto-detect."
+                },
+                "antigravityMcpSidecar.antigravityLaunchPort": {
+                    "type": "number",
+                    "default": 9000,
+                    "description": "Default launch port when cdpFixedPort is 0."
+                },
+                "antigravityMcpSidecar.antigravityLaunchExtraArgs": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional extra launch arguments appended when launching Antigravity."
                 },
                 "antigravityMcpSidecar.quotaWarnThresholdPercent": {
                     "type": "number",

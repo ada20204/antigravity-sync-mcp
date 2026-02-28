@@ -78,6 +78,39 @@ export interface RegistryEntry {
     ls?: RegistryLsEndpoint;
     quota?: RegistryQuotaSnapshot;
     quotaError?: string;
+    cdp?: RegistryCdpState;
+}
+
+export interface RegistryCdpCandidate {
+    host?: string;
+    port?: number;
+}
+
+export interface RegistryCdpProbeItem {
+    host?: string;
+    port?: number;
+    stage?: string;
+    ok?: boolean;
+    source?: string;
+    error?: string;
+}
+
+export interface RegistryCdpActiveEndpoint {
+    host?: string;
+    port?: number;
+    source?: string;
+    verifiedAt?: number;
+}
+
+export interface RegistryCdpState {
+    generation?: number;
+    state?: "idle" | "probing" | "ready" | "error" | string;
+    updatedAt?: number;
+    verifiedAt?: number;
+    active?: RegistryCdpActiveEndpoint;
+    candidates?: RegistryCdpCandidate[];
+    probeSummary?: RegistryCdpProbeItem[];
+    lastError?: string;
 }
 
 export interface DiscoveredCDP {
@@ -85,6 +118,13 @@ export interface DiscoveredCDP {
     ip: string;
     target: CDPTarget;
     registry?: RegistryEntry;
+}
+
+const REGISTRY_CDP_READY_MAX_AGE_MS = 3 * 60 * 1000;
+
+function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
+    if (typeof value !== "number" || !Number.isFinite(value)) return false;
+    return Date.now() - value <= maxAgeMs;
 }
 
 function isWslRuntime(): boolean {
@@ -271,6 +311,10 @@ export async function discoverCDP(targetDir?: string): Promise<{
     let matchedRegistryEntry: RegistryEntry | undefined;
 
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
+    const envHost = process.env.ANTIGRAVITY_CDP_HOST?.trim();
+    if (envHost) {
+        cdpIp = envHost;
+    }
     if (envPort) {
         cdpPort = parseInt(envPort, 10);
     } else {
@@ -304,11 +348,24 @@ export async function discoverCDP(targetDir?: string): Promise<{
                 matched = entries[0][1];
             }
 
-            if (matched?.port && Number.isFinite(matched.port)) {
-                cdpPort = matched.port;
+            if (matched) {
                 matchedRegistryEntry = matched;
-                if (matched.ip) {
-                    cdpIp = matched.ip;
+                const cdpState = matched.cdp;
+                const active = cdpState?.active;
+                const readyFresh =
+                    cdpState?.state === "ready" &&
+                    isFreshTimestamp(active?.verifiedAt ?? cdpState?.verifiedAt, REGISTRY_CDP_READY_MAX_AGE_MS);
+
+                if (readyFresh && active?.port && Number.isFinite(active.port)) {
+                    cdpPort = active.port;
+                    if (active.host) {
+                        cdpIp = active.host;
+                    }
+                } else if (matched.port && Number.isFinite(matched.port)) {
+                    cdpPort = matched.port;
+                    if (matched.ip) {
+                        cdpIp = matched.ip;
+                    }
                 }
             }
         }
@@ -335,9 +392,19 @@ export async function discoverCDP(targetDir?: string): Promise<{
                 t.type === "page" &&
                 !t.url?.includes("jetski")
             );
+            const fallbackPage = list.find((t) =>
+                t.type === "page" &&
+                !!t.webSocketDebuggerUrl &&
+                !t.url?.includes("jetski")
+            );
 
-            if (workbench) {
-                return { port: cdpPort, ip, target: workbench, registry: matchedRegistryEntry };
+            if (workbench || fallbackPage) {
+                return {
+                    port: cdpPort,
+                    ip,
+                    target: (workbench || fallbackPage)!,
+                    registry: matchedRegistryEntry,
+                };
             }
         } catch {
             // Try next candidate.
