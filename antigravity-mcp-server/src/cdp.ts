@@ -15,8 +15,6 @@ import WebSocket from "ws";
 const REGISTRY_DIR = ".config/antigravity-mcp";
 const REGISTRY_FILE_NAME = "registry.json";
 const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
-const WSL_ROUTE_FILE = "/proc/net/route";
-const WSL_RESOLV_CONF = "/etc/resolv.conf";
 
 // --- Types ---
 
@@ -148,67 +146,9 @@ export interface DiscoveredCDP {
     registry?: RegistryEntry;
 }
 
-const REGISTRY_CDP_READY_MAX_AGE_MS = 3 * 60 * 1000;
-const REGISTRY_CDP_ACTIVE_STALE_MAX_AGE_MS = 10 * 60 * 1000;
-
-/**
- * Select the best CDP port/ip from a registry entry.
- * Prefers cdp.active when state is ready (fresh) or when active was
- * verified recently even if state is now error (sidecar heartbeat gap).
- * Falls back to the legacy port/ip fields.
- */
-export function selectCdpEndpoint(entry: RegistryEntry): { port?: number; ip?: string } {
-    const cdpState = entry.cdp;
-    const active = cdpState?.active;
-    const readyFresh =
-        cdpState?.state === "ready" &&
-        isFreshTimestamp(active?.verifiedAt ?? cdpState?.verifiedAt, REGISTRY_CDP_READY_MAX_AGE_MS);
-    const activeKnown =
-        active?.port != null && Number.isFinite(active.port) &&
-        isFreshTimestamp(active.verifiedAt, REGISTRY_CDP_ACTIVE_STALE_MAX_AGE_MS);
-
-    if ((readyFresh || activeKnown) && active?.port && Number.isFinite(active.port)) {
-        return { port: active.port, ip: active.host };
-    }
-    return { port: entry.port, ip: entry.ip };
-}
-
 function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
     return Date.now() - value <= maxAgeMs;
-}
-
-function isWslRuntime(): boolean {
-    return os.release().toLowerCase().includes("microsoft");
-}
-
-function isLocalhost(ip?: string): boolean {
-    if (!ip) return false;
-    const lower = ip.toLowerCase();
-    return lower === "127.0.0.1" || lower === "localhost" || lower === "::1";
-}
-
-function toWslPathFromWindowsPath(inputPath: string): string | null {
-    const normalized = inputPath.replace(/\\/g, "/");
-    const match = normalized.match(/^([A-Za-z]):\/(.*)$/);
-    if (!match) return null;
-    const drive = match[1].toLowerCase();
-    const rest = match[2];
-    return path.posix.normalize(`/mnt/${drive}/${rest}`);
-}
-
-export function normalizeRegistryPath(rawPath: string): string {
-    const trimmed = rawPath.trim();
-    const windowsAsWsl = toWslPathFromWindowsPath(trimmed);
-    if (windowsAsWsl) {
-        return windowsAsWsl;
-    }
-
-    let normalized = trimmed.replace(/\\/g, "/");
-    if (!normalized.startsWith("/")) {
-        normalized = `/${normalized}`;
-    }
-    return path.posix.normalize(normalized);
 }
 
 /** Normalize path the same way the sidecar does (for workspace_id hashing). */
@@ -226,133 +166,17 @@ export function computeWorkspaceId(rawPath: string): string {
     return crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
 }
 
-function dedupe(items: Array<string | undefined | null>): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const item of items) {
-        if (!item) continue;
-        const value = item.trim();
-        if (!value || seen.has(value)) continue;
-        seen.add(value);
-        out.push(value);
-    }
-    return out;
-}
-
-function getRegistryFileCandidates(): string[] {
-    const candidates: Array<string | undefined> = [LOCAL_REGISTRY_FILE];
-
-    if (!isWslRuntime()) {
-        return dedupe(candidates);
-    }
-
-    if (process.env.USERPROFILE) {
-        const converted = toWslPathFromWindowsPath(process.env.USERPROFILE);
-        if (converted) {
-            candidates.push(path.posix.join(converted, REGISTRY_DIR, REGISTRY_FILE_NAME));
-        }
-    }
-
-    if (process.env.HOMEDRIVE && process.env.HOMEPATH) {
-        const converted = toWslPathFromWindowsPath(
-            `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`
-        );
-        if (converted) {
-            candidates.push(path.posix.join(converted, REGISTRY_DIR, REGISTRY_FILE_NAME));
-        }
-    }
-
-    // Fallback: probe all Windows user profiles under /mnt/c/Users.
-    const usersDir = "/mnt/c/Users";
-    try {
-        if (fs.existsSync(usersDir)) {
-            for (const entry of fs.readdirSync(usersDir, { withFileTypes: true })) {
-                if (!entry.isDirectory()) continue;
-                candidates.push(
-                    path.posix.join(usersDir, entry.name, REGISTRY_DIR, REGISTRY_FILE_NAME)
-                );
-            }
-        }
-    } catch {
-        // Ignore candidate expansion failures.
-    }
-
-    return dedupe(candidates);
-}
-
 function readRegistryObject(): Record<string, RegistryEntry> | null {
-    for (const filePath of getRegistryFileCandidates()) {
-        try {
-            if (!fs.existsSync(filePath)) continue;
-            const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-            if (parsed && typeof parsed === "object") {
-                return parsed as Record<string, RegistryEntry>;
-            }
-        } catch (e) {
-            console.error(`[CDP] Failed to read registry '${filePath}': ${(e as Error).message}`);
+    try {
+        if (!fs.existsSync(LOCAL_REGISTRY_FILE)) return null;
+        const parsed = JSON.parse(fs.readFileSync(LOCAL_REGISTRY_FILE, "utf-8"));
+        if (parsed && typeof parsed === "object") {
+            return parsed as Record<string, RegistryEntry>;
         }
+    } catch (e) {
+        console.error(`[CDP] Failed to read registry '${LOCAL_REGISTRY_FILE}': ${(e as Error).message}`);
     }
     return null;
-}
-
-export function inferWslGatewayFromRouteTable(routeTable: string): string | null {
-    const lines = routeTable.split(/\r?\n/).filter(Boolean);
-    for (const line of lines.slice(1)) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 3) continue;
-        const destination = parts[1];
-        const gatewayHex = parts[2];
-        if (destination !== "00000000" || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
-
-        const b1 = parseInt(gatewayHex.slice(6, 8), 16);
-        const b2 = parseInt(gatewayHex.slice(4, 6), 16);
-        const b3 = parseInt(gatewayHex.slice(2, 4), 16);
-        const b4 = parseInt(gatewayHex.slice(0, 2), 16);
-        return `${b1}.${b2}.${b3}.${b4}`;
-    }
-    return null;
-}
-
-function readWslGatewayIp(): string | undefined {
-    if (!isWslRuntime()) return undefined;
-    try {
-        if (!fs.existsSync(WSL_ROUTE_FILE)) return undefined;
-        const routeTable = fs.readFileSync(WSL_ROUTE_FILE, "utf-8");
-        return inferWslGatewayFromRouteTable(routeTable) || undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-function readNameserverIp(): string | undefined {
-    try {
-        if (!fs.existsSync(WSL_RESOLV_CONF)) return undefined;
-        const content = fs.readFileSync(WSL_RESOLV_CONF, "utf-8");
-        const match = content.match(/^nameserver\s+([0-9.]+)\s*$/m);
-        return match?.[1];
-    } catch {
-        return undefined;
-    }
-}
-
-export function getCandidateCdpIps(params: {
-    registryIp?: string;
-    isWsl: boolean;
-    nameserverIp?: string;
-    gatewayIp?: string;
-}): string[] {
-    const { registryIp, isWsl, nameserverIp, gatewayIp } = params;
-    const ip = registryIp?.trim();
-
-    if (isWsl && (!ip || isLocalhost(ip))) {
-        return dedupe([gatewayIp, nameserverIp, ip, "127.0.0.1", "localhost"]);
-    }
-
-    if (isWsl) {
-        return dedupe([ip, gatewayIp, nameserverIp, "127.0.0.1", "localhost"]);
-    }
-
-    return dedupe([ip, "127.0.0.1"]);
 }
 
 // --- discoverCDP (Registry-based) ---
@@ -367,15 +191,11 @@ export async function discoverCDP(targetDir?: string): Promise<{
     target: CDPTarget;
     registry?: RegistryEntry;
 } | null> {
-    // 1. Resolve target mapping from env/registry
-    const isWsl = isWslRuntime();
-    const nameserverIp = readNameserverIp();
-    const gatewayIp = readWslGatewayIp();
-
     let cdpPort: number | undefined;
     let cdpIp: string | undefined;
     let matchedRegistryEntry: RegistryEntry | undefined;
 
+    // 1. Check environment variables first
     const envPort = process.env.ANTIGRAVITY_CDP_PORT;
     const envHost = process.env.ANTIGRAVITY_CDP_HOST?.trim();
     if (envHost) {
@@ -384,114 +204,37 @@ export async function discoverCDP(targetDir?: string): Promise<{
     if (envPort) {
         cdpPort = parseInt(envPort, 10);
     } else {
+        // 2. Match by workspace_id from registry
         const registry = readRegistryObject();
-        if (registry) {
-            const entries = Object.entries(registry);
+        if (registry && targetDir) {
+            const targetId = computeWorkspaceId(path.resolve(targetDir));
+            const v1Candidates = Object.values(registry)
+                .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
 
-            let matched: RegistryEntry | undefined;
-
-            // ── v1 path: match by workspace_id hash ──────────────────────────
-            if (targetDir) {
-                const targetId = computeWorkspaceId(path.resolve(targetDir));
+            if (v1Candidates.length > 0) {
                 // Prefer role=host, then highest priority
-                const v1Candidates = entries
-                    .map(([, e]) => e)
-                    .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
-                if (v1Candidates.length > 0) {
-                    v1Candidates.sort((a, b) => {
-                        const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
-                        const diff = roleScore(b) - roleScore(a);
-                        if (diff !== 0) return diff;
-                        return (b.priority ?? 0) - (a.priority ?? 0);
-                    });
-                    matched = v1Candidates[0];
-                }
-            }
+                v1Candidates.sort((a, b) => {
+                    const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
+                    const diff = roleScore(b) - roleScore(a);
+                    if (diff !== 0) return diff;
+                    return (b.priority ?? 0) - (a.priority ?? 0);
+                });
 
-            // ── v0 fallback: normalize-path matching ─────────────────────────
-            if (!matched) {
-                const targetAbsPath = targetDir
-                    ? normalizeRegistryPath(path.resolve(targetDir))
-                    : undefined;
-
-                if (targetAbsPath) {
-                    for (const [rawKey, entry] of entries) {
-                        if (normalizeRegistryPath(rawKey) === targetAbsPath) {
-                            matched = entry;
-                            break;
-                        }
-                    }
-                    if (!matched) {
-                        let bestPrefixLength = -1;
-                        for (const [rawKey, entry] of entries) {
-                            const normalizedKey = normalizeRegistryPath(rawKey);
-                            if (!targetAbsPath.startsWith(normalizedKey)) continue;
-                            if (normalizedKey.length <= bestPrefixLength) continue;
-                            bestPrefixLength = normalizedKey.length;
-                            matched = entry;
-                        }
-                    }
-                } else if (entries.length > 0) {
-                    matched = entries[0][1];
-                }
-            }
-
-            if (matched) {
+                const matched = v1Candidates[0];
                 matchedRegistryEntry = matched;
 
-                // ── v1 fast-path: use local_endpoint directly ─────────────────
+                // Use local_endpoint directly
                 const le = matched.local_endpoint;
-                const v1Ready =
-                    matched.schema_version === 1 &&
+                const isReady =
                     matched.state === "ready" &&
                     le?.port != null &&
                     Number.isFinite(le.port) &&
                     isFreshTimestamp(matched.verified_at, matched.ttl_ms ?? 30000);
 
-                if (v1Ready && le?.port) {
+                if (isReady && le?.port) {
                     cdpPort = le.port;
                     cdpIp = le.host ?? "127.0.0.1";
-                } else {
-                    // v0 fallback
-                    const selected = selectCdpEndpoint(matched);
-                    if (selected.port && Number.isFinite(selected.port)) {
-                        cdpPort = selected.port;
-                        if (selected.ip) cdpIp = selected.ip;
-                    }
                 }
-            }
-        }
-    }
-
-    // 1b. When sidecar is still probing (no confirmed active endpoint),
-    //     try each registry candidate directly — server can reach them on Windows.
-    if (!cdpPort && matchedRegistryEntry?.cdp?.state === "probing") {
-        const registryCandidates = matchedRegistryEntry.cdp.candidates ?? [];
-        for (const candidate of registryCandidates) {
-            if (!candidate?.port) continue;
-            const ip = candidate.host ?? "127.0.0.1";
-            try {
-                const response = await fetch(
-                    `http://${ip}:${candidate.port}/json/list`,
-                    { signal: AbortSignal.timeout(2000) }
-                );
-                const list: CDPTarget[] = await response.json() as any;
-                const workbench = list.find((t) =>
-                    t.url?.includes("workbench.html") && t.type === "page" && !t.url?.includes("jetski")
-                );
-                const fallbackPage = list.find((t) =>
-                    t.type === "page" && !!t.webSocketDebuggerUrl && !t.url?.includes("jetski")
-                );
-                if (workbench || fallbackPage) {
-                    return {
-                        port: candidate.port,
-                        ip,
-                        target: (workbench || fallbackPage)!,
-                        registry: matchedRegistryEntry,
-                    };
-                }
-            } catch {
-                // Try next candidate.
             }
         }
     }
@@ -500,45 +243,35 @@ export async function discoverCDP(targetDir?: string): Promise<{
         return null;
     }
 
-    // 2. Probe candidate IPs until one yields a valid workbench target
-    const candidateIps = getCandidateCdpIps({
-        registryIp: cdpIp,
-        isWsl,
-        nameserverIp,
-        gatewayIp,
-    });
+    // 3. Connect to the local_endpoint
+    try {
+        const response = await fetch(`http://${cdpIp}:${cdpPort}/json/list`);
+        const list: CDPTarget[] = await response.json() as any;
+        const workbench = list.find((t) =>
+            t.url?.includes("workbench.html") &&
+            t.type === "page" &&
+            !t.url?.includes("jetski")
+        );
+        const fallbackPage = list.find((t) =>
+            t.type === "page" &&
+            !!t.webSocketDebuggerUrl &&
+            !t.url?.includes("jetski")
+        );
 
-    for (const ip of candidateIps) {
-        try {
-            const response = await fetch(`http://${ip}:${cdpPort}/json/list`);
-            const list: CDPTarget[] = await response.json() as any;
-            const workbench = list.find((t) =>
-                t.url?.includes("workbench.html") &&
-                t.type === "page" &&
-                !t.url?.includes("jetski")
-            );
-            const fallbackPage = list.find((t) =>
-                t.type === "page" &&
-                !!t.webSocketDebuggerUrl &&
-                !t.url?.includes("jetski")
-            );
-
-            if (workbench || fallbackPage) {
-                return {
-                    port: cdpPort,
-                    ip,
-                    target: (workbench || fallbackPage)!,
-                    registry: matchedRegistryEntry,
-                };
-            }
-        } catch {
-            // Try next candidate.
+        if (workbench || fallbackPage) {
+            return {
+                port: cdpPort,
+                ip: cdpIp ?? "127.0.0.1",
+                target: (workbench || fallbackPage)!,
+                registry: matchedRegistryEntry,
+            };
         }
+    } catch (error) {
+        console.error(
+            `[CDP] Failed to connect to ${cdpIp}:${cdpPort}: ${(error as Error).message}`
+        );
     }
 
-    console.error(
-        `[CDP] Target ${candidateIps.join(",")}:${cdpPort} from registry is unreachable.`
-    );
     return null;
 }
 

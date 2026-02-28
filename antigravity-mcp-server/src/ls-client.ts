@@ -1,16 +1,10 @@
-import fs from "fs";
 import https from "https";
-import os from "os";
 import type { ClientRequest, IncomingMessage } from "http";
 import {
-    getCandidateCdpIps,
-    inferWslGatewayFromRouteTable,
     type DiscoveredCDP,
     type RegistryLsEndpoint,
 } from "./cdp.js";
 
-const WSL_ROUTE_FILE = "/proc/net/route";
-const WSL_RESOLV_CONF = "/etc/resolv.conf";
 const LS_SERVICE_PATH = "/exa.language_server_pb.LanguageServerService";
 
 export interface ReactiveStreamState {
@@ -27,31 +21,6 @@ export interface ReactiveStreamHandle {
     close: () => void;
 }
 
-function readNameserverIp(): string | undefined {
-    try {
-        if (!fs.existsSync(WSL_RESOLV_CONF)) return undefined;
-        const content = fs.readFileSync(WSL_RESOLV_CONF, "utf-8");
-        const match = content.match(/^nameserver\s+([0-9.]+)\s*$/m);
-        return match?.[1];
-    } catch {
-        return undefined;
-    }
-}
-
-function readGatewayIp(): string | undefined {
-    try {
-        if (!fs.existsSync(WSL_ROUTE_FILE)) return undefined;
-        const content = fs.readFileSync(WSL_ROUTE_FILE, "utf-8");
-        return inferWslGatewayFromRouteTable(content) || undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-function isWslRuntime(): boolean {
-    return os.release().toLowerCase().includes("microsoft");
-}
-
 export function resolveLsEndpoint(discovered: DiscoveredCDP): RegistryLsEndpoint | undefined {
     const ls = discovered.registry?.ls;
     if (!ls?.port || !ls?.csrfToken) return undefined;
@@ -59,13 +28,8 @@ export function resolveLsEndpoint(discovered: DiscoveredCDP): RegistryLsEndpoint
 }
 
 function lsCandidateIps(discovered: DiscoveredCDP): string[] {
-    const lsHost = discovered.registry?.ls?.sourceHost || discovered.registry?.ip || discovered.ip;
-    return getCandidateCdpIps({
-        registryIp: lsHost,
-        isWsl: isWslRuntime(),
-        nameserverIp: readNameserverIp(),
-        gatewayIp: readGatewayIp(),
-    });
+    const host = discovered.registry?.ls?.sourceHost || discovered.ip;
+    return host ? [host] : [discovered.ip];
 }
 
 function postLsJsonAtHost(params: {
