@@ -39,11 +39,12 @@ function computeWorkspaceId(rawPath) {
 
 function mapCdpStateToV1(state) {
     switch (state) {
-        case 'idle':    return 'app_down';
-        case 'probing': return 'app_up_cdp_not_ready';
-        case 'ready':   return 'ready';
-        case 'error':   return 'error';
-        default:        return 'app_down';
+        case 'idle':      return 'app_down';
+        case 'launching': return 'launching';
+        case 'probing':   return 'app_up_cdp_not_ready';
+        case 'ready':     return 'ready';
+        case 'error':     return 'error';
+        default:          return 'app_down';
     }
 }
 // ──────────────────────────────────────────────────────────────────────────
@@ -858,6 +859,8 @@ async function activate(context) {
     let cdpVerifiedAt = 0;
     let cdpSource = null;
     let cdpHeartbeatRunning = false;
+    let launchTimeoutHandle = null;
+    const LAUNCH_TIMEOUT_MS = 60_000;
     let cdpFixedHost = '';
     let cdpFixedPort = 0;
     let cdpPortSpec = DEFAULT_CDP_PORT_SPEC;
@@ -1078,14 +1081,26 @@ async function activate(context) {
             return;
         }
 
-        cdpState = 'probing';
+        // Transition to 'launching' — prevents duplicate remote launch requests.
+        // Auto-expires to 'idle' (app_down) if process never appears within LAUNCH_TIMEOUT_MS.
+        if (launchTimeoutHandle) clearTimeout(launchTimeoutHandle);
+        cdpState = 'launching';
         cdpLastError = null;
         cdpSource = action === 'restart' ? 'manual-restart' : 'manual-launch';
         register();
+        launchTimeoutHandle = setTimeout(() => {
+            launchTimeoutHandle = null;
+            if (cdpState === 'launching') {
+                cdpState = 'idle';
+                register();
+                log('Launch timeout: no process appeared within timeout, reverting to app_down');
+            }
+        }, LAUNCH_TIMEOUT_MS);
 
         // Give new process a short head start before probing.
         await new Promise((resolve) => setTimeout(resolve, action === 'restart' ? 1500 : 800));
         const ok = await negotiateCdp();
+        if (launchTimeoutHandle) { clearTimeout(launchTimeoutHandle); launchTimeoutHandle = null; }
         stopAutoAccept();
         syncState();
         updateQuotaStatusBar();
