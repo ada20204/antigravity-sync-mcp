@@ -31,7 +31,6 @@ import {
     extractLatestResponse,
     stopGeneration,
 } from "./scripts.js";
-import { autoAcceptPoll, DEFAULT_BANNED_COMMANDS } from "./auto-accept.js";
 import {
     createAskTask,
     incrementTaskAttempt,
