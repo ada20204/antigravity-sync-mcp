@@ -11,6 +11,8 @@ const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 
 const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
+const REMOTE_MIRROR_POLL_INTERVAL_MS = 3_000;
+const REMOTE_MIRROR_KEY_PREFIX = '__mirror__';
 const QUOTA_POLL_INTERVAL_MS = 60_000;
 const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CDP_PROBE_TIMEOUT_MS = 250;
@@ -46,6 +48,75 @@ function mapCdpStateToV1(state) {
         case 'error':     return 'error';
         default:          return 'app_down';
     }
+}
+// ──────────────────────────────────────────────────────────────────────────
+
+// ── Remote mirror helpers (WSL) ───────────────────────────────────────────
+function isWslRuntime() {
+    return process.platform === 'linux' && os.release().toLowerCase().includes('microsoft');
+}
+
+function getWslGatewayIp() {
+    if (!isWslRuntime()) return null;
+    try {
+        const routeFile = '/proc/net/route';
+        if (!fs.existsSync(routeFile)) return null;
+        const content = fs.readFileSync(routeFile, 'utf-8');
+        const lines = content.split(/\r?\n/).filter(Boolean);
+        for (const line of lines.slice(1)) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length < 3) continue;
+            const dest = parts[1];
+            const gatewayHex = parts[2];
+            if (dest !== '00000000' || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
+            const b1 = parseInt(gatewayHex.slice(6, 8), 16);
+            const b2 = parseInt(gatewayHex.slice(4, 6), 16);
+            const b3 = parseInt(gatewayHex.slice(2, 4), 16);
+            const b4 = parseInt(gatewayHex.slice(0, 2), 16);
+            return `${b1}.${b2}.${b3}.${b4}`;
+        }
+    } catch { }
+    return null;
+}
+
+function findHostRegistryFile() {
+    if (!isWslRuntime()) return null;
+    const usersDir = '/mnt/c/Users';
+    try {
+        if (!fs.existsSync(usersDir)) return null;
+        const users = fs.readdirSync(usersDir, { withFileTypes: true });
+        for (const user of users) {
+            if (!user.isDirectory()) continue;
+            const candidate = path.posix.join(usersDir, user.name, '.config/antigravity-mcp/registry.json');
+            if (fs.existsSync(candidate)) return candidate;
+        }
+    } catch { }
+    return null;
+}
+
+function mirrorHostEntry(hostEntry, wslWorkspacePath, gatewayIp) {
+    if (!hostEntry || hostEntry.schema_version !== 1 || hostEntry.role !== 'host') return null;
+    const sourceEndpoint = hostEntry.source_endpoint;
+    if (!sourceEndpoint || !sourceEndpoint.port) return null;
+
+    const mirrorEntry = {
+        ...hostEntry,
+        role: 'remote',
+        workspace_paths: {
+            normalized: normalizePath(wslWorkspacePath),
+            raw: wslWorkspacePath,
+        },
+        local_endpoint: {
+            host: gatewayIp || '127.0.0.1',
+            port: sourceEndpoint.port,
+            mode: 'direct',
+        },
+        quota_meta: hostEntry.quota_meta ? {
+            ...hostEntry.quota_meta,
+            source: 'mirrored',
+        } : undefined,
+    };
+    return mirrorEntry;
 }
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -1472,6 +1543,68 @@ async function activate(context) {
     context.subscriptions.push({
         dispose: () => clearInterval(cdpHeartbeatTimer),
     });
+
+    // ─── Remote Mirror (WSL only) ─────────────────────────────────────
+    // When running inside WSL, poll the Windows host registry file and
+    // write translated mirror entries so the local MCP server can find them.
+    if (isWslRuntime()) {
+        const gatewayIp = getWslGatewayIp();
+        log(`WSL runtime detected. Gateway IP: ${gatewayIp || 'unknown'}. Starting remote mirror polling.`);
+
+        const pollRemoteMirror = () => {
+            try {
+                const hostRegistryFile = findHostRegistryFile();
+                if (!hostRegistryFile) return;
+
+                const hostRegistry = JSON.parse(fs.readFileSync(hostRegistryFile, 'utf-8'));
+                const localRegistry = readRegistryObject();
+
+                let changed = false;
+                // Remove stale mirror entries first
+                for (const key of Object.keys(localRegistry)) {
+                    if (key.startsWith(REMOTE_MIRROR_KEY_PREFIX)) {
+                        const mirrorEntry = localRegistry[key];
+                        // Check if the corresponding host entry still exists
+                        const hostId = mirrorEntry.workspace_id;
+                        const hostStillExists = Object.values(hostRegistry).some(
+                            (e) => e.schema_version === 1 && e.workspace_id === hostId && e.role === 'host'
+                        );
+                        if (!hostStillExists) {
+                            delete localRegistry[key];
+                            changed = true;
+                        }
+                    }
+                }
+
+                // Upsert mirror entries for each host entry
+                for (const [, hostEntry] of Object.entries(hostRegistry)) {
+                    if (hostEntry.schema_version !== 1 || hostEntry.role !== 'host') continue;
+                    const rawPath = hostEntry.workspace_paths && hostEntry.workspace_paths.raw;
+                    if (!rawPath) continue;
+
+                    // Translate Windows path to WSL path for the mirror key
+                    const wslPath = rawPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+                    const mirrorKey = REMOTE_MIRROR_KEY_PREFIX + (hostEntry.workspace_id || computeWorkspaceId(rawPath));
+                    const mirrored = mirrorHostEntry(hostEntry, wslPath, gatewayIp);
+                    if (!mirrored) continue;
+
+                    localRegistry[mirrorKey] = mirrored;
+                    changed = true;
+                }
+
+                if (changed) {
+                    writeRegistryObject(localRegistry);
+                    log(`Remote mirror updated (${Object.keys(localRegistry).filter(k => k.startsWith(REMOTE_MIRROR_KEY_PREFIX)).length} mirror entries)`);
+                }
+            } catch (e) {
+                // Non-fatal: host registry may not exist yet
+            }
+        };
+
+        pollRemoteMirror();
+        const mirrorTimer = setInterval(pollRemoteMirror, REMOTE_MIRROR_POLL_INTERVAL_MS);
+        context.subscriptions.push({ dispose: () => clearInterval(mirrorTimer) });
+    }
 
     syncState();
 
