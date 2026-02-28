@@ -206,21 +206,43 @@ export async function discoverCDP(targetDir?: string): Promise<{
     } else {
         // 2. Match by workspace_id from registry
         const registry = readRegistryObject();
-        if (registry && targetDir) {
-            const targetId = computeWorkspaceId(path.resolve(targetDir));
-            const v1Candidates = Object.values(registry)
-                .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
+        if (registry) {
+            let matched: RegistryEntry | undefined;
 
-            if (v1Candidates.length > 0) {
-                // Prefer role=host, then highest priority
-                v1Candidates.sort((a, b) => {
-                    const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
-                    const diff = roleScore(b) - roleScore(a);
-                    if (diff !== 0) return diff;
-                    return (b.priority ?? 0) - (a.priority ?? 0);
-                });
+            if (targetDir) {
+                // Match by workspace_id
+                const targetId = computeWorkspaceId(path.resolve(targetDir));
+                const v1Candidates = Object.values(registry)
+                    .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
 
-                const matched = v1Candidates[0];
+                if (v1Candidates.length > 0) {
+                    // Prefer role=host, then highest priority
+                    v1Candidates.sort((a, b) => {
+                        const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
+                        const diff = roleScore(b) - roleScore(a);
+                        if (diff !== 0) return diff;
+                        return (b.priority ?? 0) - (a.priority ?? 0);
+                    });
+                    matched = v1Candidates[0];
+                }
+            } else {
+                // No targetDir: find any ready host entry
+                const readyHosts = Object.values(registry)
+                    .filter((e) =>
+                        e.schema_version === 1 &&
+                        e.role === "host" &&
+                        e.state === "ready" &&
+                        e.local_endpoint?.port != null &&
+                        isFreshTimestamp(e.verified_at, e.ttl_ms ?? 30000)
+                    );
+                if (readyHosts.length > 0) {
+                    // Pick highest priority
+                    readyHosts.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+                    matched = readyHosts[0];
+                }
+            }
+
+            if (matched) {
                 matchedRegistryEntry = matched;
 
                 // Use local_endpoint directly

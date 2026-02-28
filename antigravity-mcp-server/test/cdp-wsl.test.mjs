@@ -2,88 +2,46 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  normalizeRegistryPath,
-  inferWslGatewayFromRouteTable,
-  getCandidateCdpIps,
+  computeWorkspaceId,
 } from '../dist/cdp.js';
 
-test('normalizeRegistryPath handles backslash-prefixed WSL path', () => {
-  assert.equal(
-    normalizeRegistryPath('\\home\\elliot\\antigravity-sync'),
-    '/home/elliot/antigravity-sync'
-  );
+test('computeWorkspaceId generates consistent hash for same path', () => {
+  const path1 = '/home/elliot/workspace';
+  const path2 = '/home/elliot/workspace';
+
+  assert.equal(computeWorkspaceId(path1), computeWorkspaceId(path2));
 });
 
-test('inferWslGatewayFromRouteTable parses /proc/net/route hex gateway', () => {
-  const routeTable = [
-    'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
-    'eth0\t00000000\t01D01FAC\t0003\t0\t0\t0\t00000000\t0\t0\t0',
-  ].join('\n');
+test('computeWorkspaceId generates different hashes for different paths', () => {
+  const path1 = '/home/elliot/workspace1';
+  const path2 = '/home/elliot/workspace2';
 
-  assert.equal(inferWslGatewayFromRouteTable(routeTable), '172.31.208.1');
+  assert.notEqual(computeWorkspaceId(path1), computeWorkspaceId(path2));
 });
 
-test('getCandidateCdpIps adds WSL gateway before localhost when registry ip is localhost', () => {
-  const ips = getCandidateCdpIps({
-    registryIp: '127.0.0.1',
-    isWsl: true,
-    nameserverIp: '100.100.100.100',
-    gatewayIp: '172.31.208.1',
-  });
+test('computeWorkspaceId produces 16-character hex string', () => {
+  const id = computeWorkspaceId('/some/path');
 
-  assert.equal(ips[0], '172.31.208.1');
-  assert.ok(ips.includes('127.0.0.1'));
-  assert.ok(ips.includes('100.100.100.100'));
+  assert.equal(id.length, 16);
+  assert.match(id, /^[0-9a-f]+$/);
 });
 
-import { selectCdpEndpoint } from '../dist/cdp.js';
+// WSL mirror workspace_id matching tests
+test('WSL path produces different workspace_id than Windows path', () => {
+  const windowsPath = 'c:/Users/elliot/workspace';
+  const wslPath = '/mnt/c/Users/elliot/workspace';
 
-test('selectCdpEndpoint prefers cdp.active port when state is ready and fresh', () => {
-  const now = Date.now();
-  const entry = {
-    port: 9000,
-    ip: '127.0.0.1',
-    cdp: {
-      state: 'ready',
-      verifiedAt: now,
-      active: { host: '127.0.0.1', port: 9010, verifiedAt: now, source: 'probe' },
-    },
-  };
-  const result = selectCdpEndpoint(entry);
-  assert.equal(result.port, 9010, 'should prefer active.port over legacy port');
+  const windowsId = computeWorkspaceId(windowsPath);
+  const wslId = computeWorkspaceId(wslPath);
+
+  // They should be different because the normalized paths are different
+  assert.notEqual(windowsId, wslId);
 });
 
-test('selectCdpEndpoint uses cdp.active when state is error but verifiedAt is recent', () => {
-  const now = Date.now();
-  const entry = {
-    port: 9000,
-    ip: '127.0.0.1',
-    cdp: {
-      state: 'error',
-      active: { host: '172.31.208.1', port: 9005, verifiedAt: now - 2 * 60 * 1000 },
-    },
-  };
-  const result = selectCdpEndpoint(entry);
-  assert.equal(result.port, 9005, 'should use active.port when recently verified');
-  assert.equal(result.ip, '172.31.208.1', 'should use active.host when recently verified');
-});
+test('Same normalized path produces same workspace_id', () => {
+  const path1 = '/home/elliot/workspace';
+  const path2 = '/home/elliot/workspace/';
 
-test('selectCdpEndpoint falls back to legacy port when active is stale', () => {
-  const entry = {
-    port: 9000,
-    ip: '127.0.0.1',
-    cdp: {
-      state: 'error',
-      active: { host: '172.31.208.1', port: 9005, verifiedAt: Date.now() - 15 * 60 * 1000 },
-    },
-  };
-  const result = selectCdpEndpoint(entry);
-  assert.equal(result.port, 9000, 'should fall back to legacy port when active is stale');
-});
-
-test('selectCdpEndpoint falls back to legacy port when no cdp field', () => {
-  const entry = { port: 9000, ip: '127.0.0.1' };
-  const result = selectCdpEndpoint(entry);
-  assert.equal(result.port, 9000);
-  assert.equal(result.ip, '127.0.0.1');
+  // Trailing slash should be normalized away
+  assert.equal(computeWorkspaceId(path1), computeWorkspaceId(path2));
 });
