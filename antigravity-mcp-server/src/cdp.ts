@@ -9,6 +9,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import crypto from "crypto";
 import WebSocket from "ws";
 
 const REGISTRY_DIR = ".config/antigravity-mcp";
@@ -70,7 +71,34 @@ export interface RegistryLsEndpoint {
     sourceHost?: string;
 }
 
+export interface RegistryV1Endpoint {
+    host?: string;
+    port?: number;
+    mode?: string;
+}
+
+export interface RegistryV1QuotaMeta {
+    source?: string;
+    stale?: boolean;
+    refreshed_at?: number;
+    refresh_interval_ms?: number;
+}
+
 export interface RegistryEntry {
+    // v1 fields
+    schema_version?: number;
+    workspace_id?: string;
+    workspace_paths?: { normalized?: string; raw?: string };
+    role?: string;
+    source_of_truth?: string;
+    source_endpoint?: RegistryV1Endpoint;
+    local_endpoint?: RegistryV1Endpoint;
+    state?: string;
+    verified_at?: number;
+    ttl_ms?: number;
+    priority?: number;
+    quota_meta?: RegistryV1QuotaMeta;
+    // v0 fields
     port?: number;
     ip?: string;
     pid?: number;
@@ -181,6 +209,21 @@ export function normalizeRegistryPath(rawPath: string): string {
         normalized = `/${normalized}`;
     }
     return path.posix.normalize(normalized);
+}
+
+/** Normalize path the same way the sidecar does (for workspace_id hashing). */
+function normalizePathForId(rawPath: string): string {
+    let p = rawPath.trim();
+    if (!p) return "";
+    p = p.replace(/\\/g, "/");
+    p = p.replace(/^([A-Z]):/, (_, d: string) => d.toLowerCase() + ":");
+    if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
+    return p;
+}
+
+export function computeWorkspaceId(rawPath: string): string {
+    const normalized = normalizePathForId(rawPath);
+    return crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
 }
 
 function dedupe(items: Array<string | undefined | null>): string[] {
@@ -344,40 +387,76 @@ export async function discoverCDP(targetDir?: string): Promise<{
         const registry = readRegistryObject();
         if (registry) {
             const entries = Object.entries(registry);
-            const targetAbsPath = targetDir ? normalizeRegistryPath(path.resolve(targetDir)) : undefined;
 
             let matched: RegistryEntry | undefined;
-            if (targetAbsPath) {
-                // Exact match first
-                for (const [rawKey, entry] of entries) {
-                    if (normalizeRegistryPath(rawKey) === targetAbsPath) {
-                        matched = entry;
-                        break;
-                    }
-                }
 
-                // Longest prefix match for subfolders
-                if (!matched) {
-                    let bestPrefixLength = -1;
-                    for (const [rawKey, entry] of entries) {
-                        const normalizedKey = normalizeRegistryPath(rawKey);
-                        if (!targetAbsPath.startsWith(normalizedKey)) continue;
-                        if (normalizedKey.length <= bestPrefixLength) continue;
-                        bestPrefixLength = normalizedKey.length;
-                        matched = entry;
-                    }
+            // ── v1 path: match by workspace_id hash ──────────────────────────
+            if (targetDir) {
+                const targetId = computeWorkspaceId(path.resolve(targetDir));
+                // Prefer role=host, then highest priority
+                const v1Candidates = entries
+                    .map(([, e]) => e)
+                    .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
+                if (v1Candidates.length > 0) {
+                    v1Candidates.sort((a, b) => {
+                        const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
+                        const diff = roleScore(b) - roleScore(a);
+                        if (diff !== 0) return diff;
+                        return (b.priority ?? 0) - (a.priority ?? 0);
+                    });
+                    matched = v1Candidates[0];
                 }
-            } else if (entries.length > 0) {
-                matched = entries[0][1];
+            }
+
+            // ── v0 fallback: normalize-path matching ─────────────────────────
+            if (!matched) {
+                const targetAbsPath = targetDir
+                    ? normalizeRegistryPath(path.resolve(targetDir))
+                    : undefined;
+
+                if (targetAbsPath) {
+                    for (const [rawKey, entry] of entries) {
+                        if (normalizeRegistryPath(rawKey) === targetAbsPath) {
+                            matched = entry;
+                            break;
+                        }
+                    }
+                    if (!matched) {
+                        let bestPrefixLength = -1;
+                        for (const [rawKey, entry] of entries) {
+                            const normalizedKey = normalizeRegistryPath(rawKey);
+                            if (!targetAbsPath.startsWith(normalizedKey)) continue;
+                            if (normalizedKey.length <= bestPrefixLength) continue;
+                            bestPrefixLength = normalizedKey.length;
+                            matched = entry;
+                        }
+                    }
+                } else if (entries.length > 0) {
+                    matched = entries[0][1];
+                }
             }
 
             if (matched) {
                 matchedRegistryEntry = matched;
-                const selected = selectCdpEndpoint(matched);
-                if (selected.port && Number.isFinite(selected.port)) {
-                    cdpPort = selected.port;
-                    if (selected.ip) {
-                        cdpIp = selected.ip;
+
+                // ── v1 fast-path: use local_endpoint directly ─────────────────
+                const le = matched.local_endpoint;
+                const v1Ready =
+                    matched.schema_version === 1 &&
+                    matched.state === "ready" &&
+                    le?.port != null &&
+                    Number.isFinite(le.port) &&
+                    isFreshTimestamp(matched.verified_at, matched.ttl_ms ?? 30000);
+
+                if (v1Ready && le?.port) {
+                    cdpPort = le.port;
+                    cdpIp = le.host ?? "127.0.0.1";
+                } else {
+                    // v0 fallback
+                    const selected = selectCdpEndpoint(matched);
+                    if (selected.port && Number.isFinite(selected.port)) {
+                        cdpPort = selected.port;
+                        if (selected.ip) cdpIp = selected.ip;
                     }
                 }
             }

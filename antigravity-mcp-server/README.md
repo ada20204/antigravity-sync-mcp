@@ -66,7 +66,7 @@ Add to your MCP config:
 ## How It Works
 
 1. External agent calls `ask-antigravity` with a prompt
-2. Server discovers target workspace via sidecar registry (`~/.antigravity-mcp/registry.json`)
+2. Server discovers target workspace via sidecar registry (`~/.config/antigravity-mcp/registry.json`)
 3. If CDP is unavailable, server performs one cold-start launch attempt (`<targetDir> --new-window --remote-debugging-port=<port>`)
 4. Server applies mode/model policy with quota-aware fallback (using registry quota snapshot when fresh)
 5. Connects via WebSocket and injects the prompt through CDP (send path unchanged)

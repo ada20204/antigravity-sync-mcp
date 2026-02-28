@@ -4,7 +4,8 @@ const path = require('path');
 const os = require('os');
 const http = require('http');
 const https = require('https');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
+const { createHash } = require('crypto');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 
@@ -21,6 +22,31 @@ const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
 const execAsync = promisify(exec);
 
+// ── Schema v1 helpers ──────────────────────────────────────────────────────
+function normalizePath(rawPath) {
+    let p = String(rawPath || '').trim();
+    if (!p) return '';
+    p = p.replace(/\\/g, '/');
+    p = p.replace(/^([A-Z]):/, (_, d) => d.toLowerCase() + ':');
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+}
+
+function computeWorkspaceId(rawPath) {
+    const normalized = normalizePath(rawPath);
+    return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 16);
+}
+
+function mapCdpStateToV1(state) {
+    switch (state) {
+        case 'idle':    return 'app_down';
+        case 'probing': return 'app_up_cdp_not_ready';
+        case 'ready':   return 'ready';
+        case 'error':   return 'error';
+        default:        return 'app_down';
+    }
+}
+// ──────────────────────────────────────────────────────────────────────────
 
 let outputChannel;
 
@@ -1223,12 +1249,39 @@ async function activate(context) {
         const activeHost = cdpTarget ? cdpTarget.ip : (previousCdp.active && previousCdp.active.host) || previous.ip;
         const activePort = cdpTarget ? cdpTarget.port : (previousCdp.active && previousCdp.active.port) || previous.port;
 
+        const now = Date.now();
+        const v1State = mapCdpStateToV1(cdpState);
+        const endpointHost = activeHost || '127.0.0.1';
+        const endpointPort = activePort || 9000;
+
         registry[workspacePath] = {
             ...previous,
+            // ── schema v1 fields ──
+            schema_version: 1,
+            workspace_id: computeWorkspaceId(workspacePath),
+            workspace_paths: {
+                normalized: normalizePath(workspacePath),
+                raw: workspacePath,
+            },
+            role: 'host',
+            source_of_truth: 'host',
+            source_endpoint: { host: endpointHost, port: endpointPort },
+            local_endpoint: { host: endpointHost, port: endpointPort, mode: 'direct' },
+            state: v1State,
+            verified_at: cdpVerifiedAt || previous.verified_at || now,
+            ttl_ms: 30000,
+            priority: 100,
+            quota_meta: {
+                source: 'host',
+                stale: false,
+                refreshed_at: now,
+                refresh_interval_ms: QUOTA_POLL_INTERVAL_MS,
+            },
+            // ── v0 fields (kept for backward compat) ──
             port: cdpTarget ? cdpTarget.port : previous.port,
             ip: cdpTarget ? cdpTarget.ip : previous.ip,
             pid: process.pid,
-            lastActive: Date.now(),
+            lastActive: now,
             ls: latestLs || previous.ls,
             quota: latestQuota || previous.quota,
             quotaError: latestQuotaError,
@@ -1236,14 +1289,14 @@ async function activate(context) {
                 ...previousCdp,
                 generation: cdpGeneration,
                 state: cdpState,
-                updatedAt: Date.now(),
+                updatedAt: now,
                 verifiedAt: cdpVerifiedAt || previousCdp.verifiedAt,
                 active: (activeHost && activePort)
                     ? {
                         host: activeHost,
                         port: activePort,
                         source: cdpSource || (previousCdp.active && previousCdp.active.source) || 'registry',
-                        verifiedAt: cdpVerifiedAt || (previousCdp.active && previousCdp.active.verifiedAt) || Date.now(),
+                        verifiedAt: cdpVerifiedAt || (previousCdp.active && previousCdp.active.verifiedAt) || now,
                     }
                     : undefined,
                 candidates: buildCandidateMatrix(cdpProbeHosts, cdpProbePorts),

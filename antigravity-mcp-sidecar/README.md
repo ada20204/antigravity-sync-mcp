@@ -16,7 +16,7 @@ All-in-one companion extension for Antigravity (Cursor fork).
 2. **CDP Webview Injection (1500ms)**: Injects click scripts into the isolated agent panel via Chrome DevTools Protocol
 
 ### MCP Registry
-Writes workspace state to `~/.antigravity-mcp/registry.json`:
+Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - legacy fields: `ip`, `port`
 - negotiated fields: `cdp.state`, `cdp.active`, `cdp.probeSummary`, `cdp.lastError`
 - quota fields: `quota`, `quotaError`
@@ -29,7 +29,7 @@ Writes workspace state to `~/.antigravity-mcp/registry.json`:
 | `antigravityMcpSidecar.nativePollInterval` | `500` | Native command polling interval (ms) |
 | `antigravityMcpSidecar.cdpPollInterval` | `1500` | CDP webview polling interval (ms) |
 | `antigravityMcpSidecar.cdpFixedHost` | `""` | Optional fixed CDP host override |
-| `antigravityMcpSidecar.cdpFixedPort` | `0` | Optional fixed CDP port override (`0` = auto) |
+| `antigravityMcpSidecar.cdpFixedPort` | `0` | Optional fixed CDP port override (`0` = auto). When set, only this port is probed |
 | `antigravityMcpSidecar.cdpPortCandidates` | `9222,9229,9000-9014,8997-9003,7800-7850` | Candidate ports for negotiation |
 | `antigravityMcpSidecar.antigravityExecutablePath` | `""` | Optional explicit Antigravity executable path |
 | `antigravityMcpSidecar.antigravityLaunchPort` | `9000` | Launch port when no fixed CDP port is set |
