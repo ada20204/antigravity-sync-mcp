@@ -8,7 +8,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 
-const REGISTRY_DIR = path.join(os.homedir(), '.antigravity-mcp');
+const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
 const QUOTA_POLL_INTERVAL_MS = 60_000;
 const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -106,7 +106,10 @@ function parsePortCandidates(spec) {
 function trimProbeSummary(summary) {
     if (!Array.isArray(summary)) return [];
     if (summary.length <= CDP_PROBE_SUMMARY_LIMIT) return summary;
-    return summary.slice(summary.length - CDP_PROBE_SUMMARY_LIMIT);
+    // Keep first half + last half so early primary-host failures stay visible
+    // alongside the trailing gateway-probe failures.
+    const half = Math.floor(CDP_PROBE_SUMMARY_LIMIT / 2);
+    return [...summary.slice(0, half), ...summary.slice(summary.length - half)];
 }
 
 function buildCandidateMatrix(hosts, ports, limit = CDP_PROBE_SUMMARY_LIMIT) {
@@ -323,14 +326,14 @@ async function postLsJson(host, port, csrfToken, method, body, timeoutMs = 3000)
 async function detectLanguageServer() {
     try {
         if (process.platform === 'win32') {
-            const cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like \\\"language_server*\\\" } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"';
+            const cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -like \\\"language_server*\\\" -or $_.Name -like \\\"exa_language_server*\\\") -and $_.CommandLine -match \\\"csrf_token\\\" } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"';
             const { stdout } = await execAsync(cmd);
             if (!stdout.trim()) return null;
             let data = JSON.parse(stdout.trim());
             const items = Array.isArray(data) ? data : [data];
             const proc = items.find((item) => {
                 const line = String(item.CommandLine || '');
-                return line && (/--app_data_dir\\s+antigravity/i.test(line) || /[\\\\/]antigravity[\\\\/]/i.test(line));
+                return line && (/--app_data_dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line));
             }) || items[0];
             if (!proc) return null;
             const pid = Number(proc.ProcessId);

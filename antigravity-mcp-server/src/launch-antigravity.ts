@@ -85,10 +85,32 @@ export function buildLaunchArgs(params: { targetDir: string; port: number }): st
     return args;
 }
 
+async function killExistingAntigravity(
+    executablePath: string,
+    log?: (msg: string) => void
+): Promise<number> {
+    if (process.platform !== "win32") return 0;
+    const exeName = path.win32.basename(executablePath);
+    try {
+        const { execSync } = await import("child_process");
+        const out = execSync(
+            `taskkill /IM "${exeName}" /F /T`,
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
+        );
+        const killed = (out.match(/SUCCESS/gi) || []).length;
+        log?.(`Killed ${killed} existing ${exeName} process(es)`);
+        return killed;
+    } catch {
+        // No existing process — that's fine
+        return 0;
+    }
+}
+
 export async function launchAntigravityForWorkspace(params: {
     targetDir: string;
+    killExisting?: boolean;
     log?: (message: string) => void;
-}): Promise<{ started: boolean; executable?: string; port?: number; error?: string }> {
+}): Promise<{ started: boolean; executable?: string; port?: number; killed?: number; error?: string }> {
     const executable = resolveAntigravityExecutable();
     if (!executable) {
         return {
@@ -98,6 +120,16 @@ export async function launchAntigravityForWorkspace(params: {
     }
 
     const port = resolveLaunchPort();
+
+    let killed = 0;
+    if (params.killExisting !== false) {
+        killed = await killExistingAntigravity(executable, params.log);
+        if (killed > 0) {
+            // Brief pause to let the OS release the port
+            await new Promise((r) => setTimeout(r, 1500));
+        }
+    }
+
     const args = buildLaunchArgs({
         targetDir: params.targetDir,
         port,
@@ -113,12 +145,13 @@ export async function launchAntigravityForWorkspace(params: {
         params.log?.(
             `Launched Antigravity: executable='${executable}', port=${port}, targetDir='${params.targetDir}'`
         );
-        return { started: true, executable, port };
+        return { started: true, executable, port, killed };
     } catch (error) {
         return {
             started: false,
             executable,
             port,
+            killed,
             error: error instanceof Error ? error.message : String(error),
         };
     }

@@ -173,6 +173,30 @@ const TOOLS: Tool[] = [
             },
         },
     },
+    {
+        name: "launch-antigravity",
+        description:
+            "Launch Antigravity with CDP debug ports enabled. " +
+            "Use this when Antigravity is not running and you need to start it before sending tasks. " +
+            "Returns launch status including the executable path and CDP port.",
+        inputSchema: {
+            type: "object" as const,
+            properties: {
+                targetDir: {
+                    type: "string",
+                    description: "Optional workspace directory to open in Antigravity",
+                },
+                waitForCdp: {
+                    type: "boolean",
+                    description: "If true, wait up to 45s for CDP to become available after launch (default: true)",
+                },
+                killExisting: {
+                    type: "boolean",
+                    description: "If true (default), kill any existing Antigravity process before launching so the new one gets CDP debug flags",
+                },
+            },
+        },
+    },
 ];
 
 // --- Progress Notification ---
@@ -539,6 +563,43 @@ async function handlePing(
         .join("\n");
 }
 
+async function handleLaunchAntigravity(params: {
+    targetDir?: string;
+    waitForCdp?: boolean;
+    killExisting?: boolean;
+}): Promise<string> {
+    const { targetDir, waitForCdp = true } = params;
+    const dir = targetDir || globalTargetDir || process.cwd();
+
+    const launch = await launchAntigravityForWorkspace({
+        targetDir: dir,
+        killExisting: params.killExisting !== false,
+        log: (message) => log(`[launch-antigravity] ${message}`),
+    });
+
+    if (!launch.started) {
+        return `Launch failed: ${launch.error ?? "unknown error"}`;
+    }
+
+    const lines = [
+        `Antigravity launched: ${launch.executable}`,
+        `CDP port: ${launch.port}`,
+        `Target dir: ${dir}`,
+    ];
+
+    if (waitForCdp) {
+        log(`[launch-antigravity] Waiting up to ${Math.round(COLD_START_WAIT_MS / 1000)}s for CDP...`);
+        const discovered = await waitForDiscoveredCdp(targetDir, COLD_START_WAIT_MS);
+        if (discovered) {
+            lines.push(`CDP ready: ${discovered.ip}:${discovered.port} — ${discovered.target.title}`);
+        } else {
+            lines.push(`CDP not detected within ${Math.round(COLD_START_WAIT_MS / 1000)}s — Antigravity may still be loading`);
+        }
+    }
+
+    return lines.join("\n");
+}
+
 // --- Parse CLI Args ---
 const argvTargetDirIndex = process.argv.indexOf("--target-dir");
 const globalTargetDir = argvTargetDirIndex !== -1 ? process.argv[argvTargetDirIndex + 1] : undefined;
@@ -586,6 +647,14 @@ server.setRequestHandler(
 
                 case "ping":
                     resultText = await handlePing(args.message, globalTargetDir);
+                    break;
+
+                case "launch-antigravity":
+                    resultText = await handleLaunchAntigravity({
+                        targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
+                        waitForCdp: typeof args.waitForCdp === "boolean" ? args.waitForCdp : true,
+                        killExisting: typeof args.killExisting === "boolean" ? args.killExisting : true,
+                    });
                     break;
 
                 default:

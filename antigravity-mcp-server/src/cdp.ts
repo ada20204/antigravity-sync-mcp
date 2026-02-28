@@ -11,7 +11,7 @@ import path from "path";
 import os from "os";
 import WebSocket from "ws";
 
-const REGISTRY_DIR = ".antigravity-mcp";
+const REGISTRY_DIR = ".config/antigravity-mcp";
 const REGISTRY_FILE_NAME = "registry.json";
 const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
 const WSL_ROUTE_FILE = "/proc/net/route";
@@ -121,6 +121,29 @@ export interface DiscoveredCDP {
 }
 
 const REGISTRY_CDP_READY_MAX_AGE_MS = 3 * 60 * 1000;
+const REGISTRY_CDP_ACTIVE_STALE_MAX_AGE_MS = 10 * 60 * 1000;
+
+/**
+ * Select the best CDP port/ip from a registry entry.
+ * Prefers cdp.active when state is ready (fresh) or when active was
+ * verified recently even if state is now error (sidecar heartbeat gap).
+ * Falls back to the legacy port/ip fields.
+ */
+export function selectCdpEndpoint(entry: RegistryEntry): { port?: number; ip?: string } {
+    const cdpState = entry.cdp;
+    const active = cdpState?.active;
+    const readyFresh =
+        cdpState?.state === "ready" &&
+        isFreshTimestamp(active?.verifiedAt ?? cdpState?.verifiedAt, REGISTRY_CDP_READY_MAX_AGE_MS);
+    const activeKnown =
+        active?.port != null && Number.isFinite(active.port) &&
+        isFreshTimestamp(active.verifiedAt, REGISTRY_CDP_ACTIVE_STALE_MAX_AGE_MS);
+
+    if ((readyFresh || activeKnown) && active?.port && Number.isFinite(active.port)) {
+        return { port: active.port, ip: active.host };
+    }
+    return { port: entry.port, ip: entry.ip };
+}
 
 function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
@@ -293,7 +316,7 @@ export function getCandidateCdpIps(params: {
 
 /**
  * Find the CDP WebSocket URL for the given target directory.
- * Reads from ~/.antigravity-mcp/registry.json instead of port scanning.
+ * Reads from ~/.config/antigravity-mcp/registry.json instead of port scanning.
  */
 export async function discoverCDP(targetDir?: string): Promise<{
     port: number;
@@ -350,23 +373,46 @@ export async function discoverCDP(targetDir?: string): Promise<{
 
             if (matched) {
                 matchedRegistryEntry = matched;
-                const cdpState = matched.cdp;
-                const active = cdpState?.active;
-                const readyFresh =
-                    cdpState?.state === "ready" &&
-                    isFreshTimestamp(active?.verifiedAt ?? cdpState?.verifiedAt, REGISTRY_CDP_READY_MAX_AGE_MS);
-
-                if (readyFresh && active?.port && Number.isFinite(active.port)) {
-                    cdpPort = active.port;
-                    if (active.host) {
-                        cdpIp = active.host;
-                    }
-                } else if (matched.port && Number.isFinite(matched.port)) {
-                    cdpPort = matched.port;
-                    if (matched.ip) {
-                        cdpIp = matched.ip;
+                const selected = selectCdpEndpoint(matched);
+                if (selected.port && Number.isFinite(selected.port)) {
+                    cdpPort = selected.port;
+                    if (selected.ip) {
+                        cdpIp = selected.ip;
                     }
                 }
+            }
+        }
+    }
+
+    // 1b. When sidecar is still probing (no confirmed active endpoint),
+    //     try each registry candidate directly — server can reach them on Windows.
+    if (!cdpPort && matchedRegistryEntry?.cdp?.state === "probing") {
+        const registryCandidates = matchedRegistryEntry.cdp.candidates ?? [];
+        for (const candidate of registryCandidates) {
+            if (!candidate?.port) continue;
+            const ip = candidate.host ?? "127.0.0.1";
+            try {
+                const response = await fetch(
+                    `http://${ip}:${candidate.port}/json/list`,
+                    { signal: AbortSignal.timeout(2000) }
+                );
+                const list: CDPTarget[] = await response.json() as any;
+                const workbench = list.find((t) =>
+                    t.url?.includes("workbench.html") && t.type === "page" && !t.url?.includes("jetski")
+                );
+                const fallbackPage = list.find((t) =>
+                    t.type === "page" && !!t.webSocketDebuggerUrl && !t.url?.includes("jetski")
+                );
+                if (workbench || fallbackPage) {
+                    return {
+                        port: candidate.port,
+                        ip,
+                        target: (workbench || fallbackPage)!,
+                        registry: matchedRegistryEntry,
+                    };
+                }
+            } catch {
+                // Try next candidate.
             }
         }
     }

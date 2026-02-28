@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.3",
+    "version": "0.1.6",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -68,7 +68,7 @@
                 "antigravityMcpSidecar.cdpFixedPort": {
                     "type": "number",
                     "default": 0,
-                    "description": "Optional fixed CDP port override (0 means auto)."
+                    "description": "Optional fixed CDP port override (0 means auto). When set (>0), only this port is probed."
                 },
                 "antigravityMcpSidecar.cdpPortCandidates": {
                     "type": "string",
