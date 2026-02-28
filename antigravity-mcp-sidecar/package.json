@@ -15,6 +15,15 @@
         "ui"
     ],
     "main": "./src/extension.js",
+    "files": [
+        "src/**/*",
+        "node_modules/ws/**/*",
+        "package.json",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE.txt",
+        "icon.png"
+    ],
     "contributes": {
         "commands": [
             {
