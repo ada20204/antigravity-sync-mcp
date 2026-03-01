@@ -36,3 +36,22 @@ test('isTrajectoryTerminal recognizes common terminal signals', () => {
   assert.equal(isTrajectoryTerminal({ nested: { done: true } }), true);
   assert.equal(isTrajectoryTerminal({ state: 'running' }), false);
 });
+
+test('isTrajectoryTerminal does not false-positive on substrings', () => {
+  // "stopwatch" contains "stop" but should not match
+  assert.equal(isTrajectoryTerminal({ status: 'stopwatch' }), false);
+  // "incomplete" contains "complete" but should not trigger
+  assert.equal(isTrajectoryTerminal({ state: 'incomplete' }), false);
+  // "failure_fallback" — "fail" substring, but word boundary should prevent match
+  // Note: "failure" itself matches \bfail(ed|ure)?\b so test a compound non-word
+  assert.equal(isTrajectoryTerminal({ status: 'prefailure' }), false);
+});
+
+test('isTrajectoryTerminal matches word-boundary terminal values', () => {
+  assert.equal(isTrajectoryTerminal({ status: 'done' }), true);
+  assert.equal(isTrajectoryTerminal({ state: 'completed' }), true);
+  assert.equal(isTrajectoryTerminal({ status: 'stopped' }), true);
+  assert.equal(isTrajectoryTerminal({ state: 'cancelled' }), true);
+  assert.equal(isTrajectoryTerminal({ status: 'failed' }), true);
+  assert.equal(isTrajectoryTerminal({ status: 'failure' }), true);
+});
