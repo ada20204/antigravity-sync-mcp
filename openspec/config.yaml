@@ -1,20 +1,26 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Canonical project context lives in openspec/project.md.
+  Use that file as the detailed source for architecture and runtime behavior.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Non-negotiable constraints:
+  - Server is registry read-only and reads only local ~/.config/antigravity-mcp/registry.json (or ANTIGRAVITY_REGISTRY_FILE in tests).
+  - Sidecar/bridge owns registry writes, lifecycle state, and cross-end control-plane actions.
+  - Server connects only to local_endpoint from registry; no broad host/port scan as primary behavior.
+  - Host sidecar is source-of-truth; remote sidecar mirrors state for WSL/SSH-like environments.
+  - Registry schema_version is 2; discovery must emit strict error_code diagnostics for not-ready/stale/schema-mismatch conditions.
+  - Cross-end restart/control requests require token+ts+nonce+HMAC and host-side user confirmation.
+
+rules:
+  proposal:
+    - Explicitly separate data plane and control plane impact.
+    - Include host/remote behavior differences and failure handling.
+    - List non-goals to prevent server-side scope creep.
+  design:
+    - Define registry schema/version impact and backward compatibility.
+    - Specify security checks if adding control-plane interactions.
+    - Include observability fields and error-code mapping changes.
+  tasks:
+    - Include verification tasks for build + tests in both server and sidecar.
+    - Include at least one negative-path validation task for not-ready/stale/schema-mismatch scenarios.

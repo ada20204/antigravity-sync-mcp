@@ -107,7 +107,26 @@ function cdpGetBrowserWsUrl(port, ip = '127.0.0.1') {
             res.on('end', () => {
                 try {
                     const info = JSON.parse(data);
-                    resolve(info.webSocketDebuggerUrl || null);
+                    const rawWsUrl = info.webSocketDebuggerUrl || null;
+                    if (!rawWsUrl) return resolve([]);
+                    const candidates = [];
+                    const seen = new Set();
+                    const add = (value) => {
+                        const v = String(value || '').trim();
+                        if (!v || seen.has(v)) return;
+                        seen.add(v);
+                        candidates.push(v);
+                    };
+                    // Prefer the original URL from runtime first.
+                    add(rawWsUrl);
+                    try {
+                        // Fallback URL: bind to currently verified endpoint.
+                        const parsed = new URL(rawWsUrl);
+                        parsed.hostname = ip;
+                        parsed.port = String(port);
+                        add(parsed.toString());
+                    } catch { }
+                    resolve(candidates);
                 } catch (e) { reject(e); }
             });
         });
@@ -116,94 +135,128 @@ function cdpGetBrowserWsUrl(port, ip = '127.0.0.1') {
     });
 }
 
+function connectAndRunBrowserSession(browserWsUrl) {
+    return new Promise((resolve) => {
+        const ws = new WebSocket(browserWsUrl);
+        const timeout = setTimeout(() => { ws.close(); resolve({ ok: false, error: 'browser_ws_connect_timeout' }); }, 5000);
+
+        let msgId = 1;
+        const pending = {};
+
+        function send(method, params = {}, sessionId = null) {
+            return new Promise((res, rej) => {
+                const id = msgId++;
+                const timer = setTimeout(() => { delete pending[id]; rej(new Error('timeout')); }, 2000);
+                pending[id] = { res: (v) => { clearTimeout(timer); res(v); }, rej };
+                const payload = { id, method, params };
+                if (sessionId) payload.sessionId = sessionId;
+                ws.send(JSON.stringify(payload));
+            });
+        }
+
+        ws.on('message', (raw) => {
+            const msg = JSON.parse(raw.toString());
+            if (msg.id && pending[msg.id]) {
+                pending[msg.id].res(msg);
+                delete pending[msg.id];
+            }
+        });
+
+        ws.on('error', (error) => {
+            clearTimeout(timeout);
+            resolve({
+                ok: false,
+                error: error && error.message ? `browser_ws_error:${error.message}` : 'browser_ws_error',
+            });
+        });
+
+        ws.on('open', async () => {
+            try {
+                await send('Target.setDiscoverTargets', { discover: true });
+                const targetsMsg = await send('Target.getTargets');
+                const allTargets = targetsMsg.result?.targetInfos || [];
+
+                const webviews = allTargets.filter(t =>
+                    t.url && (
+                        t.url.includes('vscode-webview://') ||
+                        t.url.includes('webview') ||
+                        t.type === 'iframe'
+                    )
+                );
+                const pageTargets = allTargets.filter(t => t.type === 'page');
+
+                const allEvalTargets = [
+                    ...webviews.map(t => ({ ...t, kind: 'Webview' })),
+                    ...pageTargets.map(t => ({ ...t, kind: 'Page' }))
+                ];
+
+                const evalPromises = allEvalTargets.map(async (target) => {
+                    try {
+                        const targetId = target.targetId;
+                        const attachMsg = await send('Target.attachToTarget', { targetId, flatten: true });
+                        const sessionId = attachMsg.result?.sessionId;
+                        if (!sessionId) return;
+
+                        if (target.kind === 'Page') {
+                            const domCheck = await send('Runtime.evaluate', {
+                                expression: 'typeof document !== "undefined" ? document.title || "has-dom" : "no-dom"'
+                            }, sessionId);
+                            const domResult = domCheck.result?.result?.value;
+                            if (!domResult || domResult === 'no-dom') {
+                                await send('Target.detachFromTarget', { sessionId }).catch(() => { });
+                                return;
+                            }
+                        }
+
+                        const dynamicScript = buildPermissionScript();
+                        await send('Runtime.evaluate', { expression: dynamicScript }, sessionId);
+
+                        await send('Target.detachFromTarget', { sessionId }).catch(() => { });
+                    } catch (e) { }
+                });
+
+                await Promise.allSettled(evalPromises);
+
+                clearTimeout(timeout);
+                ws.close();
+                resolve({ ok: true });
+            } catch (e) {
+                clearTimeout(timeout);
+                ws.close();
+                resolve({
+                    ok: false,
+                    error: e && e.message ? `target_attach_or_eval_error:${e.message}` : 'target_attach_or_eval_error',
+                });
+            }
+        });
+    });
+}
+
 function multiplexCdpWebviews(port, ip = '127.0.0.1') {
     return new Promise(async (resolve) => {
         try {
-            const browserWsUrl = await cdpGetBrowserWsUrl(port, ip);
-            if (!browserWsUrl) return resolve(false);
-
-            const ws = new WebSocket(browserWsUrl);
-            const timeout = setTimeout(() => { ws.close(); resolve(false); }, 5000);
-
-            let msgId = 1;
-            const pending = {};
-
-            function send(method, params = {}, sessionId = null) {
-                return new Promise((res, rej) => {
-                    const id = msgId++;
-                    const timer = setTimeout(() => { delete pending[id]; rej(new Error('timeout')); }, 2000);
-                    pending[id] = { res: (v) => { clearTimeout(timer); res(v); }, rej };
-                    const payload = { id, method, params };
-                    if (sessionId) payload.sessionId = sessionId;
-                    ws.send(JSON.stringify(payload));
-                });
+            const browserWsUrls = await cdpGetBrowserWsUrl(port, ip);
+            if (!Array.isArray(browserWsUrls) || browserWsUrls.length === 0) {
+                return resolve({ ok: false, error: 'missing_websocket_debugger_url' });
             }
 
-            ws.on('message', (raw) => {
-                const msg = JSON.parse(raw.toString());
-                if (msg.id && pending[msg.id]) {
-                    pending[msg.id].res(msg);
-                    delete pending[msg.id];
+            let firstFailure = null;
+            for (const browserWsUrl of browserWsUrls) {
+                const result = await connectAndRunBrowserSession(browserWsUrl);
+                if (result && result.ok) {
+                    return resolve(result);
                 }
-            });
-
-            ws.on('error', () => { clearTimeout(timeout); resolve(false); });
-
-            ws.on('open', async () => {
-                try {
-                    await send('Target.setDiscoverTargets', { discover: true });
-                    const targetsMsg = await send('Target.getTargets');
-                    const allTargets = targetsMsg.result?.targetInfos || [];
-
-                    const webviews = allTargets.filter(t =>
-                        t.url && (
-                            t.url.includes('vscode-webview://') ||
-                            t.url.includes('webview') ||
-                            t.type === 'iframe'
-                        )
-                    );
-                    const pageTargets = allTargets.filter(t => t.type === 'page');
-
-                    const allEvalTargets = [
-                        ...webviews.map(t => ({ ...t, kind: 'Webview' })),
-                        ...pageTargets.map(t => ({ ...t, kind: 'Page' }))
-                    ];
-
-                    const evalPromises = allEvalTargets.map(async (target) => {
-                        try {
-                            const targetId = target.targetId;
-                            const attachMsg = await send('Target.attachToTarget', { targetId, flatten: true });
-                            const sessionId = attachMsg.result?.sessionId;
-                            if (!sessionId) return;
-
-                            if (target.kind === 'Page') {
-                                const domCheck = await send('Runtime.evaluate', {
-                                    expression: 'typeof document !== "undefined" ? document.title || "has-dom" : "no-dom"'
-                                }, sessionId);
-                                const domResult = domCheck.result?.result?.value;
-                                if (!domResult || domResult === 'no-dom') {
-                                    await send('Target.detachFromTarget', { sessionId }).catch(() => { });
-                                    return;
-                                }
-                            }
-
-                            const dynamicScript = buildPermissionScript();
-                            const evalMsg = await send('Runtime.evaluate', { expression: dynamicScript }, sessionId);
-
-                            await send('Target.detachFromTarget', { sessionId }).catch(() => { });
-                        } catch (e) { }
-                    });
-
-                    await Promise.allSettled(evalPromises);
-
-                    clearTimeout(timeout);
-                    ws.close();
-                    resolve(true);
-                } catch (e) {
-                    clearTimeout(timeout); ws.close(); resolve(false);
+                if (!firstFailure) {
+                    firstFailure = result || { ok: false, error: 'browser_ws_unknown_error' };
                 }
+            }
+            resolve(firstFailure || { ok: false, error: 'browser_ws_unknown_error' });
+        } catch (e) {
+            resolve({
+                ok: false,
+                error: e && e.message ? `cdp_prepare_error:${e.message}` : 'cdp_prepare_error',
             });
-        } catch (e) { resolve(false); }
+        }
     });
 }
 
@@ -211,6 +264,8 @@ let isAccepting = false;
 let isCdpBusy = false;
 let pollIntervalId = null;
 let cdpIntervalId = null;
+let lastCdpFailureLoggedAt = 0;
+let lastCdpFailureMessage = '';
 let logger = console.log;
 
 function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval = 1500, ip = '127.0.0.1') {
@@ -238,8 +293,17 @@ function startAutoAccept(port, customLogger, nativeInterval = 500, cdpInterval =
         if (isCdpBusy || !port) return;
         isCdpBusy = true;
         try {
-            const connected = await multiplexCdpWebviews(port, ip);
-            if (!connected) logger(`Failed to connect to CDP webview session on ${ip}:${port}`);
+            const result = await multiplexCdpWebviews(port, ip);
+            if (!result || !result.ok) {
+                const reason = result && result.error ? result.error : 'unknown';
+                const now = Date.now();
+                const message = `Failed to connect to CDP webview session on ${ip}:${port} (${reason})`;
+                if (message !== lastCdpFailureMessage || now - lastCdpFailureLoggedAt > 30000) {
+                    logger(message);
+                    lastCdpFailureMessage = message;
+                    lastCdpFailureLoggedAt = now;
+                }
+            }
         } catch (e) { }
         finally {
             isCdpBusy = false;

@@ -1,3 +1,7 @@
 .agent
 .codex
 .gemini
+node_modules/
+build/
+*.vsix
+*.tgz

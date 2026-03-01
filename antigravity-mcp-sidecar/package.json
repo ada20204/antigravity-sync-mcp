@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.2",
+    "version": "0.1.10",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -11,12 +11,58 @@
     "activationEvents": [
         "onStartupFinished"
     ],
+    "extensionKind": [
+        "ui"
+    ],
     "main": "./src/extension.js",
+    "files": [
+        "src/**/*",
+        "server-runtime/**/*",
+        "node_modules/**/*",
+        "package.json",
+        "README.md",
+        "AI_CONFIG_PROMPT.md",
+        "CHANGELOG.md",
+        "LICENSE.txt",
+        "icon.png"
+    ],
     "contributes": {
         "commands": [
             {
                 "command": "antigravityMcpSidecar.toggle",
                 "title": "Toggle Antigravity Sidecar Auto-Accept"
+            },
+            {
+                "command": "antigravityMcpSidecar.showQuota",
+                "title": "Show Antigravity Quota Snapshot"
+            },
+            {
+                "command": "antigravityMcpSidecar.showQuotaTable",
+                "title": "Show Antigravity Model Quota Table"
+            },
+            {
+                "command": "antigravityMcpSidecar.refreshQuota",
+                "title": "Refresh Antigravity Quota Snapshot"
+            },
+            {
+                "command": "antigravityMcpSidecar.launchAntigravity",
+                "title": "Launch Antigravity (New Window)"
+            },
+            {
+                "command": "antigravityMcpSidecar.restartAntigravity",
+                "title": "Restart Antigravity (Confirm)"
+            },
+            {
+                "command": "antigravityMcpSidecar.requestHostRestart",
+                "title": "Request Host Restart (Remote)"
+            },
+            {
+                "command": "antigravityMcpSidecar.installBundledServer",
+                "title": "Install Bundled MCP Server Launcher"
+            },
+            {
+                "command": "antigravityMcpSidecar.showAiConfigPrompt",
+                "title": "Show AI MCP Config Prompt"
             }
         ],
         "configuration": {
@@ -36,11 +82,82 @@
                     "type": "number",
                     "default": 1500,
                     "description": "Polling interval (ms) for CDP webview button clicks (Always Allow)."
+                },
+                "antigravityMcpSidecar.cdpFixedHost": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional fixed CDP host override. When set, this host is probed first."
+                },
+                "antigravityMcpSidecar.cdpFixedPort": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Optional fixed CDP port override (0 means auto). When set (>0), only this port is probed."
+                },
+                "antigravityMcpSidecar.cdpPortCandidates": {
+                    "type": "string",
+                    "default": "9222,9229,9000-9014,8997-9003,7800-7850",
+                    "description": "Comma-separated ports/ranges used for CDP probing, e.g. 9000,9222,7800-7810."
+                },
+                "antigravityMcpSidecar.antigravityExecutablePath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional absolute path to Antigravity executable. Leave empty to auto-detect."
+                },
+                "antigravityMcpSidecar.antigravityLaunchPort": {
+                    "type": "number",
+                    "default": 9000,
+                    "description": "Default launch port when cdpFixedPort is 0."
+                },
+                "antigravityMcpSidecar.antigravityLaunchExtraArgs": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional extra launch arguments appended when launching Antigravity."
+                },
+                "antigravityMcpSidecar.bridgeSharedToken": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional shared token for sidecar control-plane HMAC auth. Leave empty to auto-manage in ~/.config/antigravity-mcp/bridge.token."
+                },
+                "antigravityMcpSidecar.bridgeMaxSkewMs": {
+                    "type": "number",
+                    "default": 120000,
+                    "description": "Maximum timestamp skew allowed when verifying signed sidecar control requests."
+                },
+                "antigravityMcpSidecar.bridgeRequestTtlMs": {
+                    "type": "number",
+                    "default": 300000,
+                    "description": "Maximum age for pending sidecar control requests before auto-reject."
+                },
+                "antigravityMcpSidecar.quotaWarnThresholdPercent": {
+                    "type": "number",
+                    "default": 15,
+                    "description": "Show warning style/alert when tracked quota falls below this percent."
+                },
+                "antigravityMcpSidecar.quotaCriticalThresholdPercent": {
+                    "type": "number",
+                    "default": 5,
+                    "description": "Show critical style/alert when tracked quota falls below this percent."
+                },
+                "antigravityMcpSidecar.quotaAlertCooldownMinutes": {
+                    "type": "number",
+                    "default": 30,
+                    "description": "Minimum minutes between repeated low-quota alerts at the same level."
+                },
+                "antigravityMcpSidecar.quotaStaleMinutes": {
+                    "type": "number",
+                    "default": 3,
+                    "description": "Mark quota snapshot as stale if older than this many minutes."
                 }
             }
         }
     },
+    "scripts": {
+        "sync-server-runtime": "bash -c 'PKG_DIR=\"$(cd \"$(dirname \"$npm_package_json\")\" && pwd)\"; ROOT_DIR=\"$(cd \"$PKG_DIR/..\" && pwd)\"; rm -rf \"$PKG_DIR/server-runtime/dist\"; cp -r \"$ROOT_DIR/antigravity-mcp-server/build/dist\" \"$PKG_DIR/server-runtime/dist\"'",
+        "package": "vsce package",
+        "verify": "bash -c 'VSIX=$(ls -t *.vsix 2>/dev/null | head -1); if [ -z \"$VSIX\" ]; then echo \"❌ No .vsix file found\"; exit 1; fi; VSIX_PATH=$(pwd)/$VSIX; cd /tmp && rm -rf vsix_verify && mkdir vsix_verify && cd vsix_verify && unzip -q \"$VSIX_PATH\" && test -f extension/server-runtime/dist/index.js && test -d extension/node_modules/ws && test -d extension/node_modules/@modelcontextprotocol/sdk && echo \"✅ $VSIX: bundled server runtime + deps present\"'"
+    },
     "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.27.1",
         "ws": "^8.19.0"
     },
     "devDependencies": {

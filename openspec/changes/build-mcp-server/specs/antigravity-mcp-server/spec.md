@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> This spec contains legacy assumptions (for example CDP port scanning) and is not authoritative for current behavior.
+
 ## ADDED Requirements
 
 ### Requirement: MCP Server Protocol

@@ -11,6 +11,193 @@
 
 import { CDPConnection, evaluateInAllContexts } from "./cdp.js";
 
+const COMPOSER_MARKER = "Ask anything, @ to mention, / for workflows";
+
+function isNoiseSegment(segment: string): boolean {
+    const s = segment.trim();
+    if (!s) return true;
+    if (s.includes(COMPOSER_MARKER)) return true;
+    if (/^Good\s*$/i.test(s) || /^Bad\s*$/i.test(s) || /^Good\s+Bad\s*$/i.test(s)) return true;
+    if (/^Thought for\b/i.test(s)) return true;
+    if (/^Fast\b[\s\S]*\bSend$/i.test(s)) return true;
+    if (/^```$/.test(s)) return true;
+    return false;
+}
+
+function pickLastAnswerSegment(text: string): string {
+    const segments = text
+        .split(/\n{2,}/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    for (let i = segments.length - 1; i >= 0; i--) {
+        if (!isNoiseSegment(segments[i])) return segments[i];
+    }
+    return text.trim();
+}
+
+export function cleanExtractedResponseText(rawText: string, prompt?: string): string {
+    let text = (rawText || "").trim();
+    if (!text) return "";
+
+    // Drop trailing composer panel text if present.
+    const composerIdx = text.lastIndexOf(COMPOSER_MARKER);
+    if (composerIdx !== -1) {
+        text = text.slice(0, composerIdx).trim();
+    }
+
+    // Remove trailing feedback controls if captured with the response.
+    text = text
+        .replace(/\n+\s*Good\s*\n+\s*Bad\s*$/i, "")
+        .replace(/\n+\s*Good\s+Bad\s*$/i, "")
+        .trim();
+
+    // Keep only the latest turn when the original prompt is visible in transcript.
+    if (prompt) {
+        const promptIdx = text.lastIndexOf(prompt);
+        if (promptIdx !== -1) {
+            text = text.slice(promptIdx + prompt.length).trim();
+        }
+    }
+
+    return pickLastAnswerSegment(text);
+}
+
+const MODEL_UI_LABELS: Record<string, string[]> = {
+    "gemini-3-flash": ["Gemini 3 Flash", "Gemini Flash", "Flash"],
+    "gemini-3-pro-low": ["Gemini 3 Pro (Low)", "Gemini Pro Low", "Pro (Low)"],
+    "gemini-3-pro-high": ["Gemini 3 Pro", "Gemini Pro", "Pro (High)", "Pro"],
+    "opus-4.5": ["Claude Opus 4.5", "Opus 4.5", "Claude 4.5"],
+    "opus-4.6": ["Claude Opus 4.6", "Opus 4.6", "Claude Opus"],
+};
+
+function toModeKeyword(mode?: string): string | undefined {
+    const normalized = (mode || "").trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized === "plan" || normalized === "planning" || normalized === "deep") {
+        return "plan";
+    }
+    return "fast";
+}
+
+function modelCandidates(model?: string): string[] {
+    const normalized = (model || "").trim().toLowerCase();
+    if (!normalized) return [];
+    return MODEL_UI_LABELS[normalized] || [model as string];
+}
+
+export async function applyModeAndModelSelection(
+    cdp: CDPConnection,
+    options: { mode?: string; model?: string }
+): Promise<{ modeApplied: boolean; modelApplied: boolean; details: string[] }> {
+    const mode = toModeKeyword(options.mode);
+    const modelLabels = modelCandidates(options.model);
+    if (!mode && modelLabels.length === 0) {
+        return { modeApplied: false, modelApplied: false, details: [] };
+    }
+
+    const safeMode = JSON.stringify(mode || "");
+    const safeModelLabels = JSON.stringify(modelLabels);
+
+    const expression = `(async () => {
+      const visible = (el) => !!el && el.offsetParent !== null;
+      const normalize = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const textFor = (node) => normalize(node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || node?.getAttribute?.('data-value') || '');
+      const details = [];
+      let modeApplied = false;
+      let modelApplied = false;
+
+      const clickByText = (texts) => {
+        const tokens = texts.map((t) => normalize(t)).filter(Boolean);
+        if (!tokens.length) return false;
+        const nodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        for (const node of nodes) {
+          if (!visible(node)) continue;
+          const text = normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          if (!text) continue;
+          if (tokens.some((token) => text === token || text.includes(token))) {
+            node.click();
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const mode = ${safeMode};
+      if (mode) {
+        const modeTokens = mode === 'plan' ? ['plan', 'planning'] : ['fast'];
+        modeApplied = clickByText(modeTokens);
+        details.push(modeApplied ? 'mode_applied' : 'mode_not_found');
+      }
+
+      const targetLabels = ${safeModelLabels};
+      if (targetLabels.length) {
+        const targets = targetLabels.map((t) => normalize(t)).filter(Boolean);
+        const matchesTarget = (text) => targets.some((t) => text === t || text.includes(t));
+        const actionNodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+        const activeMatch = actionNodes.find((node) => visible(node) && matchesTarget(textFor(node)));
+        if (activeMatch) {
+          modelApplied = true;
+          details.push('model_already_active');
+        }
+
+        // Step 1: open model picker if available.
+        const triggerCandidates = actionNodes;
+        let pickerOpened = false;
+        for (const node of triggerCandidates) {
+          if (modelApplied) break;
+          if (!visible(node)) continue;
+          const text = textFor(node);
+          const looksModelTrigger =
+            text.includes('model') || text.includes('gemini') || text.includes('claude') || text.includes('gpt');
+          const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
+          if (looksModelTrigger || hasPopup === 'listbox' || hasPopup === 'menu') {
+            node.click();
+            pickerOpened = true;
+            break;
+          }
+        }
+        if (pickerOpened) {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+
+        if (!modelApplied) {
+          const options = [
+            ...document.querySelectorAll('[role="option"]'),
+            ...document.querySelectorAll('[role="menuitem"]'),
+            ...document.querySelectorAll('[data-value]'),
+            ...document.querySelectorAll('button,li,div[role="button"]')
+          ];
+          for (const option of options) {
+            if (!visible(option)) continue;
+            const text = textFor(option);
+            if (!text) continue;
+            if (matchesTarget(text)) {
+              option.click();
+              modelApplied = true;
+              break;
+            }
+          }
+        }
+        if (details.indexOf('model_already_active') === -1) {
+          details.push(modelApplied ? 'model_applied' : 'model_not_found');
+        }
+      }
+
+      return { modeApplied, modelApplied, details };
+    })()`;
+
+    const result = await evaluateInAllContexts(cdp, expression, true);
+    if (!result || typeof result !== "object") {
+        return { modeApplied: false, modelApplied: false, details: ["selection_no_context"] };
+    }
+    return {
+        modeApplied: !!result.modeApplied,
+        modelApplied: !!result.modelApplied,
+        details: Array.isArray(result.details) ? result.details : [],
+    };
+}
+
 // --- injectMessage ---
 
 /**
@@ -93,8 +280,14 @@ export async function pollCompletionStatus(
     return { isGenerating: false };
   })()`;
 
-    const result = await evaluateInAllContexts(cdp, expression);
-    return result || { isGenerating: false };
+    try {
+        const result = await evaluateInAllContexts(cdp, expression);
+        return result || { isGenerating: false };
+    } catch {
+        // CDP error: conservatively assume generation is still in progress
+        // rather than signalling completion prematurely.
+        return { isGenerating: true };
+    }
 }
 
 // --- extractLatestResponse ---
@@ -110,9 +303,20 @@ export async function pollCompletionStatus(
  * that appears to be from the assistant (not user-authored).
  */
 export async function extractLatestResponse(
-    cdp: CDPConnection
+    cdp: CDPConnection,
+    prompt?: string
 ): Promise<string> {
     const expression = `(() => {
+    const COMPOSER_MARKER = "Ask anything, @ to mention, / for workflows";
+    const isComposerText = (text) => {
+      if (!text) return true;
+      const trimmed = text.trim();
+      if (!trimmed) return true;
+      if (trimmed.includes(COMPOSER_MARKER)) return true;
+      if (/^Fast\\s+[\\s\\S]*\\s+Send$/.test(trimmed)) return true;
+      return false;
+    };
+
     // Find the main chat container
     const container = document.getElementById('conversation')
       || document.getElementById('chat')
@@ -123,26 +327,24 @@ export async function extractLatestResponse(
     const messages = container.querySelectorAll('[data-role="assistant"], [data-message-author="assistant"]');
     if (messages.length > 0) {
       const last = messages[messages.length - 1];
-      return { text: last.innerText || last.textContent || '' };
+      const text = last.innerText || last.textContent || '';
+      if (!isComposerText(text)) return { text };
     }
 
-    // Strategy 2: Look for all top-level message-like divs, take the last one
-    // Antigravity typically alternates user/assistant messages
+    // Strategy 2: Look for all top-level message-like divs, skipping composer-like blocks.
     const allBlocks = container.querySelectorAll(':scope > div > div, :scope > div');
-    if (allBlocks.length > 0) {
-      const last = allBlocks[allBlocks.length - 1];
+    for (let i = allBlocks.length - 1; i >= 0; i--) {
+      const last = allBlocks[i];
       const text = last.innerText || last.textContent || '';
-      // Only return if it has substantial content (not just a toolbar)
-      if (text.length > 20) {
+      if (text.length > 20 && !isComposerText(text)) {
         return { text };
       }
     }
 
-    // Strategy 3: Grab everything and return the tail portion
+    // Strategy 3: Grab everything (for post-processing on Node side).
     const fullText = container.innerText || '';
     if (fullText.length > 0) {
-      // Return last 5000 chars as a fallback
-      return { text: fullText.slice(-5000), partial: true };
+      return { text: fullText.slice(-12000), partial: true };
     }
 
     return { error: 'no_response_found' };
@@ -158,7 +360,10 @@ export async function extractLatestResponse(
         return `Antigravity completed the task but response extraction failed (${result.error}). Check the Antigravity window directly.`;
     }
 
-    return result.text || "";
+    const cleaned = cleanExtractedResponseText(result.text || "", prompt);
+    if (cleaned) return cleaned;
+
+    return "Antigravity completed the task but response text could not be extracted. Check the Antigravity window directly.";
 }
 
 // --- stopGeneration ---

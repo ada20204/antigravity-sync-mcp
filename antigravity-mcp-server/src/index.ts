@@ -23,27 +23,108 @@ import {
     type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { discoverCDP, connectCDP, type CDPConnection } from "./cdp.js";
 import {
+    discoverCDP,
+    discoverCDPDetailed,
+    connectCDP,
+    type CDPConnection,
+    type DiscoverCDPError,
+} from "./cdp.js";
+import {
+    applyModeAndModelSelection,
     injectMessage,
     pollCompletionStatus,
     extractLatestResponse,
     stopGeneration,
 } from "./scripts.js";
-import { autoAcceptPoll, DEFAULT_BANNED_COMMANDS } from "./auto-accept.js";
+import {
+    createAskTask,
+    incrementTaskAttempt,
+    isTaskTerminal,
+    RetryableError,
+    transitionAskTask,
+    type AskTask,
+    withRetry,
+    withTimeout,
+} from "./task-runtime.js";
+import { selectModelWithQuotaPolicy } from "./quota-policy.js";
+import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
+import { launchAntigravityForWorkspace } from "./launch-antigravity.js";
 
 // --- Constants ---
 
 const KEEPALIVE_INTERVAL = 25000; // 25 seconds (from gemini-mcp-tool)
 const POLL_INTERVAL = 1000; // 1 second
 const MAX_TIMEOUT = 5 * 60 * 1000; // 5 minutes default
-const VERSION = "0.1.0";
+const DISCOVER_TIMEOUT_MS = 10000;
+const CONNECT_TIMEOUT_MS = 15000;
+const INJECT_TIMEOUT_MS = 10000;
+const EXTRACT_TIMEOUT_MS = 10000;
+const RETRY_MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 400;
+const COLD_START_WAIT_MS = 45_000;
+const VERSION = "0.1.1";
+let activeAskTask: AskTask | null = null;
 
 // --- Logging ---
 
 function log(msg: string) {
     const ts = new Date().toISOString().split("T")[1].split(".")[0];
     process.stderr.write(`[${ts}] ${msg}\n`);
+}
+
+function toErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientError(error: unknown): boolean {
+    const msg = toErrorMessage(error).toLowerCase();
+    return (
+        msg.includes("timed out") ||
+        msg.includes("econnreset") ||
+        msg.includes("econnrefused") ||
+        msg.includes("socket hang up") ||
+        msg.includes("network") ||
+        msg.includes("busy")
+    );
+}
+
+function uniqueStrings(items: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of items) {
+        const value = (item || "").trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        out.push(value);
+    }
+    return out;
+}
+
+function formatDiscoverError(error: DiscoverCDPError | undefined): string {
+    const payload = {
+        error: "registry_not_ready",
+        error_code: error?.code ?? "unknown",
+        message: error?.message ?? "CDP discovery failed",
+        workspace_id: error?.workspaceId ?? null,
+        state: error?.state ?? null,
+        details: error?.details ?? null,
+    };
+    return JSON.stringify(payload);
+}
+
+async function waitForDiscoveredCdp(
+    targetDir: string | undefined,
+    timeoutMs: number,
+    intervalMs = 1000
+): Promise<Awaited<ReturnType<typeof discoverCDP>>> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+        const found = await discoverCDP(targetDir);
+        if (found) return found;
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return null;
 }
 
 // --- MCP Server Setup ---
@@ -74,6 +155,14 @@ const TOOLS: Tool[] = [
                     type: "string",
                     description: "The task or question to send to Antigravity",
                 },
+                mode: {
+                    type: "string",
+                    description: "Optional routing mode hint: fast or plan",
+                },
+                model: {
+                    type: "string",
+                    description: "Optional preferred model hint (for example: gemini-3-flash, gemini-3-pro-high, opus-4.6)",
+                },
             },
             required: ["prompt"],
         },
@@ -101,6 +190,30 @@ const TOOLS: Tool[] = [
             },
         },
     },
+    {
+        name: "launch-antigravity",
+        description:
+            "Launch Antigravity with CDP debug ports enabled. " +
+            "Use this when Antigravity is not running and you need to start it before sending tasks. " +
+            "Returns launch status including the executable path and CDP port.",
+        inputSchema: {
+            type: "object" as const,
+            properties: {
+                targetDir: {
+                    type: "string",
+                    description: "Optional workspace directory to open in Antigravity",
+                },
+                waitForCdp: {
+                    type: "boolean",
+                    description: "If true, wait up to 45s for CDP to become available after launch (default: true)",
+                },
+                killExisting: {
+                    type: "boolean",
+                    description: "If true (default), kill any existing Antigravity process before launching so the new one gets CDP debug flags",
+                },
+            },
+        },
+    },
 ];
 
 // --- Progress Notification ---
@@ -124,52 +237,219 @@ async function sendProgressNotification(
 // --- Tool Handlers ---
 
 async function handleAskAntigravity(
-    prompt: string,
+    params: { prompt: string; mode?: string; model?: string },
     targetDir?: string,
     progressToken?: string | number
 ): Promise<string> {
-    // 1. Discover CDP
-    log("Discovering CDP target for " + (targetDir || "default registry entry") + "...");
-    await sendProgressNotification(progressToken, 0, "🔍 Discovering Antigravity...");
-
-    const discovered = await discoverCDP(targetDir);
-    if (!discovered) {
+    const prompt = params.prompt;
+    if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
         throw new Error(
-            "CDP not found for target dir. Ensure Antigravity is running with debug ports enabled, " +
-            "and the sidecar extension has registered the workspace."
+            `Another ask-antigravity task is running (id=${activeAskTask.id}, status=${activeAskTask.status}). ` +
+            "Wait for completion or call antigravity-stop first."
         );
     }
-    log(`Found target: ${discovered.target.title} on port ${discovered.port}`);
 
-    // 2. Connect
-    log("Connecting to CDP...");
-    await sendProgressNotification(progressToken, 5, "🔗 Connecting to Antigravity...");
-    const cdp = await connectCDP(discovered.target.webSocketDebuggerUrl);
-    log(`Connected. ${cdp.contexts.length} execution contexts available.`);
+    const task = createAskTask(prompt);
+    activeAskTask = task;
+    const setStatus = (status: AskTask["status"], note?: string) => {
+        transitionAskTask(task, status, note);
+        const notePart = note ? ` (${note})` : "";
+        log(`[${task.id}] status=${status}${notePart}`);
+    };
+
+    const onRetry = (phase: string) => (ctx: { attempt: number; maxAttempts: number; delayMs: number; error: unknown }) => {
+        log(
+            `[${task.id}] ${phase} attempt ${ctx.attempt}/${ctx.maxAttempts} failed: ${toErrorMessage(ctx.error)}; ` +
+            `retrying in ${ctx.delayMs}ms`
+        );
+    };
+
+    let cdp: CDPConnection | null = null;
+    let waitEngine: WaitStateEngine | null = null;
 
     try {
-        // 3. Inject message
-        log(`Injecting prompt (${prompt.length} chars)...`);
+        // 1. Discover CDP
+        setStatus("discovering");
+        log(`[${task.id}] Discovering CDP target for ${targetDir || "default registry entry"}...`);
+        await sendProgressNotification(progressToken, 0, "🔍 Discovering Antigravity...");
+
+        let launchAttempted = false;
+        let lastDiscoverError: DiscoverCDPError | undefined;
+        const discovered = await withRetry(
+            async () => {
+                incrementTaskAttempt(task, "discover");
+                const found = await withTimeout(discoverCDPDetailed(targetDir), DISCOVER_TIMEOUT_MS, "discoverCDP");
+                if (!found.ok || !found.discovered) {
+                    lastDiscoverError = found.error;
+                    const shouldTryLaunch =
+                        !launchAttempted &&
+                        found.error?.code !== "schema_mismatch" &&
+                        found.error?.code !== "invalid_env_port";
+                    if (shouldTryLaunch) {
+                        launchAttempted = true;
+                        const launch = await launchAntigravityForWorkspace({
+                            targetDir: targetDir || process.cwd(),
+                            log: (message) => log(`[${task.id}] ${message}`),
+                        });
+                        if (launch.started) {
+                            await sendProgressNotification(
+                                progressToken,
+                                2,
+                                "🚀 Launching Antigravity..."
+                            );
+                            const recovered = await waitForDiscoveredCdp(targetDir, COLD_START_WAIT_MS);
+                            if (recovered) {
+                                log(
+                                    `[${task.id}] CDP recovered after cold-start on ${recovered.ip}:${recovered.port}`
+                                );
+                                return recovered;
+                            }
+                            throw new RetryableError(
+                                `Antigravity launched but CDP did not become ready within ${Math.round(
+                                    COLD_START_WAIT_MS / 1000
+                                )}s; last=${formatDiscoverError(lastDiscoverError)}`
+                            );
+                        }
+                        log(`[${task.id}] Cold-start launch skipped/failed: ${launch.error || "unknown"}`);
+                    }
+                    throw new RetryableError(`CDP discovery pending: ${formatDiscoverError(lastDiscoverError)}`);
+                }
+                return found.discovered;
+            },
+            {
+                maxAttempts: RETRY_MAX_ATTEMPTS,
+                baseDelayMs: RETRY_BASE_DELAY_MS,
+                onRetry: onRetry("discover"),
+            }
+        );
+        log(`[${task.id}] Found target: ${discovered.target.title} on port ${discovered.port}`);
+
+        // 2. Connect
+        setStatus("connecting");
+        await sendProgressNotification(progressToken, 5, "🔗 Connecting to Antigravity...");
+        cdp = await withRetry(
+            async () => {
+                incrementTaskAttempt(task, "connect");
+                try {
+                    return await withTimeout(
+                        connectCDP(discovered.target.webSocketDebuggerUrl),
+                        CONNECT_TIMEOUT_MS,
+                        "connectCDP"
+                    );
+                } catch (error) {
+                    if (isTransientError(error)) {
+                        throw new RetryableError(toErrorMessage(error));
+                    }
+                    throw error;
+                }
+            },
+            {
+                maxAttempts: RETRY_MAX_ATTEMPTS,
+                baseDelayMs: RETRY_BASE_DELAY_MS,
+                onRetry: onRetry("connect"),
+            }
+        );
+        log(`[${task.id}] Connected. ${cdp.contexts.length} execution contexts available.`);
+        const liveCdp = cdp;
+        if (!liveCdp) {
+            throw new Error("CDP connection was not established");
+        }
+
+        // 3. Apply mode/model routing (policy + best-effort UI selection).
+        const selection = selectModelWithQuotaPolicy({
+            requestedModel: params.model,
+            mode: params.mode,
+            quota: discovered.registry?.quota,
+        });
+        log(
+            `[${task.id}] Model policy => selected=${selection.selectedModel}, mode=${selection.mode}, ` +
+            `staleQuota=${selection.staleQuota}, skipped=${selection.skipped.length}`
+        );
+        const skippedByQuota = new Set(selection.skipped.map((item) => item.model));
+        const candidateModels = uniqueStrings(
+            selection.staleQuota
+                ? selection.chain
+                : selection.chain.filter((candidate) => !skippedByQuota.has(candidate))
+        );
+
+        let selectedModel = selection.selectedModel;
+        let selectionResult: Awaited<ReturnType<typeof applyModeAndModelSelection>> | null = null;
+        for (const candidate of candidateModels) {
+            selectionResult = await applyModeAndModelSelection(liveCdp, {
+                mode: selection.mode,
+                model: candidate,
+            });
+            const details = selectionResult.details.join(",") || "no-details";
+            log(
+                `[${task.id}] UI selection attempt (${candidate}) => modeApplied=${selectionResult.modeApplied}, ` +
+                `modelApplied=${selectionResult.modelApplied} (${details})`
+            );
+            if (selectionResult.modelApplied) {
+                selectedModel = candidate;
+                break;
+            }
+        }
+
+        if (!selectionResult?.modelApplied) {
+            log(
+                `[${task.id}] UI model selection was not confirmed for candidates=[${candidateModels.join(",")}]. ` +
+                "Proceeding with currently active UI model."
+            );
+        } else if (selectedModel !== selection.selectedModel) {
+            log(
+                `[${task.id}] Model fallback applied: requested=${selection.selectedModel}, selected=${selectedModel}`
+            );
+        }
+
+        // 4. Inject message
+        setStatus("injecting");
+        log(`[${task.id}] Injecting prompt (${prompt.length} chars)...`);
         await sendProgressNotification(
             progressToken,
             10,
             "📝 Sending prompt to Antigravity..."
         );
-        const injectResult = await injectMessage(cdp, prompt);
+        const injectResult = await withRetry(
+            async () => {
+                incrementTaskAttempt(task, "inject");
+                const result = await withTimeout(
+                    injectMessage(liveCdp, prompt),
+                    INJECT_TIMEOUT_MS,
+                    "injectMessage"
+                );
+                if (!result.ok) {
+                    const reason = result.reason || result.error || "unknown";
+                    if (reason === "busy" || reason === "editor_not_found" || reason === "no_context") {
+                        throw new RetryableError(`inject failed: ${reason}`);
+                    }
+                    throw new Error(`Failed to inject message: ${reason}`);
+                }
+                return result;
+            },
+            {
+                maxAttempts: RETRY_MAX_ATTEMPTS + 1,
+                baseDelayMs: RETRY_BASE_DELAY_MS,
+                onRetry: onRetry("inject"),
+            }
+        );
+        log(`[${task.id}] Message injected via ${injectResult.method}`);
 
-        if (!injectResult.ok) {
-            throw new Error(
-                `Failed to inject message: ${injectResult.reason || injectResult.error}`
-            );
+        // 5. Initialize LS-first wait engine.
+        waitEngine = await createWaitStateEngine({
+            discovered,
+            log: (message) => log(`[${task.id}] ${message}`),
+        });
+        if (waitEngine.cascadeId) {
+            log(`[${task.id}] Active cascade resolved: ${waitEngine.cascadeId}`);
+        } else {
+            log(`[${task.id}] No cascadeId resolved; DOM wait fallback will be used.`);
         }
-        log(`Message injected via ${injectResult.method}`);
 
-        // 4. Polling loop
-        log("Entering polling loop...");
+        // 6. Polling loop
+        setStatus("running");
+        log(`[${task.id}] Entering polling loop...`);
         const startTime = Date.now();
         let progressCount = 15;
-        let totalAccepted = 0;
-        let totalBlocked = 0;
 
         const progressMessages = [
             "🧠 Antigravity is analyzing your request...",
@@ -185,22 +465,31 @@ async function handleAskAntigravity(
 
             // Timeout check
             if (elapsed > MAX_TIMEOUT) {
-                log("Max timeout reached, extracting whatever is available...");
+                log(`[${task.id}] Max timeout reached, extracting whatever is available...`);
                 break;
             }
 
-            // Poll completion status
-            const status = await pollCompletionStatus(cdp);
+            // LS-first completion checks.
+            const lsCheck = waitEngine ? await waitEngine.check(elapsed) : { completed: false, lsUsable: false };
+            if (lsCheck.completed) {
+                log(`[${task.id}] Generation complete via ${lsCheck.source}.`);
+                break;
+            }
 
-            // Check if generation completed
-            if (!status.isGenerating) {
-                // Wait a bit more to ensure it's truly done (not just a brief pause)
-                await new Promise((r) => setTimeout(r, 2000));
-                const recheck = await pollCompletionStatus(cdp);
-                if (!recheck.isGenerating) {
-                    log("Generation complete.");
-                    break;
+            // DOM fallback when LS sources are unavailable/unreliable.
+            if (!lsCheck.lsUsable) {
+                const status = await pollCompletionStatus(liveCdp);
+                if (!status.isGenerating) {
+                    // Wait a bit more to ensure it's truly done (not just a brief pause)
+                    await new Promise((r) => setTimeout(r, 2000));
+                    const recheck = await pollCompletionStatus(liveCdp);
+                    if (!recheck.isGenerating) {
+                        log(`[${task.id}] Generation complete via DOM fallback.`);
+                        break;
+                    }
                 }
+            } else if (lsCheck.note && elapsed % KEEPALIVE_INTERVAL < POLL_INTERVAL) {
+                log(`[${task.id}] LS wait note: ${lsCheck.note}`);
             }
 
             // Progress keepalive (every ~25 seconds)
@@ -219,14 +508,20 @@ async function handleAskAntigravity(
             await new Promise((r) => setTimeout(r, POLL_INTERVAL));
         }
 
-        // 5. Extract response
-        log("Extracting response...");
+        // 7. Extract response
+        setStatus("extracting");
+        log(`[${task.id}] Extracting response...`);
         await sendProgressNotification(
             progressToken,
             95,
             "📋 Extracting Antigravity's response..."
         );
-        const response = await extractLatestResponse(cdp);
+        const response = await withTimeout(
+            extractLatestResponse(liveCdp, prompt),
+            EXTRACT_TIMEOUT_MS,
+            "extractLatestResponse"
+        );
+        setStatus("completed");
 
         // Final progress
         await sendProgressNotification(
@@ -236,22 +531,33 @@ async function handleAskAntigravity(
         );
 
         return response;
+    } catch (error) {
+        setStatus("failed", toErrorMessage(error));
+        throw error;
     } finally {
-        cdp.close();
-        log("CDP connection closed.");
+        waitEngine?.close();
+        if (cdp) {
+            cdp.close();
+            log(`[${task.id}] CDP connection closed.`);
+        }
+        activeAskTask = null;
     }
 }
 
 async function handleStop(targetDir?: string): Promise<string> {
-    const discovered = await discoverCDP(targetDir);
-    if (!discovered) {
-        return "No Antigravity CDP target found for target directory.";
+    const discoveredResult = await discoverCDPDetailed(targetDir);
+    if (!discoveredResult.ok || !discoveredResult.discovered) {
+        return `No Antigravity CDP target found: ${formatDiscoverError(discoveredResult.error)}`;
     }
+    const discovered = discoveredResult.discovered;
 
     const cdp = await connectCDP(discovered.target.webSocketDebuggerUrl);
     try {
         const result = await stopGeneration(cdp);
         if (result.success) {
+            if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
+                transitionAskTask(activeAskTask, "cancelled", "stop requested");
+            }
             return `Generation stopped successfully (method: ${result.method}).`;
         }
         return `Could not stop generation: ${result.error}`;
@@ -264,10 +570,10 @@ async function handlePing(
     message?: string,
     targetDir?: string
 ): Promise<string> {
-    const discovered = await discoverCDP(targetDir);
-    const cdpStatus = discovered
-        ? `Connected — ${discovered.target.title} on ${discovered.ip}:${discovered.port}`
-        : "Not found — ensure Antigravity is running with debug ports";
+    const discovered = await discoverCDPDetailed(targetDir);
+    const cdpStatus = discovered.ok && discovered.discovered
+        ? `Connected — ${discovered.discovered.target.title} on ${discovered.discovered.ip}:${discovered.discovered.port}`
+        : `Not ready — ${formatDiscoverError(discovered.error)}`;
 
     return [
         `antigravity-mcp-server v${VERSION}`,
@@ -276,6 +582,46 @@ async function handlePing(
     ]
         .filter(Boolean)
         .join("\n");
+}
+
+async function handleLaunchAntigravity(params: {
+    targetDir?: string;
+    waitForCdp?: boolean;
+    killExisting?: boolean;
+}): Promise<string> {
+    const { targetDir, waitForCdp = true } = params;
+    const dir = targetDir || globalTargetDir || process.cwd();
+
+    const launch = await launchAntigravityForWorkspace({
+        targetDir: dir,
+        killExisting: params.killExisting !== false,
+        log: (message) => log(`[launch-antigravity] ${message}`),
+    });
+
+    if (!launch.started) {
+        return `Launch failed: ${launch.error ?? "unknown error"}`;
+    }
+
+    const lines = [
+        `Antigravity launched: ${launch.executable}`,
+        `CDP port: ${launch.port}`,
+        `Target dir: ${dir}`,
+    ];
+
+    if (waitForCdp) {
+        log(`[launch-antigravity] Waiting up to ${Math.round(COLD_START_WAIT_MS / 1000)}s for CDP...`);
+        const discovered = await waitForDiscoveredCdp(dir, COLD_START_WAIT_MS);
+        if (discovered) {
+            lines.push(`CDP ready: ${discovered.ip}:${discovered.port} — ${discovered.target.title}`);
+        } else {
+            const diag = await discoverCDPDetailed(dir);
+            lines.push(
+                `CDP not detected within ${Math.round(COLD_START_WAIT_MS / 1000)}s — ${formatDiscoverError(diag.error)}`
+            );
+        }
+    }
+
+    return lines.join("\n");
 }
 
 // --- Parse CLI Args ---
@@ -308,7 +654,15 @@ server.setRequestHandler(
                     if (!args.prompt || typeof args.prompt !== "string") {
                         throw new Error("Missing required argument: prompt");
                     }
-                    resultText = await handleAskAntigravity(args.prompt, globalTargetDir, progressToken);
+                    resultText = await handleAskAntigravity(
+                        {
+                            prompt: args.prompt,
+                            mode: typeof args.mode === "string" ? args.mode : undefined,
+                            model: typeof args.model === "string" ? args.model : undefined,
+                        },
+                        globalTargetDir,
+                        progressToken
+                    );
                     break;
 
                 case "antigravity-stop":
@@ -317,6 +671,14 @@ server.setRequestHandler(
 
                 case "ping":
                     resultText = await handlePing(args.message, globalTargetDir);
+                    break;
+
+                case "launch-antigravity":
+                    resultText = await handleLaunchAntigravity({
+                        targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
+                        waitForCdp: typeof args.waitForCdp === "boolean" ? args.waitForCdp : true,
+                        killExisting: typeof args.killExisting === "boolean" ? args.killExisting : true,
+                    });
                     break;
 
                 default:
@@ -343,6 +705,8 @@ server.setRequestHandler(
 
 async function main() {
     log("Initializing antigravity-mcp-server...");
+    // Keep stdio MCP server alive even when stdin starts paused in some Node runtimes.
+    process.stdin.resume();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     log("antigravity-mcp-server listening on stdio");
