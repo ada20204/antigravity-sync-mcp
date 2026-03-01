@@ -8,7 +8,7 @@ import {
   withTimeout,
   RetryableError,
   isTaskTerminal,
-} from "../dist/task-runtime.js";
+} from "../build/dist/task-runtime.js";
 
 test("task state transitions append history and terminal detection works", () => {
   const task = createAskTask("hello");

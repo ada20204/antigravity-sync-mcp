@@ -17,7 +17,7 @@ npm install
 npm run build
 
 # Test connectivity
-node dist/index.js  # (runs as stdio MCP server)
+node build/dist/index.js  # (runs as stdio MCP server)
 ```
 
 ## Single VSIX Option
@@ -34,7 +34,7 @@ If you install `antigravity-mcp-sidecar` VSIX, you can bootstrap this server wit
 
 ### Claude Code
 ```bash
-claude mcp add antigravity-mcp -- node /path/to/antigravity-mcp-server/dist/index.js
+claude mcp add antigravity-mcp -- node /path/to/antigravity-mcp-server/build/dist/index.js
 ```
 
 ### Claude Desktop / Cursor
@@ -44,7 +44,7 @@ Add to your MCP config:
   "mcpServers": {
     "antigravity-mcp": {
       "command": "node",
-      "args": ["/path/to/antigravity-mcp-server/dist/index.js"]
+      "args": ["/path/to/antigravity-mcp-server/build/dist/index.js"]
     }
   }
 }

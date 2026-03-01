@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { selectModelWithQuotaPolicy } from '../dist/quota-policy.js';
+import { selectModelWithQuotaPolicy } from '../build/dist/quota-policy.js';
 
 test('selectModelWithQuotaPolicy defaults to fast chain when no inputs provided', () => {
   const result = selectModelWithQuotaPolicy({});

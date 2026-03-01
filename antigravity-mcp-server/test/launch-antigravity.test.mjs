@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildLaunchArgs, resolveLaunchPort } from '../dist/launch-antigravity.js';
+import { buildLaunchArgs, resolveLaunchPort } from '../build/dist/launch-antigravity.js';
 
 test('buildLaunchArgs includes target directory and new-window semantics', () => {
   const args = buildLaunchArgs({
@@ -29,4 +29,3 @@ test('resolveLaunchPort prefers launch env over cdp env', () => {
     else process.env.ANTIGRAVITY_CDP_PORT = prevCdp;
   }
 });
-

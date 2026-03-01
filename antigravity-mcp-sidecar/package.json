@@ -152,6 +152,7 @@
         }
     },
     "scripts": {
+        "sync-server-runtime": "bash -c 'PKG_DIR=\"$(cd \"$(dirname \"$npm_package_json\")\" && pwd)\"; ROOT_DIR=\"$(cd \"$PKG_DIR/..\" && pwd)\"; rm -rf \"$PKG_DIR/server-runtime/dist\"; cp -r \"$ROOT_DIR/antigravity-mcp-server/build/dist\" \"$PKG_DIR/server-runtime/dist\"'",
         "package": "vsce package",
         "verify": "bash -c 'VSIX=$(ls -t *.vsix 2>/dev/null | head -1); if [ -z \"$VSIX\" ]; then echo \"❌ No .vsix file found\"; exit 1; fi; VSIX_PATH=$(pwd)/$VSIX; cd /tmp && rm -rf vsix_verify && mkdir vsix_verify && cd vsix_verify && unzip -q \"$VSIX_PATH\" && test -f extension/server-runtime/dist/index.js && test -d extension/node_modules/ws && test -d extension/node_modules/@modelcontextprotocol/sdk && echo \"✅ $VSIX: bundled server runtime + deps present\"'"
     },

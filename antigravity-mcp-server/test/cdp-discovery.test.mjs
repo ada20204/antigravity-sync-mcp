@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { computeWorkspaceId, discoverCDPDetailed } from '../dist/cdp.js';
+import { computeWorkspaceId, discoverCDPDetailed } from '../build/dist/cdp.js';
 
 function writeRegistry(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createWaitStateEngine } from '../dist/wait-state.js';
-import { isTrajectoryTerminal } from '../dist/ls-client.js';
+import { createWaitStateEngine } from '../build/dist/wait-state.js';
+import { isTrajectoryTerminal } from '../build/dist/ls-client.js';
 
 function makeDiscovered(overrides = {}) {
   return {

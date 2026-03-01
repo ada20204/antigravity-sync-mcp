@@ -3,14 +3,14 @@
   "version": "0.1.1",
   "description": "MCP server that bridges external AI agents to Antigravity via CDP",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "build/dist/index.js",
   "bin": {
-    "antigravity-mcp": "dist/index.js"
+    "antigravity-mcp": "build/dist/index.js"
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "start": "node build/dist/index.js",
+    "dev": "tsc && node build/dist/index.js"
   },
   "keywords": [
     "mcp",
@@ -25,7 +25,7 @@
     "node": ">=18.0.0"
   },
   "files": [
-    "dist/",
+    "build/dist/",
     "README.md",
     "LICENSE"
   ],

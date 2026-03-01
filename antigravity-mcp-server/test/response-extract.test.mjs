@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractLatestResponse } from '../dist/scripts.js';
+import { extractLatestResponse } from '../build/dist/scripts.js';
 
 function makeMockCdp(value) {
   return {

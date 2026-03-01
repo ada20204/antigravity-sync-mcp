@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   computeWorkspaceId,
-} from '../dist/cdp.js';
+} from '../build/dist/cdp.js';
 
 test('computeWorkspaceId generates consistent hash for same path', () => {
   const path1 = '/home/elliot/workspace';
