@@ -24,6 +24,8 @@ const {
 
 const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
+const MCP_BIN_DIR = path.join(REGISTRY_DIR, 'bin');
+const MCP_METADATA_FILE = path.join(REGISTRY_DIR, 'server-runtime.json');
 const REGISTRY_SCHEMA_VERSION = 2;
 const REGISTRY_COMPAT_SCHEMA_VERSIONS = [2];
 const REGISTRY_CONTROL_KEY = '__control__';
@@ -41,6 +43,92 @@ const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
 const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
+
+function getBundledServerEntryPath(context) {
+    return path.join(context.extensionPath, 'server-runtime', 'dist', 'index.js');
+}
+
+function getLauncherPaths() {
+    const unixLauncher = path.join(MCP_BIN_DIR, 'antigravity-mcp-server');
+    const windowsLauncher = path.join(MCP_BIN_DIR, 'antigravity-mcp-server.cmd');
+    return { unixLauncher, windowsLauncher };
+}
+
+function ensureMcpLauncher(context) {
+    const entryPath = getBundledServerEntryPath(context);
+    if (!fs.existsSync(entryPath)) {
+        return { ok: false, error: `Bundled server entry missing: ${entryPath}` };
+    }
+    if (!fs.existsSync(MCP_BIN_DIR)) {
+        fs.mkdirSync(MCP_BIN_DIR, { recursive: true });
+    }
+
+    const { unixLauncher, windowsLauncher } = getLauncherPaths();
+    const entryForShell = entryPath.replace(/"/g, '\\"');
+    const unixScript = [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        `exec node "${entryForShell}" "$@"`,
+        '',
+    ].join('\n');
+    fs.writeFileSync(unixLauncher, unixScript, { encoding: 'utf-8', mode: 0o755 });
+    try {
+        fs.chmodSync(unixLauncher, 0o755);
+    } catch { }
+
+    const entryForCmd = entryPath.replace(/"/g, '""');
+    const cmdScript = [
+        '@echo off',
+        `node "${entryForCmd}" %*`,
+        '',
+    ].join('\r\n');
+    fs.writeFileSync(windowsLauncher, cmdScript, 'utf-8');
+
+    const metadata = {
+        version: context.extension.packageJSON && context.extension.packageJSON.version
+            ? String(context.extension.packageJSON.version)
+            : 'unknown',
+        extensionPath: context.extensionPath,
+        bundledServer: entryPath,
+        updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(MCP_METADATA_FILE, JSON.stringify(metadata, null, 2), 'utf-8');
+    try {
+        fs.chmodSync(MCP_METADATA_FILE, 0o600);
+    } catch { }
+
+    return {
+        ok: true,
+        entryPath,
+        unixLauncher,
+        windowsLauncher,
+    };
+}
+
+function buildAiConfigPrompt(launcherPath, workspacePath) {
+    const workspaceHint = workspacePath || '${workspaceFolder}';
+    return [
+        '# Antigravity MCP Setup Prompt (for AI clients)',
+        '',
+        'Use the following MCP server config:',
+        '',
+        '```json',
+        '{',
+        '  "mcpServers": {',
+        '    "antigravity-mcp": {',
+        '      "command": "' + launcherPath.replace(/\\/g, '\\\\') + '",',
+        '      "args": ["--target-dir", "' + workspaceHint.replace(/\\/g, '\\\\') + '"]',
+        '    }',
+        '  }',
+        '}',
+        '```',
+        '',
+        'Recommended instruction to AI:',
+        '- Prefer tool `ask-antigravity` for delegated coding tasks.',
+        '- Pass `mode` as `fast` for quick loop and `plan` for deep tasks.',
+        '- If response indicates `registry_not_ready`, ask user to open/restart Antigravity with sidecar enabled.',
+    ].join('\n');
+}
 
 // ── Schema helpers ────────────────────────────────────────────────────────
 function normalizePath(rawPath) {
@@ -1026,6 +1114,22 @@ async function activate(context) {
             log_retention_days: LOG_RETENTION_MS / (24 * 60 * 60 * 1000),
         },
     });
+    const launcherResult = ensureMcpLauncher(context);
+    if (launcherResult.ok) {
+        log(`Bundled MCP launcher ready: ${launcherResult.unixLauncher}`, {
+            plane: 'ctrl',
+            state: 'ready',
+            extra: {
+                bundled_server: launcherResult.entryPath,
+                windows_launcher: launcherResult.windowsLauncher,
+            },
+        });
+    } else {
+        warn(`Bundled MCP launcher unavailable: ${launcherResult.error}`, {
+            plane: 'ctrl',
+            error_code: 'bundled_server_missing',
+        });
+    }
 
     let latestLs = null;
     let latestQuota = null;
@@ -1573,6 +1677,36 @@ async function activate(context) {
             return;
         }
         await executeManualLaunch('launch');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.installBundledServer', async () => {
+        const result = ensureMcpLauncher(context);
+        if (!result.ok) {
+            vscode.window.showErrorMessage(`Bundled server install failed: ${result.error}`);
+            return;
+        }
+        const launcher = process.platform === 'win32' ? result.windowsLauncher : result.unixLauncher;
+        const prompt = buildAiConfigPrompt(launcher, workspacePath);
+        outputChannel.show(true);
+        outputChannel.appendLine('=== Antigravity MCP Bundled Server ===');
+        outputChannel.appendLine(`entry: ${result.entryPath}`);
+        outputChannel.appendLine(`launcher(unix): ${result.unixLauncher}`);
+        outputChannel.appendLine(`launcher(win): ${result.windowsLauncher}`);
+        outputChannel.appendLine('');
+        outputChannel.appendLine(prompt);
+        await vscode.env.clipboard.writeText(prompt);
+        vscode.window.showInformationMessage(`Bundled MCP server ready. AI config prompt copied to clipboard. Launcher: ${launcher}`);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showAiConfigPrompt', async () => {
+        const { unixLauncher, windowsLauncher } = getLauncherPaths();
+        const launcher = process.platform === 'win32' ? windowsLauncher : unixLauncher;
+        const prompt = buildAiConfigPrompt(launcher, workspacePath);
+        outputChannel.show(true);
+        outputChannel.appendLine('=== Antigravity MCP AI Config Prompt ===');
+        outputChannel.appendLine(prompt);
+        await vscode.env.clipboard.writeText(prompt);
+        vscode.window.showInformationMessage('AI config prompt copied to clipboard and written to output.');
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.requestHostRestart', async () => {

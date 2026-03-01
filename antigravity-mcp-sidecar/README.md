@@ -6,6 +6,7 @@ All-in-one companion extension for Antigravity (Cursor fork).
 
 - **Auto-Accept**: Automatically clicks Run, Accept, Always Allow buttons in the agent panel
 - **CDP Negotiation Registry**: Publishes negotiated CDP endpoint/state for external MCP server routing
+- **Bundled MCP Server Runtime**: VSIX ships with `antigravity-mcp-server` runtime (`server-runtime/dist`) so one VSIX can bootstrap server usage
 - **Manual Launch Controls**: Commands to launch/restart Antigravity (restart requires confirmation)
 - **Cross-End Restart Control**: Remote sidecar can submit signed host restart requests; host side confirms via modal before restart
 - **Structured Logging**: Writes JSONL logs with role/node/trace metadata to `~/.config/antigravity-mcp/logs/`
@@ -50,6 +51,35 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - `Launch Antigravity (New Window)`
 - `Restart Antigravity (Confirm)`
 - `Request Host Restart (Remote)`
+- `Install Bundled MCP Server Launcher`
+- `Show AI MCP Config Prompt`
+
+## One VSIX Deployment
+
+After installing sidecar VSIX:
+
+1. Run command: `Install Bundled MCP Server Launcher`
+2. Sidecar generates launchers:
+   - `~/.config/antigravity-mcp/bin/antigravity-mcp-server`
+   - `~/.config/antigravity-mcp/bin/antigravity-mcp-server.cmd`
+3. Sidecar prints and copies AI configuration prompt to clipboard.
+
+This lets you configure MCP clients without separately installing `antigravity-mcp-server` package.
+
+## AI Config Prompt (Template)
+
+Use command `Show AI MCP Config Prompt` to output and copy a ready-to-use snippet. Example:
+
+```json
+{
+  "mcpServers": {
+    "antigravity-mcp": {
+      "command": "~/.config/antigravity-mcp/bin/antigravity-mcp-server",
+      "args": ["--target-dir", "/path/to/your/workspace"]
+    }
+  }
+}
+```
 
 ## Requirements
 

@@ -36,10 +36,20 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 unzip -q "$VSIX_PATH" -d "$WORK_DIR"
 
-if [[ -d "$WORK_DIR/extension/node_modules/ws" ]]; then
-  echo "PASS: ws module present in $(basename "$VSIX_PATH")"
-  exit 0
+if [[ ! -f "$WORK_DIR/extension/server-runtime/dist/index.js" ]]; then
+  echo "FAIL: bundled server runtime missing in $(basename "$VSIX_PATH")"
+  exit 1
 fi
 
-echo "FAIL: ws module missing in $(basename "$VSIX_PATH")"
-exit 1
+if [[ ! -d "$WORK_DIR/extension/node_modules/ws" ]]; then
+  echo "FAIL: ws module missing in $(basename "$VSIX_PATH")"
+  exit 1
+fi
+
+if [[ ! -d "$WORK_DIR/extension/node_modules/@modelcontextprotocol/sdk" ]]; then
+  echo "FAIL: @modelcontextprotocol/sdk missing in $(basename "$VSIX_PATH")"
+  exit 1
+fi
+
+echo "PASS: bundled server runtime + deps present in $(basename "$VSIX_PATH")"
+exit 0

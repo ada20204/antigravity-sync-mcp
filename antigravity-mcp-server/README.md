@@ -20,6 +20,16 @@ npm run build
 node dist/index.js  # (runs as stdio MCP server)
 ```
 
+## Single VSIX Option
+
+If you install `antigravity-mcp-sidecar` VSIX, you can bootstrap this server without separate npm install:
+
+1. In Antigravity command palette run: `Install Bundled MCP Server Launcher`
+2. Use generated launcher:
+   - Unix: `~/.config/antigravity-mcp/bin/antigravity-mcp-server`
+   - Windows: `~/.config/antigravity-mcp/bin/antigravity-mcp-server.cmd`
+3. Run sidecar command `Show AI MCP Config Prompt` to copy ready MCP config snippet.
+
 ## Register with MCP Client
 
 ### Claude Code

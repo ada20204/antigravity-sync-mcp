@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.9",
+    "version": "0.1.10",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -17,9 +17,11 @@
     "main": "./src/extension.js",
     "files": [
         "src/**/*",
-        "node_modules/ws/**/*",
+        "server-runtime/**/*",
+        "node_modules/**/*",
         "package.json",
         "README.md",
+        "AI_CONFIG_PROMPT.md",
         "CHANGELOG.md",
         "LICENSE.txt",
         "icon.png"
@@ -53,6 +55,14 @@
             {
                 "command": "antigravityMcpSidecar.requestHostRestart",
                 "title": "Request Host Restart (Remote)"
+            },
+            {
+                "command": "antigravityMcpSidecar.installBundledServer",
+                "title": "Install Bundled MCP Server Launcher"
+            },
+            {
+                "command": "antigravityMcpSidecar.showAiConfigPrompt",
+                "title": "Show AI MCP Config Prompt"
             }
         ],
         "configuration": {
@@ -143,9 +153,10 @@
     },
     "scripts": {
         "package": "vsce package",
-        "verify": "bash -c 'VSIX=$(ls -t *.vsix 2>/dev/null | head -1); if [ -z \"$VSIX\" ]; then echo \"❌ No .vsix file found\"; exit 1; fi; VSIX_PATH=$(pwd)/$VSIX; cd /tmp && rm -rf vsix_verify && mkdir vsix_verify && cd vsix_verify && unzip -q \"$VSIX_PATH\" && if [ -d extension/node_modules/ws ]; then echo \"✅ $VSIX: ws module present\"; else echo \"❌ $VSIX: ws module MISSING\"; exit 1; fi'"
+        "verify": "bash -c 'VSIX=$(ls -t *.vsix 2>/dev/null | head -1); if [ -z \"$VSIX\" ]; then echo \"❌ No .vsix file found\"; exit 1; fi; VSIX_PATH=$(pwd)/$VSIX; cd /tmp && rm -rf vsix_verify && mkdir vsix_verify && cd vsix_verify && unzip -q \"$VSIX_PATH\" && test -f extension/server-runtime/dist/index.js && test -d extension/node_modules/ws && test -d extension/node_modules/@modelcontextprotocol/sdk && echo \"✅ $VSIX: bundled server runtime + deps present\"'"
     },
     "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.27.1",
         "ws": "^8.19.0"
     },
     "devDependencies": {
