@@ -1239,6 +1239,12 @@ async function activate(context) {
     }, LOG_RETENTION_SWEEP_INTERVAL_MS);
     context.subscriptions.push({ dispose: () => clearInterval(logRetentionTimer) });
 
+    // Periodically prune expired nonces so the NonceCache doesn't grow unboundedly.
+    const noncePruneTimer = setInterval(() => {
+        try { nonceCache.prune(); } catch { }
+    }, 5 * 60 * 1000);
+    context.subscriptions.push({ dispose: () => clearInterval(noncePruneTimer) });
+
     function getQuotaLevel(summary) {
         if (!summary) return { level: 'none', watchedPercent: null, target: 'quota' };
 
