@@ -54,7 +54,7 @@ Add to your MCP config:
 
 | Tool | Description |
 |------|-------------|
-| `ask-antigravity` | Send a prompt to Antigravity and wait for the AI response. Supports optional `mode` (`fast`/`plan`) and `model`; server applies quota-aware model fallback. |
+| `ask-antigravity` | Send a prompt to Antigravity and wait for the AI response. Supports optional `mode` (`fast`/`plan`), `model`, and per-request `targetDir`; server applies quota-aware model fallback. |
 | `antigravity-stop` | Stop the current AI generation in Antigravity. |
 | `ping` | Test connectivity and check CDP availability. |
 
@@ -72,6 +72,12 @@ Add to your MCP config:
 - `prompt` (required): prompt text
 - `mode` (optional): `fast` or `plan`
 - `model` (optional): preferred model (for example `gemini-3-flash`, `gemini-3-pro-high`, `opus-4.6`)
+- `targetDir` (optional): workspace directory for this request
+
+Target directory resolution order for `ask-antigravity`:
+1. request `targetDir`
+2. process `--target-dir`
+3. `process.cwd()`
 
 ## How It Works
 

@@ -1,0 +1,94 @@
+name: Build Sidecar VSIX
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-sidecar-vsix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            antigravity-mcp-server/package-lock.json
+            antigravity-mcp-sidecar/package-lock.json
+
+      - name: Install server dependencies
+        run: npm --prefix antigravity-mcp-server ci
+
+      - name: Build server runtime
+        run: npm --prefix antigravity-mcp-server run build
+
+      - name: Install sidecar dependencies
+        run: npm --prefix antigravity-mcp-sidecar ci
+
+      - name: Sync bundled server runtime
+        run: npm --prefix antigravity-mcp-sidecar run sync-server-runtime
+
+      - name: Package VSIX
+        run: |
+          mkdir -p build
+          cd antigravity-mcp-sidecar
+          npx -y vsce@2.15.0 package --no-yarn --no-dependencies --allow-missing-repository --out ../build/antigravity-mcp-sidecar-${GITHUB_SHA::7}-base.vsix
+
+      - name: Inject runtime dependencies into VSIX
+        run: |
+          VSIX_BASE="$(ls build/*-base.vsix | head -1)"
+          OUT_VSIX="${VSIX_BASE%-base.vsix}.vsix"
+          rm -rf /tmp/ag-vsix-repack && mkdir -p /tmp/ag-vsix-repack
+          unzip -q "$VSIX_BASE" -d /tmp/ag-vsix-repack
+          cp -a antigravity-mcp-sidecar/node_modules /tmp/ag-vsix-repack/extension/node_modules
+          (cd /tmp/ag-vsix-repack && zip -qr /tmp/ag-vsix-packed.vsix .)
+          mv /tmp/ag-vsix-packed.vsix "$OUT_VSIX"
+          rm -f "$VSIX_BASE"
+
+      - name: Verify VSIX contents
+        run: |
+          cd antigravity-mcp-sidecar
+          bash ./verify-vsix.sh ../build/*.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-vsix
+          path: build/*.vsix
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sidecar-vsix
+          path: build
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.vsix
+          generate_release_notes: true

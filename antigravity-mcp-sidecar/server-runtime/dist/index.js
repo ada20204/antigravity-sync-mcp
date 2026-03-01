@@ -111,6 +111,11 @@ const TOOLS = [
                     type: "string",
                     description: "Optional preferred model hint (for example: gemini-3-flash, gemini-3-pro-high, opus-4.6)",
                 },
+                targetDir: {
+                    type: "string",
+                    description: "Optional workspace directory for this request. " +
+                        "When provided, it overrides the process --target-dir fallback.",
+                },
             },
             required: ["prompt"],
         },
@@ -175,8 +180,12 @@ async function sendProgressNotification(progressToken, progress, message) {
     }
 }
 // --- Tool Handlers ---
-async function handleAskAntigravity(params, targetDir, progressToken) {
+async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
     const prompt = params.prompt;
+    const paramTargetDir = typeof params.targetDir === "string" && params.targetDir.trim()
+        ? params.targetDir.trim()
+        : undefined;
+    const targetDir = paramTargetDir || fallbackTargetDir;
     if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
         throw new Error(`Another ask-antigravity task is running (id=${activeAskTask.id}, status=${activeAskTask.status}). ` +
             "Wait for completion or call antigravity-stop first.");
@@ -486,6 +495,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     prompt: args.prompt,
                     mode: typeof args.mode === "string" ? args.mode : undefined,
                     model: typeof args.model === "string" ? args.model : undefined,
+                    targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
                 }, globalTargetDir, progressToken);
                 break;
             case "antigravity-stop":

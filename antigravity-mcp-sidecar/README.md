@@ -68,7 +68,9 @@ This lets you configure MCP clients without separately installing `antigravity-m
 
 ## AI Config Prompt (Template)
 
-Use command `Show AI MCP Config Prompt` to output and copy a ready-to-use snippet. Example:
+Use command `Show AI MCP Config Prompt` to output and copy a ready-to-use snippet.
+
+Linux/macOS / WSL MCP client example:
 
 ```json
 {
@@ -76,6 +78,23 @@ Use command `Show AI MCP Config Prompt` to output and copy a ready-to-use snippe
     "antigravity-mcp": {
       "command": "~/.config/antigravity-mcp/bin/antigravity-mcp-server",
       "args": ["--target-dir", "/path/to/your/workspace"]
+    }
+  }
+}
+```
+
+Windows recommendation (avoid extra cmd window popup):
+
+```json
+{
+  "mcpServers": {
+    "antigravity-mcp": {
+      "command": "node",
+      "args": [
+        "c:\\Users\\<you>\\.antigravity\\extensions\\antigravity.antigravity-mcp-sidecar-<version>\\server-runtime\\dist\\index.js",
+        "--target-dir",
+        "c:\\path\\to\\workspace"
+      ]
     }
   }
 }

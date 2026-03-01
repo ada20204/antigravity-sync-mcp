@@ -163,6 +163,12 @@ const TOOLS: Tool[] = [
                     type: "string",
                     description: "Optional preferred model hint (for example: gemini-3-flash, gemini-3-pro-high, opus-4.6)",
                 },
+                targetDir: {
+                    type: "string",
+                    description:
+                        "Optional workspace directory for this request. " +
+                        "When provided, it overrides the process --target-dir fallback.",
+                },
             },
             required: ["prompt"],
         },
@@ -237,11 +243,16 @@ async function sendProgressNotification(
 // --- Tool Handlers ---
 
 async function handleAskAntigravity(
-    params: { prompt: string; mode?: string; model?: string },
-    targetDir?: string,
+    params: { prompt: string; mode?: string; model?: string; targetDir?: string },
+    fallbackTargetDir?: string,
     progressToken?: string | number
 ): Promise<string> {
     const prompt = params.prompt;
+    const paramTargetDir =
+        typeof params.targetDir === "string" && params.targetDir.trim()
+            ? params.targetDir.trim()
+            : undefined;
+    const targetDir = paramTargetDir || fallbackTargetDir;
     if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
         throw new Error(
             `Another ask-antigravity task is running (id=${activeAskTask.id}, status=${activeAskTask.status}). ` +
@@ -659,6 +670,7 @@ server.setRequestHandler(
                             prompt: args.prompt,
                             mode: typeof args.mode === "string" ? args.mode : undefined,
                             model: typeof args.model === "string" ? args.model : undefined,
+                            targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
                         },
                         globalTargetDir,
                         progressToken
