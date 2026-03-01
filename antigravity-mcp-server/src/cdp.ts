@@ -15,6 +15,8 @@ import WebSocket from "ws";
 const REGISTRY_DIR = ".config/antigravity-mcp";
 const REGISTRY_FILE_NAME = "registry.json";
 const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
+const SUPPORTED_SCHEMA_VERSIONS = [2];
+const READY_STATE = "ready";
 
 // --- Types ---
 
@@ -83,10 +85,17 @@ export interface RegistryV1QuotaMeta {
 }
 
 export interface RegistryEntry {
-    // v1 fields
     schema_version?: number;
+    protocol?: {
+        schema_version?: number;
+        compatible_schema_versions?: number[];
+        writer_role?: string;
+        writer_node_id?: string;
+        updated_at?: number;
+    };
     workspace_id?: string;
     workspace_paths?: { normalized?: string; raw?: string };
+    node_id?: string;
     role?: string;
     source_of_truth?: string;
     source_endpoint?: RegistryV1Endpoint;
@@ -96,7 +105,12 @@ export interface RegistryEntry {
     ttl_ms?: number;
     priority?: number;
     quota_meta?: RegistryV1QuotaMeta;
-    // v0 fields
+    last_error?: {
+        code?: string;
+        message?: string;
+        at?: number;
+        details?: Record<string, unknown>;
+    };
     port?: number;
     ip?: string;
     pid?: number;
@@ -146,6 +160,31 @@ export interface DiscoveredCDP {
     registry?: RegistryEntry;
 }
 
+export type DiscoverErrorCode =
+    | "registry_missing"
+    | "workspace_not_found"
+    | "schema_mismatch"
+    | "entry_not_ready"
+    | "entry_stale"
+    | "endpoint_missing"
+    | "endpoint_unreachable"
+    | "cdp_target_not_found"
+    | "invalid_env_port";
+
+export interface DiscoverCDPError {
+    code: DiscoverErrorCode;
+    message: string;
+    workspaceId?: string;
+    state?: string;
+    details?: Record<string, unknown>;
+}
+
+export interface DiscoverCDPResult {
+    ok: boolean;
+    discovered?: DiscoveredCDP;
+    error?: DiscoverCDPError;
+}
+
 function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
     return Date.now() - value <= maxAgeMs;
@@ -167,134 +206,232 @@ export function computeWorkspaceId(rawPath: string): string {
 }
 
 function readRegistryObject(): Record<string, RegistryEntry> | null {
+    const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
     try {
-        if (!fs.existsSync(LOCAL_REGISTRY_FILE)) return null;
-        const parsed = JSON.parse(fs.readFileSync(LOCAL_REGISTRY_FILE, "utf-8"));
+        if (!fs.existsSync(registryFile)) return null;
+        const parsed = JSON.parse(fs.readFileSync(registryFile, "utf-8"));
         if (parsed && typeof parsed === "object") {
             return parsed as Record<string, RegistryEntry>;
         }
     } catch (e) {
-        console.error(`[CDP] Failed to read registry '${LOCAL_REGISTRY_FILE}': ${(e as Error).message}`);
+        console.error(`[CDP] Failed to read registry '${registryFile}': ${(e as Error).message}`);
     }
     return null;
 }
 
-// --- discoverCDP (Registry-based) ---
+function discoverError(
+    code: DiscoverErrorCode,
+    message: string,
+    extras?: Partial<DiscoverCDPError>
+): DiscoverCDPResult {
+    return {
+        ok: false,
+        error: {
+            code,
+            message,
+            workspaceId: extras?.workspaceId,
+            state: extras?.state,
+            details: extras?.details,
+        },
+    };
+}
 
-/**
- * Find the CDP WebSocket URL for the given target directory.
- * Reads from ~/.config/antigravity-mcp/registry.json instead of port scanning.
- */
+function listRegistryEntries(registry: Record<string, RegistryEntry>): RegistryEntry[] {
+    return Object.entries(registry)
+        .filter(([key, value]) => !key.startsWith("__") && !!value && typeof value === "object")
+        .map(([, value]) => value);
+}
+
+function rankRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
+    return [...entries].sort((a, b) => {
+        const readyScore = (x: RegistryEntry) => (x.state === READY_STATE ? 1 : 0);
+        const freshScore = (x: RegistryEntry) =>
+            isFreshTimestamp(x.verified_at, x.ttl_ms ?? 30000) ? 1 : 0;
+        const roleScore = (x: RegistryEntry) => (x.role === "host" ? 1 : 0);
+        const byReady = readyScore(b) - readyScore(a);
+        if (byReady !== 0) return byReady;
+        const byFresh = freshScore(b) - freshScore(a);
+        if (byFresh !== 0) return byFresh;
+        const byRole = roleScore(b) - roleScore(a);
+        if (byRole !== 0) return byRole;
+        return (b.priority ?? 0) - (a.priority ?? 0);
+    });
+}
+
+function entrySupportsSchema(entry: RegistryEntry): boolean {
+    const declared = new Set<number>();
+    if (Number.isFinite(Number(entry.schema_version))) {
+        declared.add(Number(entry.schema_version));
+    }
+    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
+        for (const raw of entry.protocol.compatible_schema_versions) {
+            const version = Number(raw);
+            if (Number.isFinite(version)) declared.add(version);
+        }
+    }
+    if (declared.size === 0) return false;
+    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
+}
+
+async function resolveTargetFromEndpoint(ip: string, port: number): Promise<CDPTarget | null> {
+    const response = await fetch(`http://${ip}:${port}/json/list`);
+    const list: CDPTarget[] = await response.json() as any;
+    const workbench = list.find((t) =>
+        t.url?.includes("workbench.html") &&
+        t.type === "page" &&
+        !t.url?.includes("jetski")
+    );
+    const fallbackPage = list.find((t) =>
+        t.type === "page" &&
+        !!t.webSocketDebuggerUrl &&
+        !t.url?.includes("jetski")
+    );
+    return workbench || fallbackPage || null;
+}
+
+export async function discoverCDPDetailed(targetDir?: string): Promise<DiscoverCDPResult> {
+    const targetId = targetDir ? computeWorkspaceId(path.resolve(targetDir)) : undefined;
+    const envPortRaw = process.env.ANTIGRAVITY_CDP_PORT;
+    const envHost = process.env.ANTIGRAVITY_CDP_HOST?.trim() || "127.0.0.1";
+
+    // Env override remains highest precedence.
+    if (envPortRaw && envPortRaw.trim()) {
+        const envPort = Number.parseInt(envPortRaw, 10);
+        if (!Number.isFinite(envPort) || envPort < 1 || envPort > 65535) {
+            return discoverError("invalid_env_port", `Invalid ANTIGRAVITY_CDP_PORT: ${envPortRaw}`);
+        }
+        try {
+            const target = await resolveTargetFromEndpoint(envHost, envPort);
+            if (!target) {
+                return discoverError("cdp_target_not_found", `No CDP page target on ${envHost}:${envPort}`);
+            }
+            return {
+                ok: true,
+                discovered: {
+                    ip: envHost,
+                    port: envPort,
+                    target,
+                },
+            };
+        } catch (error) {
+            return discoverError("endpoint_unreachable", `CDP endpoint unreachable on ${envHost}:${envPort}`, {
+                details: { error: (error as Error).message },
+            });
+        }
+    }
+
+    const registry = readRegistryObject();
+    if (!registry) {
+        const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
+        return discoverError("registry_missing", `Registry not found: ${registryFile}`, {
+            workspaceId: targetId,
+        });
+    }
+
+    const entries = listRegistryEntries(registry);
+    if (entries.length === 0) {
+        return discoverError("workspace_not_found", "Registry has no workspace entries", {
+            workspaceId: targetId,
+        });
+    }
+
+    const scoped = targetId
+        ? entries.filter((entry) => entry.workspace_id === targetId)
+        : entries;
+    if (scoped.length === 0) {
+        return discoverError("workspace_not_found", `No registry entry matched workspace id ${targetId}`, {
+            workspaceId: targetId,
+        });
+    }
+
+    const withSupportedSchema = scoped.filter((entry) => entrySupportsSchema(entry));
+    if (withSupportedSchema.length === 0) {
+        const seenSchemas = [...new Set(scoped.map((entry) => Number(entry.schema_version)))].filter((n) => Number.isFinite(n));
+        return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${SUPPORTED_SCHEMA_VERSIONS.join(",")})`, {
+            workspaceId: targetId,
+            details: { seen_schema_versions: seenSchemas },
+        });
+    }
+
+    const ranked = rankRegistryEntries(withSupportedSchema);
+    const matched = ranked[0];
+    if (!matched) {
+        return discoverError("workspace_not_found", "No usable registry entry found after ranking", {
+            workspaceId: targetId,
+        });
+    }
+
+    if (matched.state !== READY_STATE) {
+        return discoverError(
+            "entry_not_ready",
+            `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
+            {
+                workspaceId: matched.workspace_id ?? targetId,
+                state: matched.state,
+                details: {
+                    last_error: matched.last_error,
+                    role: matched.role,
+                },
+            }
+        );
+    }
+
+    if (!isFreshTimestamp(matched.verified_at, matched.ttl_ms ?? 30000)) {
+        return discoverError("entry_stale", "Registry entry is stale", {
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+            details: {
+                verified_at: matched.verified_at,
+                ttl_ms: matched.ttl_ms ?? 30000,
+            },
+        });
+    }
+
+    const endpoint = matched.local_endpoint;
+    if (!endpoint?.port || !Number.isFinite(endpoint.port)) {
+        return discoverError("endpoint_missing", "Registry entry has no valid local_endpoint", {
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+        });
+    }
+
+    const ip = endpoint.host || "127.0.0.1";
+    const port = Number(endpoint.port);
+    try {
+        const target = await resolveTargetFromEndpoint(ip, port);
+        if (!target) {
+            return discoverError("cdp_target_not_found", `No CDP page target on ${ip}:${port}`, {
+                workspaceId: matched.workspace_id ?? targetId,
+                state: matched.state,
+            });
+        }
+        return {
+            ok: true,
+            discovered: {
+                ip,
+                port,
+                target,
+                registry: matched,
+            },
+        };
+    } catch (error) {
+        return discoverError("endpoint_unreachable", `Failed to connect to ${ip}:${port}`, {
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+            details: { error: (error as Error).message },
+        });
+    }
+}
+
 export async function discoverCDP(targetDir?: string): Promise<{
     port: number;
     ip: string;
     target: CDPTarget;
     registry?: RegistryEntry;
 } | null> {
-    let cdpPort: number | undefined;
-    let cdpIp: string | undefined;
-    let matchedRegistryEntry: RegistryEntry | undefined;
-
-    // 1. Check environment variables first
-    const envPort = process.env.ANTIGRAVITY_CDP_PORT;
-    const envHost = process.env.ANTIGRAVITY_CDP_HOST?.trim();
-    if (envHost) {
-        cdpIp = envHost;
-    }
-    if (envPort) {
-        cdpPort = parseInt(envPort, 10);
-    } else {
-        // 2. Match by workspace_id from registry
-        const registry = readRegistryObject();
-        if (registry) {
-            let matched: RegistryEntry | undefined;
-
-            if (targetDir) {
-                // Match by workspace_id
-                const targetId = computeWorkspaceId(path.resolve(targetDir));
-                const v1Candidates = Object.values(registry)
-                    .filter((e) => e.schema_version === 1 && e.workspace_id === targetId);
-
-                if (v1Candidates.length > 0) {
-                    // Prefer role=host, then highest priority
-                    v1Candidates.sort((a, b) => {
-                        const roleScore = (e: RegistryEntry) => (e.role === "host" ? 1 : 0);
-                        const diff = roleScore(b) - roleScore(a);
-                        if (diff !== 0) return diff;
-                        return (b.priority ?? 0) - (a.priority ?? 0);
-                    });
-                    matched = v1Candidates[0];
-                }
-            } else {
-                // No targetDir: find any ready host entry
-                const readyHosts = Object.values(registry)
-                    .filter((e) =>
-                        e.schema_version === 1 &&
-                        e.role === "host" &&
-                        e.state === "ready" &&
-                        e.local_endpoint?.port != null &&
-                        isFreshTimestamp(e.verified_at, e.ttl_ms ?? 30000)
-                    );
-                if (readyHosts.length > 0) {
-                    // Pick highest priority
-                    readyHosts.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
-                    matched = readyHosts[0];
-                }
-            }
-
-            if (matched) {
-                matchedRegistryEntry = matched;
-
-                // Use local_endpoint directly
-                const le = matched.local_endpoint;
-                const isReady =
-                    matched.state === "ready" &&
-                    le?.port != null &&
-                    Number.isFinite(le.port) &&
-                    isFreshTimestamp(matched.verified_at, matched.ttl_ms ?? 30000);
-
-                if (isReady && le?.port) {
-                    cdpPort = le.port;
-                    cdpIp = le.host ?? "127.0.0.1";
-                }
-            }
-        }
-    }
-
-    if (!cdpPort) {
-        return null;
-    }
-
-    // 3. Connect to the local_endpoint
-    try {
-        const response = await fetch(`http://${cdpIp}:${cdpPort}/json/list`);
-        const list: CDPTarget[] = await response.json() as any;
-        const workbench = list.find((t) =>
-            t.url?.includes("workbench.html") &&
-            t.type === "page" &&
-            !t.url?.includes("jetski")
-        );
-        const fallbackPage = list.find((t) =>
-            t.type === "page" &&
-            !!t.webSocketDebuggerUrl &&
-            !t.url?.includes("jetski")
-        );
-
-        if (workbench || fallbackPage) {
-            return {
-                port: cdpPort,
-                ip: cdpIp ?? "127.0.0.1",
-                target: (workbench || fallbackPage)!,
-                registry: matchedRegistryEntry,
-            };
-        }
-    } catch (error) {
-        console.error(
-            `[CDP] Failed to connect to ${cdpIp}:${cdpPort}: ${(error as Error).message}`
-        );
-    }
-
-    return null;
+    const result = await discoverCDPDetailed(targetDir);
+    if (!result.ok || !result.discovered) return null;
+    return result.discovered;
 }
 
 // --- connectCDP ---

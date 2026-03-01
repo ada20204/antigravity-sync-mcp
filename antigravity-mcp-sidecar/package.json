@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.8",
+    "version": "0.1.9",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -49,6 +49,10 @@
             {
                 "command": "antigravityMcpSidecar.restartAntigravity",
                 "title": "Restart Antigravity (Confirm)"
+            },
+            {
+                "command": "antigravityMcpSidecar.requestHostRestart",
+                "title": "Request Host Restart (Remote)"
             }
         ],
         "configuration": {
@@ -98,6 +102,21 @@
                     "type": "string",
                     "default": "",
                     "description": "Optional extra launch arguments appended when launching Antigravity."
+                },
+                "antigravityMcpSidecar.bridgeSharedToken": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional shared token for sidecar control-plane HMAC auth. Leave empty to auto-manage in ~/.config/antigravity-mcp/bridge.token."
+                },
+                "antigravityMcpSidecar.bridgeMaxSkewMs": {
+                    "type": "number",
+                    "default": 120000,
+                    "description": "Maximum timestamp skew allowed when verifying signed sidecar control requests."
+                },
+                "antigravityMcpSidecar.bridgeRequestTtlMs": {
+                    "type": "number",
+                    "default": 300000,
+                    "description": "Maximum age for pending sidecar control requests before auto-reject."
                 },
                 "antigravityMcpSidecar.quotaWarnThresholdPercent": {
                     "type": "number",

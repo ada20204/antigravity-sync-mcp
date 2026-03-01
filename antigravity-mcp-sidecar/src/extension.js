@@ -5,14 +5,31 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const { exec, spawn } = require('child_process');
-const { createHash } = require('crypto');
+const { createHash, randomBytes } = require('crypto');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
+const {
+    createNodeId,
+    createStructuredLogger,
+    createTraceId,
+    LOG_RETENTION_MS,
+} = require('./structured-log');
+const {
+    NonceCache,
+    ensureBridgeToken,
+    signControlRequest,
+    verifyControlRequest,
+    DEFAULT_MAX_SKEW_MS,
+} = require('./bridge-auth');
 
 const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
 const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
+const REGISTRY_SCHEMA_VERSION = 2;
+const REGISTRY_COMPAT_SCHEMA_VERSIONS = [2];
+const REGISTRY_CONTROL_KEY = '__control__';
 const REMOTE_MIRROR_POLL_INTERVAL_MS = 3_000;
 const REMOTE_MIRROR_KEY_PREFIX = '__mirror__';
+const HOST_CONTROL_POLL_INTERVAL_MS = 2_500;
 const QUOTA_POLL_INTERVAL_MS = 60_000;
 const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CDP_PROBE_TIMEOUT_MS = 250;
@@ -22,9 +39,10 @@ const DEFAULT_CDP_PORT_SPEC = '9222,9229,9000-9014,8997-9003,7800-7850';
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
+const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
 
-// ── Schema v1 helpers ──────────────────────────────────────────────────────
+// ── Schema helpers ────────────────────────────────────────────────────────
 function normalizePath(rawPath) {
     let p = String(rawPath || '').trim();
     if (!p) return '';
@@ -39,14 +57,16 @@ function computeWorkspaceId(rawPath) {
     return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 16);
 }
 
-function mapCdpStateToV1(state) {
+function mapCdpStateToRegistryState(state) {
     switch (state) {
-        case 'idle':      return 'app_down';
+        case 'idle': return 'app_down';
         case 'launching': return 'launching';
-        case 'probing':   return 'app_up_cdp_not_ready';
-        case 'ready':     return 'ready';
-        case 'error':     return 'error';
-        default:          return 'app_down';
+        case 'probing': return 'app_up_cdp_not_ready';
+        case 'app_up_no_cdp': return 'app_up_no_cdp';
+        case 'app_down': return 'app_down';
+        case 'ready': return 'ready';
+        case 'error': return 'error';
+        default: return 'app_down';
     }
 }
 // ──────────────────────────────────────────────────────────────────────────
@@ -94,14 +114,33 @@ function findHostRegistryFile() {
     return null;
 }
 
+function findHostBridgeTokenFile() {
+    if (!isWslRuntime()) return null;
+    const usersDir = '/mnt/c/Users';
+    try {
+        if (!fs.existsSync(usersDir)) return null;
+        const users = fs.readdirSync(usersDir, { withFileTypes: true });
+        for (const user of users) {
+            if (!user.isDirectory()) continue;
+            const candidate = path.posix.join(usersDir, user.name, '.config/antigravity-mcp/bridge.token');
+            if (fs.existsSync(candidate)) return candidate;
+        }
+    } catch { }
+    return null;
+}
+
 function mirrorHostEntry(hostEntry, wslWorkspacePath, gatewayIp) {
-    if (!hostEntry || hostEntry.schema_version !== 1 || hostEntry.role !== 'host') return null;
+    if (!hostEntry || hostEntry.role !== 'host') return null;
+    if (!REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(hostEntry.schema_version))) return null;
     const sourceEndpoint = hostEntry.source_endpoint;
     if (!sourceEndpoint || !sourceEndpoint.port) return null;
+    const localWorkspaceId = computeWorkspaceId(wslWorkspacePath);
 
     const mirrorEntry = {
         ...hostEntry,
         role: 'remote',
+        workspace_id: localWorkspaceId,
+        original_workspace_id: hostEntry.workspace_id || undefined,
         workspace_paths: {
             normalized: normalizePath(wslWorkspacePath),
             raw: wslWorkspacePath,
@@ -115,12 +154,15 @@ function mirrorHostEntry(hostEntry, wslWorkspacePath, gatewayIp) {
             ...hostEntry.quota_meta,
             source: 'mirrored',
         } : undefined,
+        protocol: hostEntry.protocol,
+        last_error: hostEntry.last_error,
     };
     return mirrorEntry;
 }
 // ──────────────────────────────────────────────────────────────────────────
 
 let outputChannel;
+let structuredLogger;
 
 function clampNumber(value, min, max) {
     const n = Number(value);
@@ -135,13 +177,45 @@ function formatAgeMs(ms) {
     return `${Math.round(ms / 3_600_000)}h`;
 }
 
-function log(msg) {
-    const time = new Date().toLocaleTimeString();
-    const fullMsg = `[${time}] ${msg}`;
-    console.log(fullMsg);
-    if (outputChannel) {
-        outputChannel.appendLine(fullMsg);
+function createErrorInfo(code, message, details) {
+    return {
+        code: String(code || 'unknown_error'),
+        message: String(message || 'unknown error'),
+        at: Date.now(),
+        details: details && typeof details === 'object' ? details : undefined,
+    };
+}
+
+function log(msg, fields) {
+    if (!structuredLogger) {
+        const time = new Date().toLocaleTimeString();
+        const fullMsg = `[${time}] ${msg}`;
+        console.log(fullMsg);
+        if (outputChannel) outputChannel.appendLine(fullMsg);
+        return;
     }
+    structuredLogger.info(msg, fields);
+}
+
+function warn(msg, fields) {
+    if (!structuredLogger) return log(msg, fields);
+    structuredLogger.warn(msg, fields);
+}
+
+function errorLog(msg, fields) {
+    if (!structuredLogger) return log(msg, fields);
+    structuredLogger.error(msg, fields);
+}
+
+function getControlRecord(registry) {
+    if (!registry || typeof registry !== 'object') return { restart_requests: {} };
+    const raw = registry[REGISTRY_CONTROL_KEY];
+    if (!raw || typeof raw !== 'object') return { restart_requests: {} };
+    const control = raw;
+    if (!control.restart_requests || typeof control.restart_requests !== 'object') {
+        control.restart_requests = {};
+    }
+    return control;
 }
 
 function getJson(url, timeoutMs = 1000) {
@@ -349,7 +423,11 @@ function writeRegistryObject(registry) {
     if (!fs.existsSync(REGISTRY_DIR)) {
         fs.mkdirSync(REGISTRY_DIR, { recursive: true });
     }
+    registry[REGISTRY_CONTROL_KEY] = getControlRecord(registry);
     fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
+    try {
+        fs.chmodSync(REGISTRY_FILE, 0o600);
+    } catch { }
 }
 
 function extractArgValue(cmdline, name) {
@@ -744,6 +822,7 @@ async function findCdpTarget(params) {
     const { workspaceName, hosts, ports } = params;
     const summary = [];
     let lastError = '';
+    let lastErrorCode = 'cdp_not_found';
 
     for (const ip of hosts) {
         for (const port of ports) {
@@ -754,6 +833,7 @@ async function findCdpTarget(params) {
                 const message = shortError(error);
                 summary.push({ host: ip, port, stage: 'version', ok: false, error: message });
                 lastError = `${ip}:${port} version ${message}`;
+                lastErrorCode = message.includes('timeout') ? 'cdp_version_timeout' : 'cdp_version_unreachable';
                 continue;
             }
 
@@ -763,6 +843,7 @@ async function findCdpTarget(params) {
                     target: { ip, port, source: 'version', version },
                     summary: trimProbeSummary(summary),
                     lastError: '',
+                    lastErrorCode: 'ok',
                 };
             }
 
@@ -785,20 +866,42 @@ async function findCdpTarget(params) {
                         target: { ip, port, source: 'list', version },
                         summary: trimProbeSummary(summary),
                         lastError: '',
+                        lastErrorCode: 'ok',
                     };
                 }
 
                 summary.push({ host: ip, port, stage: 'list', ok: false, error: 'no_page_target' });
                 lastError = `${ip}:${port} list no_page_target`;
+                lastErrorCode = 'cdp_list_no_page_target';
             } catch (error) {
                 const message = shortError(error);
                 summary.push({ host: ip, port, stage: 'list', ok: false, error: message });
                 lastError = `${ip}:${port} list ${message}`;
+                lastErrorCode = message.includes('timeout') ? 'cdp_list_timeout' : 'cdp_list_unreachable';
             }
         }
     }
 
-    return { target: null, summary: trimProbeSummary(summary), lastError: lastError || 'no_cdp_target' };
+    return {
+        target: null,
+        summary: trimProbeSummary(summary),
+        lastError: lastError || 'no_cdp_target',
+        lastErrorCode,
+    };
+}
+
+async function isAntigravityProcessRunning() {
+    try {
+        if (process.platform === 'win32') {
+            const cmd = 'powershell -NoProfile -Command "(Get-Process Antigravity,Cursor -ErrorAction SilentlyContinue | Measure-Object).Count"';
+            const { stdout } = await execAsync(cmd);
+            return Number(String(stdout || '').trim()) > 0;
+        }
+        const { stdout } = await execAsync('pgrep -af "Antigravity|Cursor"');
+        return String(stdout || '').trim().length > 0;
+    } catch {
+        return false;
+    }
 }
 
 function buildCdpProbePlan(params) {
@@ -904,7 +1007,25 @@ function launchAntigravityDetached(params) {
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
     context.subscriptions.push(outputChannel);
-    log('Extension activating...');
+    const runtimeRole = isWslRuntime() ? 'remote' : 'host';
+    const nodeId = createNodeId(runtimeRole);
+    let workspaceId = '';
+    structuredLogger = createStructuredLogger({
+        baseDir: REGISTRY_DIR,
+        outputChannel,
+        role: runtimeRole,
+        nodeId,
+        getWorkspaceId: () => workspaceId,
+    });
+    log('Extension activating...', {
+        plane: 'ctrl',
+        state: 'activating',
+        extra: {
+            role: runtimeRole,
+            node_id: nodeId,
+            log_retention_days: LOG_RETENTION_MS / (24 * 60 * 60 * 1000),
+        },
+    });
 
     let latestLs = null;
     let latestQuota = null;
@@ -944,6 +1065,10 @@ async function activate(context) {
     let negotiateCdp = async () => false;
     let workspacePath = '';
     let workspaceName = '';
+    let bridgeToken = '';
+    let bridgeMaxSkewMs = DEFAULT_MAX_SKEW_MS;
+    let bridgeRequestTtlMs = 5 * 60 * 1000;
+    const nonceCache = new NonceCache();
     let quotaWarnThresholdPercent = DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT;
     let quotaCriticalThresholdPercent = DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT;
     let quotaAlertCooldownMs = DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES * 60_000;
@@ -986,9 +1111,29 @@ async function activate(context) {
         antigravityExecutablePath = configuredExe || resolveDefaultExecutablePath();
         antigravityLaunchExtraArgs = splitArgs(config.get('antigravityLaunchExtraArgs', ''));
         antigravityLaunchPort = clampNumber(config.get('antigravityLaunchPort', 9000), 1, 65535);
+        bridgeToken = ensureBridgeToken(
+            REGISTRY_DIR,
+            String(config.get('bridgeSharedToken', '') || '').trim()
+        );
+        bridgeMaxSkewMs = clampNumber(
+            config.get('bridgeMaxSkewMs', DEFAULT_MAX_SKEW_MS),
+            5_000,
+            10 * 60 * 1000
+        );
+        bridgeRequestTtlMs = clampNumber(
+            config.get('bridgeRequestTtlMs', 5 * 60 * 1000),
+            30_000,
+            30 * 60 * 1000
+        );
     }
 
     reloadCdpConfig();
+    const logRetentionTimer = setInterval(() => {
+        try {
+            structuredLogger.cleanupOldLogs();
+        } catch { }
+    }, LOG_RETENTION_SWEEP_INTERVAL_MS);
+    context.subscriptions.push({ dispose: () => clearInterval(logRetentionTimer) });
 
     function getQuotaLevel(summary) {
         if (!summary) return { level: 'none', watchedPercent: null, target: 'quota' };
@@ -1123,7 +1268,8 @@ async function activate(context) {
         updateStatusBar();
     }
 
-    async function executeManualLaunch(action) {
+    async function executeManualLaunch(action, options = {}) {
+        const trigger = options.trigger || 'local';
         if (!workspacePath) {
             vscode.window.showWarningMessage('No workspace folder available for Antigravity launch.');
             return;
@@ -1144,11 +1290,18 @@ async function activate(context) {
                 restart: action === 'restart',
             });
             log(
-                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${selectedPort} workspace=${workspacePath}`
+                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${selectedPort} workspace=${workspacePath}`,
+                {
+                    plane: 'ctrl',
+                    state: 'launching',
+                    extra: { action, trigger, selected_port: selectedPort },
+                }
             );
         } catch (error) {
             const message = shortError(error);
             vscode.window.showErrorMessage(`Failed to ${action} Antigravity: ${message}`);
+            cdpLastError = createErrorInfo('launch_failed', message, { action, trigger });
+            register();
             return;
         }
 
@@ -1162,7 +1315,11 @@ async function activate(context) {
         launchTimeoutHandle = setTimeout(() => {
             launchTimeoutHandle = null;
             if (cdpState === 'launching') {
-                cdpState = 'idle';
+                cdpState = 'app_down';
+                cdpLastError = createErrorInfo(
+                    'launch_timeout',
+                    'Antigravity did not appear after launch request within timeout window'
+                );
                 register();
                 log('Launch timeout: no process appeared within timeout, reverting to app_down');
             }
@@ -1186,6 +1343,218 @@ async function activate(context) {
         );
     }
 
+    function pickRemoteMirrorEntry(registry) {
+        const values = Object.values(registry || {}).filter(
+            (entry) => entry && typeof entry === 'object' && entry.role === 'remote' && entry.original_workspace_id
+        );
+        if (values.length === 0) return null;
+        const normalizedCurrent = normalizePath(workspacePath);
+        const exact = values.find((entry) =>
+            entry.workspace_paths &&
+            normalizePath(entry.workspace_paths.normalized || entry.workspace_paths.raw) === normalizedCurrent
+        );
+        return exact || values[0];
+    }
+
+    async function requestHostRestart(params = {}) {
+        const reason = String(params.reason || 'remote_request').slice(0, 200);
+        if (!isWslRuntime()) {
+            warn('Host restart request ignored: not running in remote/WSL mode', {
+                plane: 'ctrl',
+                error_code: 'remote_request_not_supported',
+            });
+            return false;
+        }
+        const hostRegistryFile = findHostRegistryFile();
+        if (!hostRegistryFile) {
+            vscode.window.showWarningMessage('Host registry not found. Open Antigravity on host first.');
+            return false;
+        }
+
+        try {
+            const localRegistry = readRegistryObject();
+            const mirror = pickRemoteMirrorEntry(localRegistry);
+            const hostRegistry = JSON.parse(fs.readFileSync(hostRegistryFile, 'utf-8'));
+            const hostEntries = Object.values(hostRegistry)
+                .filter((entry) =>
+                    entry &&
+                    typeof entry === 'object' &&
+                    REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(entry.schema_version)) &&
+                    entry.role === 'host'
+                );
+
+            let targetHostEntry = null;
+            if (mirror && mirror.original_workspace_id) {
+                targetHostEntry = hostEntries.find((entry) => entry.workspace_id === mirror.original_workspace_id) || null;
+            }
+            if (!targetHostEntry && hostEntries.length > 0) {
+                targetHostEntry = hostEntries[0];
+            }
+            if (!targetHostEntry || !targetHostEntry.workspace_id) {
+                vscode.window.showWarningMessage('No host workspace entry available for restart request.');
+                return false;
+            }
+
+            const tokenFile = findHostBridgeTokenFile();
+            const requestToken = tokenFile
+                ? String(fs.readFileSync(tokenFile, 'utf-8') || '').trim()
+                : bridgeToken;
+            const request = {
+                id: `rr_${Date.now()}_${randomBytes(4).toString('hex')}`,
+                workspace_id: targetHostEntry.workspace_id,
+                action: 'restart_antigravity_with_cdp',
+                ts: Date.now(),
+                nonce: randomBytes(12).toString('hex'),
+                from_node_id: nodeId,
+                to_node_id: targetHostEntry.node_id || '',
+                reason,
+            };
+            request.signature = signControlRequest(request, requestToken);
+
+            const control = getControlRecord(hostRegistry);
+            control.restart_requests[request.id] = {
+                ...request,
+                status: 'pending',
+                created_at: Date.now(),
+                updated_at: Date.now(),
+            };
+            hostRegistry[REGISTRY_CONTROL_KEY] = control;
+            fs.writeFileSync(hostRegistryFile, JSON.stringify(hostRegistry, null, 2), 'utf-8');
+
+            log(`Remote restart request submitted (${request.id})`, {
+                plane: 'ctrl',
+                state: 'app_up_no_cdp',
+                extra: { request_id: request.id, host_registry: hostRegistryFile, reason },
+            });
+            vscode.window.showInformationMessage('Host restart request submitted. Please confirm on the host side.');
+            return true;
+        } catch (err) {
+            const message = shortError(err);
+            errorLog(`Failed to submit host restart request: ${message}`, {
+                plane: 'ctrl',
+                error_code: 'remote_restart_request_failed',
+            });
+            vscode.window.showWarningMessage(`Failed to submit host restart request: ${message}`);
+            return false;
+        }
+    }
+
+    function rejectControlRequest(registry, request, code, message) {
+        const control = getControlRecord(registry);
+        const current = control.restart_requests[request.id];
+        if (!current) return;
+        control.restart_requests[request.id] = {
+            ...current,
+            status: 'rejected',
+            handled_at: Date.now(),
+            handled_by: nodeId,
+            error: { code, message },
+            updated_at: Date.now(),
+        };
+        registry[REGISTRY_CONTROL_KEY] = control;
+    }
+
+    let controlRequestHandling = false;
+    async function processHostControlRequests() {
+        if (runtimeRole !== 'host') return;
+        if (controlRequestHandling) return;
+        controlRequestHandling = true;
+        try {
+            const registry = readRegistryObject();
+            const control = getControlRecord(registry);
+            let changed = false;
+            const requests = Object.values(control.restart_requests || {})
+                .filter((item) => item && item.status === 'pending')
+                .sort((a, b) => Number(a.created_at || 0) - Number(b.created_at || 0));
+
+            for (const request of requests) {
+                if (request.workspace_id !== workspaceId) continue;
+                if (request.to_node_id && request.to_node_id !== nodeId) continue;
+
+                const ageMs = Date.now() - Number(request.created_at || request.ts || 0);
+                if (ageMs > bridgeRequestTtlMs) {
+                    rejectControlRequest(registry, request, 'request_expired', 'control request exceeded ttl');
+                    changed = true;
+                    continue;
+                }
+
+                const verified = verifyControlRequest(request, bridgeToken, {
+                    maxSkewMs: bridgeMaxSkewMs,
+                    nonceCache,
+                });
+                if (!verified.ok) {
+                    rejectControlRequest(registry, request, verified.code, verified.message);
+                    changed = true;
+                    continue;
+                }
+
+                const decision = await vscode.window.showWarningMessage(
+                    `Remote sidecar requested restart for workspace ${workspacePath}. Restart Antigravity now?`,
+                    { modal: true },
+                    'Restart',
+                    'Reject'
+                );
+                const controlRef = getControlRecord(registry);
+                const current = controlRef.restart_requests[request.id];
+                if (!current) continue;
+
+                if (decision !== 'Restart') {
+                    controlRef.restart_requests[request.id] = {
+                        ...current,
+                        status: 'rejected',
+                        handled_at: Date.now(),
+                        handled_by: nodeId,
+                        error: { code: 'restart_rejected', message: 'user rejected host restart request' },
+                        updated_at: Date.now(),
+                    };
+                    registry[REGISTRY_CONTROL_KEY] = controlRef;
+                    changed = true;
+                    continue;
+                }
+
+                controlRef.restart_requests[request.id] = {
+                    ...current,
+                    status: 'approved',
+                    handled_at: Date.now(),
+                    handled_by: nodeId,
+                    updated_at: Date.now(),
+                };
+                registry[REGISTRY_CONTROL_KEY] = controlRef;
+                changed = true;
+                writeRegistryObject(registry);
+                await executeManualLaunch('restart', { trigger: 'remote-request' });
+
+                const registryAfter = readRegistryObject();
+                const controlAfter = getControlRecord(registryAfter);
+                const currentAfter = controlAfter.restart_requests[request.id];
+                if (currentAfter) {
+                    controlAfter.restart_requests[request.id] = {
+                        ...currentAfter,
+                        status: cdpState === 'ready' ? 'applied' : 'error',
+                        handled_at: Date.now(),
+                        handled_by: nodeId,
+                        error: cdpState === 'ready' ? undefined : { code: 'restart_failed', message: 'CDP not ready after restart' },
+                        updated_at: Date.now(),
+                    };
+                    registryAfter[REGISTRY_CONTROL_KEY] = controlAfter;
+                    writeRegistryObject(registryAfter);
+                }
+                changed = false;
+            }
+
+            if (changed) {
+                writeRegistryObject(registry);
+            }
+        } catch (err) {
+            warn(`Host control request processor failed: ${shortError(err)}`, {
+                plane: 'ctrl',
+                error_code: 'control_request_processor_failed',
+            });
+        } finally {
+            controlRequestHandling = false;
+        }
+    }
+
     // ─── Toggle Command (always registered) ───────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
         if (!cdpTarget) {
@@ -1199,10 +1568,34 @@ async function activate(context) {
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.launchAntigravity', async () => {
+        if (runtimeRole === 'remote') {
+            vscode.window.showInformationMessage('Remote sidecar cannot cold-start host app. Please launch Antigravity on host.');
+            return;
+        }
         await executeManualLaunch('launch');
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.requestHostRestart', async () => {
+        const confirm = await vscode.window.showWarningMessage(
+            'Submit host restart request now? Host side will ask for confirmation before restart.',
+            { modal: true },
+            'Submit'
+        );
+        if (confirm !== 'Submit') return;
+        await requestHostRestart({ reason: 'manual_command' });
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.restartAntigravity', async () => {
+        if (runtimeRole === 'remote') {
+            const confirm = await vscode.window.showWarningMessage(
+                'Request host restart now? Host side will ask for confirmation before restart.',
+                { modal: true },
+                'Request Restart'
+            );
+            if (confirm !== 'Request Restart') return;
+            await requestHostRestart({ reason: 'restart_command' });
+            return;
+        }
         const confirm = await vscode.window.showWarningMessage(
             'Restart Antigravity now? This may interrupt your current window/session.',
             { modal: true },
@@ -1320,6 +1713,7 @@ async function activate(context) {
     }
 
     workspacePath = workspaceFolders[0].uri.fsPath;
+    workspaceId = computeWorkspaceId(workspacePath);
     workspaceName = vscode.workspace.name || "";
     if (!fs.existsSync(REGISTRY_DIR)) {
         fs.mkdirSync(REGISTRY_DIR, { recursive: true });
@@ -1336,34 +1730,45 @@ async function activate(context) {
         const activePort = cdpTarget ? cdpTarget.port : (previousCdp.active && previousCdp.active.port) || previous.port;
 
         const now = Date.now();
-        const v1State = mapCdpStateToV1(cdpState);
+        const v1State = mapCdpStateToRegistryState(cdpState);
         const endpointHost = activeHost || '127.0.0.1';
         const endpointPort = activePort || 9000;
 
         registry[workspacePath] = {
             ...previous,
-            // ── schema v1 fields ──
-            schema_version: 1,
-            workspace_id: computeWorkspaceId(workspacePath),
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            protocol: {
+                schema_version: REGISTRY_SCHEMA_VERSION,
+                compatible_schema_versions: REGISTRY_COMPAT_SCHEMA_VERSIONS,
+                writer_role: runtimeRole,
+                writer_node_id: nodeId,
+                updated_at: now,
+            },
+            workspace_id: workspaceId || computeWorkspaceId(workspacePath),
             workspace_paths: {
                 normalized: normalizePath(workspacePath),
                 raw: workspacePath,
             },
-            role: 'host',
+            node_id: nodeId,
+            role: runtimeRole,
             source_of_truth: 'host',
             source_endpoint: { host: endpointHost, port: endpointPort },
-            local_endpoint: { host: endpointHost, port: endpointPort, mode: 'direct' },
+            local_endpoint: {
+                host: endpointHost,
+                port: endpointPort,
+                mode: runtimeRole === 'host' ? 'direct' : 'forwarded',
+            },
             state: v1State,
             verified_at: cdpVerifiedAt || previous.verified_at || now,
             ttl_ms: 30000,
-            priority: 100,
+            priority: runtimeRole === 'host' ? 100 : 80,
             quota_meta: {
-                source: 'host',
+                source: runtimeRole === 'host' ? 'host' : 'mirrored',
                 stale: false,
                 refreshed_at: now,
                 refresh_interval_ms: QUOTA_POLL_INTERVAL_MS,
             },
-            // ── v0 fields (kept for backward compat) ──
+            last_error: cdpLastError || undefined,
             port: cdpTarget ? cdpTarget.port : previous.port,
             ip: cdpTarget ? cdpTarget.ip : previous.ip,
             pid: process.pid,
@@ -1387,10 +1792,11 @@ async function activate(context) {
                     : undefined,
                 candidates: buildCandidateMatrix(cdpProbeHosts, cdpProbePorts),
                 probeSummary: trimProbeSummary(cdpProbeSummary),
-                lastError: cdpLastError || undefined,
+                lastError: cdpLastError ? `${cdpLastError.code}:${cdpLastError.message}` : undefined,
             },
         };
 
+        registry[REGISTRY_CONTROL_KEY] = getControlRecord(registry);
         writeRegistryObject(registry);
     };
 
@@ -1431,35 +1837,82 @@ async function activate(context) {
             cdpVerifiedAt = Date.now();
             cdpLastError = null;
             register();
-            log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port} (source=${cdpSource})`);
+            log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port} (source=${cdpSource})`, {
+                plane: 'data',
+                state: 'ready',
+            });
             return true;
         }
 
         cdpTarget = null;
-        cdpState = 'error';
-        cdpLastError = result.lastError || 'no_cdp_target';
+        const appRunning = await isAntigravityProcessRunning();
+        if (result.lastErrorCode === 'cdp_list_no_page_target') {
+            cdpState = 'probing';
+        } else if (appRunning) {
+            cdpState = 'app_up_no_cdp';
+        } else {
+            cdpState = 'app_down';
+        }
+        cdpLastError = createErrorInfo(
+            result.lastErrorCode || 'cdp_not_found',
+            result.lastError || 'no_cdp_target',
+            {
+                hosts: cdpProbeHosts,
+                ports: cdpProbePorts.slice(0, 16),
+                app_running: appRunning,
+            }
+        );
         register();
-        log(`Error: Could not find CDP port for workspace: ${workspacePath}`);
-        log(`Probe hosts: ${cdpProbeHosts.join(',')}`);
-        log(`CDP last error: ${cdpLastError}`);
+        errorLog(`Error: Could not find CDP port for workspace: ${workspacePath}`, {
+            plane: 'data',
+            state: mapCdpStateToRegistryState(cdpState),
+            error_code: cdpLastError.code,
+        });
+        log(`Probe hosts: ${cdpProbeHosts.join(',')}`, {
+            plane: 'data',
+            state: mapCdpStateToRegistryState(cdpState),
+            error_code: cdpLastError.code,
+        });
+        log(`CDP last error: ${cdpLastError.code}:${cdpLastError.message}`, {
+            plane: 'data',
+            state: mapCdpStateToRegistryState(cdpState),
+            error_code: cdpLastError.code,
+        });
         return false;
     };
+
+    await processHostControlRequests();
+    const controlTimer = setInterval(() => {
+        processHostControlRequests().catch((err) => {
+            warn(`Control loop error: ${shortError(err)}`, {
+                plane: 'ctrl',
+                error_code: 'control_loop_error',
+            });
+        });
+    }, HOST_CONTROL_POLL_INTERVAL_MS);
+    context.subscriptions.push({ dispose: () => clearInterval(controlTimer) });
 
     if (!(await negotiateCdp())) {
         updateStatusBar();
 
-        // ─── CDP Auto-Fix Prompt ──────────────────────────────────────
         const platform = process.platform;
         const actions = ['How to Fix'];
         if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
+        if (runtimeRole === 'remote' && cdpState === 'app_up_no_cdp') {
+            actions.unshift('Request Host Restart');
+        }
 
         vscode.window.showErrorMessage(
             '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with an available --remote-debugging-port (for example 9000) and --remote-debugging-address=0.0.0.0.',
             ...actions
         ).then(action => {
-            if (action === 'How to Fix') {
+            if (action === 'Request Host Restart') {
+                requestHostRestart({ reason: 'auto_prompt_no_cdp' }).catch(() => { });
+            } else if (action === 'How to Fix') {
                 const guide = platform === 'linux'
-                    ? 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then restart VS Code window.'
+                    ? (runtimeRole === 'remote'
+                        ? 'Remote sidecar cannot cold-start host app. Open Antigravity on host with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.'
+                        : 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then restart VS Code window.')
                     : platform === 'darwin'
                         ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0'
                         : 'Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
@@ -1518,12 +1971,16 @@ async function activate(context) {
             register();
         } catch (error) {
             cdpState = 'probing';
-            cdpLastError = `heartbeat ${shortError(error)}`;
+            cdpLastError = createErrorInfo('cdp_heartbeat_error', `heartbeat ${shortError(error)}`);
             register();
             const recovered = await negotiateCdp();
             if (!recovered) {
                 cdpTarget = null;
-                log(`CDP heartbeat recovery failed: ${cdpLastError || 'unknown'}`);
+                errorLog(`CDP heartbeat recovery failed: ${cdpLastError ? `${cdpLastError.code}:${cdpLastError.message}` : 'unknown'}`, {
+                    plane: 'data',
+                    state: mapCdpStateToRegistryState(cdpState),
+                    error_code: cdpLastError ? cdpLastError.code : 'cdp_heartbeat_error',
+                });
             } else {
                 log(`CDP heartbeat recovered endpoint ${cdpTarget.ip}:${cdpTarget.port}`);
             }
@@ -1565,9 +2022,12 @@ async function activate(context) {
                     if (key.startsWith(REMOTE_MIRROR_KEY_PREFIX)) {
                         const mirrorEntry = localRegistry[key];
                         // Check if the corresponding host entry still exists
-                        const hostId = mirrorEntry.workspace_id;
+                        const hostId = mirrorEntry.original_workspace_id || mirrorEntry.workspace_id;
                         const hostStillExists = Object.values(hostRegistry).some(
-                            (e) => e.schema_version === 1 && e.workspace_id === hostId && e.role === 'host'
+                            (e) =>
+                                REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(e.schema_version)) &&
+                                e.workspace_id === hostId &&
+                                e.role === 'host'
                         );
                         if (!hostStillExists) {
                             delete localRegistry[key];
@@ -1578,7 +2038,7 @@ async function activate(context) {
 
                 // Upsert mirror entries for each host entry
                 for (const [, hostEntry] of Object.entries(hostRegistry)) {
-                    if (hostEntry.schema_version !== 1 || hostEntry.role !== 'host') continue;
+                    if (!REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(hostEntry.schema_version)) || hostEntry.role !== 'host') continue;
                     const rawPath = hostEntry.workspace_paths && hostEntry.workspace_paths.raw;
                     if (!rawPath) continue;
 
@@ -1616,7 +2076,7 @@ async function activate(context) {
                     const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
                     if (registry[workspacePath] && registry[workspacePath].pid === process.pid) {
                         delete registry[workspacePath];
-                        fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
+                        writeRegistryObject(registry);
                         log(`Deregistered workspace ${workspacePath}`);
                     }
                 } catch { }

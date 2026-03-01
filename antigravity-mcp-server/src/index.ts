@@ -23,7 +23,13 @@ import {
     type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { discoverCDP, connectCDP, type CDPConnection } from "./cdp.js";
+import {
+    discoverCDP,
+    discoverCDPDetailed,
+    connectCDP,
+    type CDPConnection,
+    type DiscoverCDPError,
+} from "./cdp.js";
 import {
     applyModeAndModelSelection,
     injectMessage,
@@ -93,6 +99,18 @@ function uniqueStrings(items: string[]): string[] {
         out.push(value);
     }
     return out;
+}
+
+function formatDiscoverError(error: DiscoverCDPError | undefined): string {
+    const payload = {
+        error: "registry_not_ready",
+        error_code: error?.code ?? "unknown",
+        message: error?.message ?? "CDP discovery failed",
+        workspace_id: error?.workspaceId ?? null,
+        state: error?.state ?? null,
+        details: error?.details ?? null,
+    };
+    return JSON.stringify(payload);
 }
 
 async function waitForDiscoveredCdp(
@@ -256,12 +274,18 @@ async function handleAskAntigravity(
         await sendProgressNotification(progressToken, 0, "🔍 Discovering Antigravity...");
 
         let launchAttempted = false;
+        let lastDiscoverError: DiscoverCDPError | undefined;
         const discovered = await withRetry(
             async () => {
                 incrementTaskAttempt(task, "discover");
-                const found = await withTimeout(discoverCDP(targetDir), DISCOVER_TIMEOUT_MS, "discoverCDP");
-                if (!found) {
-                    if (!launchAttempted) {
+                const found = await withTimeout(discoverCDPDetailed(targetDir), DISCOVER_TIMEOUT_MS, "discoverCDP");
+                if (!found.ok || !found.discovered) {
+                    lastDiscoverError = found.error;
+                    const shouldTryLaunch =
+                        !launchAttempted &&
+                        found.error?.code !== "schema_mismatch" &&
+                        found.error?.code !== "invalid_env_port";
+                    if (shouldTryLaunch) {
                         launchAttempted = true;
                         const launch = await launchAntigravityForWorkspace({
                             targetDir: targetDir || process.cwd(),
@@ -283,17 +307,14 @@ async function handleAskAntigravity(
                             throw new RetryableError(
                                 `Antigravity launched but CDP did not become ready within ${Math.round(
                                     COLD_START_WAIT_MS / 1000
-                                )}s`
+                                )}s; last=${formatDiscoverError(lastDiscoverError)}`
                             );
                         }
                         log(`[${task.id}] Cold-start launch skipped/failed: ${launch.error || "unknown"}`);
                     }
-                    throw new RetryableError(
-                        "CDP not found for target dir. Ensure Antigravity is running with debug ports enabled, " +
-                        "and the sidecar extension has registered the workspace."
-                    );
+                    throw new RetryableError(`CDP discovery pending: ${formatDiscoverError(lastDiscoverError)}`);
                 }
-                return found;
+                return found.discovered;
             },
             {
                 maxAttempts: RETRY_MAX_ATTEMPTS,
@@ -524,10 +545,11 @@ async function handleAskAntigravity(
 }
 
 async function handleStop(targetDir?: string): Promise<string> {
-    const discovered = await discoverCDP(targetDir);
-    if (!discovered) {
-        return "No Antigravity CDP target found for target directory.";
+    const discoveredResult = await discoverCDPDetailed(targetDir);
+    if (!discoveredResult.ok || !discoveredResult.discovered) {
+        return `No Antigravity CDP target found: ${formatDiscoverError(discoveredResult.error)}`;
     }
+    const discovered = discoveredResult.discovered;
 
     const cdp = await connectCDP(discovered.target.webSocketDebuggerUrl);
     try {
@@ -548,10 +570,10 @@ async function handlePing(
     message?: string,
     targetDir?: string
 ): Promise<string> {
-    const discovered = await discoverCDP(targetDir);
-    const cdpStatus = discovered
-        ? `Connected — ${discovered.target.title} on ${discovered.ip}:${discovered.port}`
-        : "Not found — ensure Antigravity is running with debug ports";
+    const discovered = await discoverCDPDetailed(targetDir);
+    const cdpStatus = discovered.ok && discovered.discovered
+        ? `Connected — ${discovered.discovered.target.title} on ${discovered.discovered.ip}:${discovered.discovered.port}`
+        : `Not ready — ${formatDiscoverError(discovered.error)}`;
 
     return [
         `antigravity-mcp-server v${VERSION}`,
@@ -592,7 +614,10 @@ async function handleLaunchAntigravity(params: {
         if (discovered) {
             lines.push(`CDP ready: ${discovered.ip}:${discovered.port} — ${discovered.target.title}`);
         } else {
-            lines.push(`CDP not detected within ${Math.round(COLD_START_WAIT_MS / 1000)}s — Antigravity may still be loading`);
+            const diag = await discoverCDPDetailed(targetDir);
+            lines.push(
+                `CDP not detected within ${Math.round(COLD_START_WAIT_MS / 1000)}s — ${formatDiscoverError(diag.error)}`
+            );
         }
     }
 

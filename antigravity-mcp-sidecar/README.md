@@ -7,6 +7,8 @@ All-in-one companion extension for Antigravity (Cursor fork).
 - **Auto-Accept**: Automatically clicks Run, Accept, Always Allow buttons in the agent panel
 - **CDP Negotiation Registry**: Publishes negotiated CDP endpoint/state for external MCP server routing
 - **Manual Launch Controls**: Commands to launch/restart Antigravity (restart requires confirmation)
+- **Cross-End Restart Control**: Remote sidecar can submit signed host restart requests; host side confirms via modal before restart
+- **Structured Logging**: Writes JSONL logs with role/node/trace metadata to `~/.config/antigravity-mcp/logs/`
 - **Status Bar Toggle**: One-click enable/disable from the status bar
 
 ## How It Works
@@ -18,8 +20,9 @@ All-in-one companion extension for Antigravity (Cursor fork).
 ### MCP Registry
 Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - legacy fields: `ip`, `port`
-- negotiated fields: `cdp.state`, `cdp.active`, `cdp.probeSummary`, `cdp.lastError`
+- negotiated fields: `schema_version`, `protocol`, `last_error`, `cdp.state`, `cdp.active`, `cdp.probeSummary`, `cdp.lastError`
 - quota fields: `quota`, `quotaError`
+- control-plane fields: `__control__.restart_requests.*` (signed request/approval records)
 
 ## Settings
 
@@ -34,6 +37,9 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 | `antigravityMcpSidecar.antigravityExecutablePath` | `""` | Optional explicit Antigravity executable path |
 | `antigravityMcpSidecar.antigravityLaunchPort` | `9000` | Launch port when no fixed CDP port is set |
 | `antigravityMcpSidecar.antigravityLaunchExtraArgs` | `""` | Extra launch args appended when starting app |
+| `antigravityMcpSidecar.bridgeSharedToken` | `""` | Optional shared auth token for sidecar control plane (auto-managed if empty) |
+| `antigravityMcpSidecar.bridgeMaxSkewMs` | `120000` | Max allowed timestamp skew for signed control requests |
+| `antigravityMcpSidecar.bridgeRequestTtlMs` | `300000` | Auto-expire pending control requests after this age |
 
 ## Commands
 
@@ -43,6 +49,7 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - `Refresh Antigravity Quota Snapshot`
 - `Launch Antigravity (New Window)`
 - `Restart Antigravity (Confirm)`
+- `Request Host Restart (Remote)`
 
 ## Requirements
 
