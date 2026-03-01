@@ -64,10 +64,13 @@ export function buildCandidateChain(mode: AskMode, requestedModel?: string): str
 function normalizeModelName(model?: string): string | undefined {
     if (!model) return undefined;
     const v = model.trim().toLowerCase();
+    // Pass 1: exact alias match — wins over any substring match.
     for (const [canonical, aliases] of Object.entries(MODEL_ALIASES)) {
-        if (aliases.some((alias) => v === alias || v.includes(alias))) {
-            return canonical;
-        }
+        if (aliases.some((alias) => v === alias)) return canonical;
+    }
+    // Pass 2: substring match — fallback for partial names like "flash", "opus".
+    for (const [canonical, aliases] of Object.entries(MODEL_ALIASES)) {
+        if (aliases.some((alias) => v.includes(alias))) return canonical;
     }
     return v || undefined;
 }
