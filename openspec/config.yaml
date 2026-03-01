@@ -1,20 +1,47 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Project: Antigravity MCP bridge
+  Main components:
+  - antigravity-mcp-server (Node.js + TypeScript MCP server)
+  - antigravity-mcp-sidecar (VS Code extension, runtime source-of-truth)
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Architecture constraints (must keep):
+  - Server is registry read-only.
+  - Server reads local ~/.config/antigravity-mcp/registry.json only (or ANTIGRAVITY_REGISTRY_FILE in tests).
+  - Sidecar/bridge owns registry writes, CDP discovery state, quota snapshot writes, and control-plane actions.
+  - Server connects only to registry local_endpoint (no broad host/port scan as primary path).
+
+  Runtime model:
+  - Host sidecar is authoritative.
+  - Remote sidecar mirrors host state for WSL/SSH-like environments.
+  - Data plane: CDP traffic from server -> local_endpoint.
+  - Control plane: sidecar-to-sidecar lifecycle coordination (including restart request flow).
+
+  Registry protocol:
+  - Current schema_version: 2
+  - Important fields: workspace_id, role(host/remote), node_id, state, verified_at, ttl_ms, local_endpoint, quota, quota_meta, last_error, __control__.restart_requests.
+  - Discovery must return strict diagnostics/error codes for schema mismatch, stale entries, and not-ready states.
+
+  Security and operations:
+  - Cross-end control requests use token + ts + nonce + HMAC.
+  - Host restart actions require explicit host-side confirmation.
+  - Structured logs written to ~/.config/antigravity-mcp/logs with 7-day retention.
+
+  Engineering style:
+  - Prefer minimal-risk incremental changes with tests.
+  - Keep MCP tool behavior stable: inject prompt -> wait-state engine -> extract final answer segment.
+  - Keep model selection quota-aware with conservative fallback when quota data is stale.
+
+rules:
+  proposal:
+    - Explicitly separate data plane and control plane impact.
+    - Include host/remote behavior differences and failure handling.
+    - List non-goals to prevent server-side scope creep.
+  design:
+    - Define registry schema/version impact and backward compatibility.
+    - Specify security checks if adding control-plane interactions.
+    - Include observability fields and error-code mapping changes.
+  tasks:
+    - Include verification tasks for build + tests in both server and sidecar.
+    - Include at least one negative-path validation task for not-ready/stale/schema-mismatch scenarios.
