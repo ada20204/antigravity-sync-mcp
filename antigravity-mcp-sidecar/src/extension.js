@@ -1902,7 +1902,7 @@ async function activate(context) {
                 mode: runtimeRole === 'host' ? 'direct' : 'forwarded',
             },
             state: v1State,
-            verified_at: cdpVerifiedAt || previous.verified_at || now,
+            verified_at: cdpVerifiedAt || previous.verified_at,
             ttl_ms: 30000,
             priority: runtimeRole === 'host' ? 100 : 80,
             quota_meta: {
