@@ -114,7 +114,19 @@ function verifyControlRequest(req, token, opts = {}) {
     }
 
     const expected = signControlRequest(req, key);
-    if (!expected || expected !== req.signature) {
+    if (!expected || !req.signature) {
+        return { ok: false, code: 'auth_signature_invalid', message: 'request signature verification failed' };
+    }
+    let sigMatch = false;
+    try {
+        const expectedBuf = Buffer.from(expected, 'hex');
+        const actualBuf = Buffer.from(String(req.signature), 'hex');
+        sigMatch = expectedBuf.length === actualBuf.length &&
+            crypto.timingSafeEqual(expectedBuf, actualBuf);
+    } catch {
+        sigMatch = false;
+    }
+    if (!sigMatch) {
         return { ok: false, code: 'auth_signature_invalid', message: 'request signature verification failed' };
     }
 
