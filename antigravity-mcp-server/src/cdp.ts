@@ -456,29 +456,45 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
     const contexts: ExecutionContext[] = [];
     const CDP_CALL_TIMEOUT = 30000;
 
+    // Define close() before any awaited calls so it can be used in the error path.
+    const close = () => {
+        for (const [, pending] of pendingCalls) {
+            clearTimeout(pending.timeoutId);
+            pending.reject(new Error("Connection closed"));
+        }
+        pendingCalls.clear();
+        ws.close();
+    };
+
     ws.on("message", (msg) => {
+        // Separate JSON parse from routing: a malformed frame cannot be routed,
+        // but should not silently swallow subsequent valid messages' handler logic.
+        let data: any;
         try {
-            const data = JSON.parse(msg.toString());
+            data = JSON.parse(msg.toString());
+        } catch {
+            // Malformed CDP frame — skip without affecting pending calls.
+            return;
+        }
 
-            if (data.id !== undefined && pendingCalls.has(data.id)) {
-                const pending = pendingCalls.get(data.id)!;
-                clearTimeout(pending.timeoutId);
-                pendingCalls.delete(data.id);
+        if (data.id !== undefined && pendingCalls.has(data.id)) {
+            const pending = pendingCalls.get(data.id)!;
+            clearTimeout(pending.timeoutId);
+            pendingCalls.delete(data.id);
 
-                if (data.error) pending.reject(data.error);
-                else pending.resolve(data.result);
-            }
+            if (data.error) pending.reject(data.error);
+            else pending.resolve(data.result);
+        }
 
-            if (data.method === "Runtime.executionContextCreated") {
-                contexts.push(data.params.context);
-            } else if (data.method === "Runtime.executionContextDestroyed") {
-                const id = data.params.executionContextId;
-                const idx = contexts.findIndex((c) => c.id === id);
-                if (idx !== -1) contexts.splice(idx, 1);
-            } else if (data.method === "Runtime.executionContextsCleared") {
-                contexts.length = 0;
-            }
-        } catch { }
+        if (data.method === "Runtime.executionContextCreated") {
+            contexts.push(data.params.context);
+        } else if (data.method === "Runtime.executionContextDestroyed") {
+            const id = data.params.executionContextId;
+            const idx = contexts.findIndex((c) => c.id === id);
+            if (idx !== -1) contexts.splice(idx, 1);
+        } else if (data.method === "Runtime.executionContextsCleared") {
+            contexts.length = 0;
+        }
     });
 
     const call = (
@@ -498,17 +514,14 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
             ws.send(JSON.stringify({ id, method, params }));
         });
 
-    await call("Runtime.enable", {});
-    await new Promise((r) => setTimeout(r, 1000));
-
-    const close = () => {
-        for (const [, pending] of pendingCalls) {
-            clearTimeout(pending.timeoutId);
-            pending.reject(new Error("Connection closed"));
-        }
-        pendingCalls.clear();
-        ws.close();
-    };
+    // Initialize Runtime domain. Close WebSocket before rethrowing on failure.
+    try {
+        await call("Runtime.enable", {});
+        await new Promise((r) => setTimeout(r, 1000));
+    } catch (error) {
+        close();
+        throw error;
+    }
 
     return { ws, call, contexts, close };
 }
