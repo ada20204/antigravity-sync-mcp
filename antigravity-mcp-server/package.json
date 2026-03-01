@@ -1,6 +1,6 @@
 {
   "name": "antigravity-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that bridges external AI agents to Antigravity via CDP",
   "type": "module",
   "main": "dist/index.js",
