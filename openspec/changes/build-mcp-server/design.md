@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> Do not use this artifact as the source of truth for current behavior (registry path/schema and host-remote control model changed).
+
 ## Context
 
 External AI agents (like Claude Code, Cursor) operate through the Model Context Protocol (MCP) to interact with external systems. To automate massive codebase refactors or specialized debugging tasks inside Antigravity's rich development environment, those agents need an MCP server that speaks "Antigravity".

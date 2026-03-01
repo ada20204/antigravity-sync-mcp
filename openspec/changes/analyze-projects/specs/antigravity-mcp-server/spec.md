@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> This spec contains legacy assumptions (for example scanning `7800-7850`) and is not authoritative for current behavior.
+
 ## ADDED Requirements
 
 ### Requirement: MCP Server Protocol

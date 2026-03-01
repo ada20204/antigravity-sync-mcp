@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> This task list is retained for traceability only; do not execute it as the current implementation plan.
+
 ## 1. Project Initialization & Setup (Completed)
 
 - [x] 1.1 Create `antigravity-mcp-server` directory with `npm init -y` and TS setup

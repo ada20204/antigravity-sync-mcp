@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> This task list is retained for traceability only; do not execute it as the current implementation plan.
+
 ## 1. Project Initialization & Setup
 
 - [ ] 1.1 Create `antigravity-mcp` directory (npm init + TS setup based on gemini-mcp-tool pattern)

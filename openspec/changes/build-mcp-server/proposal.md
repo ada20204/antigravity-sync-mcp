@@ -1,3 +1,7 @@
+> Status: Historical (superseded)
+> Superseded on 2026-03-01 by the current baseline in `openspec/project.md` and `openspec/config.yaml`.
+> Do not use this artifact as the source of truth for current behavior (registry path/schema and host-remote control model changed).
+
 ## Why
 
 We propose building "antigravity-mcp-server", a unified bridge that exposes Antigravity's capabilities to external AI Code Agents (like Cursor, Claude Code, or other MCP clients).
