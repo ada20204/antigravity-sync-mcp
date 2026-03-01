@@ -154,15 +154,11 @@ export async function autoAcceptPoll(
 
     for (const el of unique) {
       if (isAcceptButton(el)) {
-        const text = (el.textContent || '').trim().toLowerCase();
-
-        // Safety check for run/execute commands
-        if (text.includes('run') || text.includes('execute')) {
-          const nearbyText = findNearbyCommandText(el);
-          if (isCommandBanned(nearbyText)) {
-            blocked++;
-            continue;
-          }
+        // Safety check applies to ALL accept-class buttons, not just run/execute.
+        const nearbyText = findNearbyCommandText(el);
+        if (isCommandBanned(nearbyText)) {
+          blocked++;
+          continue;
         }
 
         // Click it
