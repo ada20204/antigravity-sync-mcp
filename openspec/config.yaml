@@ -1,37 +1,16 @@
 schema: spec-driven
 
 context: |
-  Project: Antigravity MCP bridge
-  Main components:
-  - antigravity-mcp-server (Node.js + TypeScript MCP server)
-  - antigravity-mcp-sidecar (VS Code extension, runtime source-of-truth)
+  Canonical project context lives in openspec/project.md.
+  Use that file as the detailed source for architecture and runtime behavior.
 
-  Architecture constraints (must keep):
-  - Server is registry read-only.
-  - Server reads local ~/.config/antigravity-mcp/registry.json only (or ANTIGRAVITY_REGISTRY_FILE in tests).
-  - Sidecar/bridge owns registry writes, CDP discovery state, quota snapshot writes, and control-plane actions.
-  - Server connects only to registry local_endpoint (no broad host/port scan as primary path).
-
-  Runtime model:
-  - Host sidecar is authoritative.
-  - Remote sidecar mirrors host state for WSL/SSH-like environments.
-  - Data plane: CDP traffic from server -> local_endpoint.
-  - Control plane: sidecar-to-sidecar lifecycle coordination (including restart request flow).
-
-  Registry protocol:
-  - Current schema_version: 2
-  - Important fields: workspace_id, role(host/remote), node_id, state, verified_at, ttl_ms, local_endpoint, quota, quota_meta, last_error, __control__.restart_requests.
-  - Discovery must return strict diagnostics/error codes for schema mismatch, stale entries, and not-ready states.
-
-  Security and operations:
-  - Cross-end control requests use token + ts + nonce + HMAC.
-  - Host restart actions require explicit host-side confirmation.
-  - Structured logs written to ~/.config/antigravity-mcp/logs with 7-day retention.
-
-  Engineering style:
-  - Prefer minimal-risk incremental changes with tests.
-  - Keep MCP tool behavior stable: inject prompt -> wait-state engine -> extract final answer segment.
-  - Keep model selection quota-aware with conservative fallback when quota data is stale.
+  Non-negotiable constraints:
+  - Server is registry read-only and reads only local ~/.config/antigravity-mcp/registry.json (or ANTIGRAVITY_REGISTRY_FILE in tests).
+  - Sidecar/bridge owns registry writes, lifecycle state, and cross-end control-plane actions.
+  - Server connects only to local_endpoint from registry; no broad host/port scan as primary behavior.
+  - Host sidecar is source-of-truth; remote sidecar mirrors state for WSL/SSH-like environments.
+  - Registry schema_version is 2; discovery must emit strict error_code diagnostics for not-ready/stale/schema-mismatch conditions.
+  - Cross-end restart/control requests require token+ts+nonce+HMAC and host-side user confirmation.
 
 rules:
   proposal:

@@ -2,6 +2,10 @@
 
 Last updated: 2026-03-01
 
+Note:
+- This file is the canonical detailed context.
+- `openspec/config.yaml` intentionally keeps only minimal constraints + artifact rules to avoid duplication.
+
 ## 1. Project Purpose
 
 This repository provides a practical bridge that lets external MCP clients (Claude Code, Cursor, etc.) drive Antigravity through a stable local contract.
