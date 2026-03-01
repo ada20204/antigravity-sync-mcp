@@ -94,6 +94,7 @@ export interface RegistryEntry {
         updated_at?: number;
     };
     workspace_id?: string;
+    original_workspace_id?: string;
     workspace_paths?: { normalized?: string; raw?: string };
     node_id?: string;
     role?: string;
@@ -336,7 +337,11 @@ export async function discoverCDPDetailed(targetDir?: string): Promise<DiscoverC
     }
 
     const scoped = targetId
-        ? entries.filter((entry) => entry.workspace_id === targetId)
+        ? entries.filter(
+              (entry) =>
+                  entry.workspace_id === targetId ||
+                  entry.original_workspace_id === targetId
+          )
         : entries;
     if (scoped.length === 0) {
         return discoverError("workspace_not_found", `No registry entry matched workspace id ${targetId}`, {
