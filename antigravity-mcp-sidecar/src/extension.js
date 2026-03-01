@@ -1604,7 +1604,11 @@ async function activate(context) {
                     'Restart',
                     'Reject'
                 );
-                const controlRef = getControlRecord(registry);
+                // Re-read registry after the blocking modal — other processes may have
+                // written changes while we waited.  Using the stale pre-modal object
+                // would overwrite those changes.
+                const liveRegistry = readRegistryObject() || registry;
+                const controlRef = getControlRecord(liveRegistry);
                 const current = controlRef.restart_requests[request.id];
                 if (!current) continue;
 
@@ -1617,8 +1621,8 @@ async function activate(context) {
                         error: { code: 'restart_rejected', message: 'user rejected host restart request' },
                         updated_at: Date.now(),
                     };
-                    registry[REGISTRY_CONTROL_KEY] = controlRef;
-                    changed = true;
+                    liveRegistry[REGISTRY_CONTROL_KEY] = controlRef;
+                    writeRegistryObject(liveRegistry);
                     continue;
                 }
 
@@ -1629,9 +1633,8 @@ async function activate(context) {
                     handled_by: nodeId,
                     updated_at: Date.now(),
                 };
-                registry[REGISTRY_CONTROL_KEY] = controlRef;
-                changed = true;
-                writeRegistryObject(registry);
+                liveRegistry[REGISTRY_CONTROL_KEY] = controlRef;
+                writeRegistryObject(liveRegistry);
                 await executeManualLaunch('restart', { trigger: 'remote-request' });
 
                 const registryAfter = readRegistryObject();
