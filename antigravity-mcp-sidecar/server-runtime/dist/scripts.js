@@ -258,8 +258,15 @@ export async function pollCompletionStatus(cdp) {
 
     return { isGenerating: false };
   })()`;
-    const result = await evaluateInAllContexts(cdp, expression);
-    return result || { isGenerating: false };
+    try {
+        const result = await evaluateInAllContexts(cdp, expression);
+        return result || { isGenerating: false };
+    }
+    catch {
+        // CDP error: conservatively assume generation is still in progress
+        // rather than signalling completion prematurely.
+        return { isGenerating: true };
+    }
 }
 // --- extractLatestResponse ---
 /**

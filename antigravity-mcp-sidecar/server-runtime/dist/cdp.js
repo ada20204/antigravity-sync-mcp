@@ -155,7 +155,8 @@ export async function discoverCDPDetailed(targetDir) {
         });
     }
     const scoped = targetId
-        ? entries.filter((entry) => entry.workspace_id === targetId)
+        ? entries.filter((entry) => entry.workspace_id === targetId ||
+            entry.original_workspace_id === targetId)
         : entries;
     if (scoped.length === 0) {
         return discoverError("workspace_not_found", `No registry entry matched workspace id ${targetId}`, {
@@ -249,32 +250,47 @@ export async function connectCDP(wsUrl) {
     const pendingCalls = new Map();
     const contexts = [];
     const CDP_CALL_TIMEOUT = 30000;
-    ws.on("message", (msg) => {
-        try {
-            const data = JSON.parse(msg.toString());
-            if (data.id !== undefined && pendingCalls.has(data.id)) {
-                const pending = pendingCalls.get(data.id);
-                clearTimeout(pending.timeoutId);
-                pendingCalls.delete(data.id);
-                if (data.error)
-                    pending.reject(data.error);
-                else
-                    pending.resolve(data.result);
-            }
-            if (data.method === "Runtime.executionContextCreated") {
-                contexts.push(data.params.context);
-            }
-            else if (data.method === "Runtime.executionContextDestroyed") {
-                const id = data.params.executionContextId;
-                const idx = contexts.findIndex((c) => c.id === id);
-                if (idx !== -1)
-                    contexts.splice(idx, 1);
-            }
-            else if (data.method === "Runtime.executionContextsCleared") {
-                contexts.length = 0;
-            }
+    // Define close() before any awaited calls so it can be used in the error path.
+    const close = () => {
+        for (const [, pending] of pendingCalls) {
+            clearTimeout(pending.timeoutId);
+            pending.reject(new Error("Connection closed"));
         }
-        catch { }
+        pendingCalls.clear();
+        ws.close();
+    };
+    ws.on("message", (msg) => {
+        // Separate JSON parse from routing: a malformed frame cannot be routed,
+        // but should not silently swallow subsequent valid messages' handler logic.
+        let data;
+        try {
+            data = JSON.parse(msg.toString());
+        }
+        catch {
+            // Malformed CDP frame — skip without affecting pending calls.
+            return;
+        }
+        if (data.id !== undefined && pendingCalls.has(data.id)) {
+            const pending = pendingCalls.get(data.id);
+            clearTimeout(pending.timeoutId);
+            pendingCalls.delete(data.id);
+            if (data.error)
+                pending.reject(data.error);
+            else
+                pending.resolve(data.result);
+        }
+        if (data.method === "Runtime.executionContextCreated") {
+            contexts.push(data.params.context);
+        }
+        else if (data.method === "Runtime.executionContextDestroyed") {
+            const id = data.params.executionContextId;
+            const idx = contexts.findIndex((c) => c.id === id);
+            if (idx !== -1)
+                contexts.splice(idx, 1);
+        }
+        else if (data.method === "Runtime.executionContextsCleared") {
+            contexts.length = 0;
+        }
     });
     const call = (method, params) => new Promise((resolve, reject) => {
         const id = idCounter++;
@@ -287,16 +303,15 @@ export async function connectCDP(wsUrl) {
         pendingCalls.set(id, { resolve, reject, timeoutId });
         ws.send(JSON.stringify({ id, method, params }));
     });
-    await call("Runtime.enable", {});
-    await new Promise((r) => setTimeout(r, 1000));
-    const close = () => {
-        for (const [, pending] of pendingCalls) {
-            clearTimeout(pending.timeoutId);
-            pending.reject(new Error("Connection closed"));
-        }
-        pendingCalls.clear();
-        ws.close();
-    };
+    // Initialize Runtime domain. Close WebSocket before rethrowing on failure.
+    try {
+        await call("Runtime.enable", {});
+        await new Promise((r) => setTimeout(r, 1000));
+    }
+    catch (error) {
+        close();
+        throw error;
+    }
     return { ws, call, contexts, close };
 }
 export async function evaluateInAllContexts(cdp, expression, awaitPromise = false) {

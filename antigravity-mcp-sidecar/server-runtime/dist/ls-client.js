@@ -109,6 +109,16 @@ export async function resolveActiveCascadeId(discovered) {
     }
     return undefined;
 }
+// Word-boundary patterns for terminal state values — avoids false positives from
+// substrings like "stopwatch", "failure_fallback", "incompleted", etc.
+const TERMINAL_VALUE_PATTERNS = [
+    /\bdone\b/,
+    /\bcomplete(d)?\b/,
+    /\bfinish(ed)?\b/,
+    /\bstop(ped)?\b/,
+    /\bcancel(l?ed)?\b/,
+    /\bfail(ed|ure)?\b/,
+];
 function containsTerminalSignal(value) {
     if (!value || typeof value !== "object")
         return false;
@@ -127,12 +137,7 @@ function containsTerminalSignal(value) {
                 lowerKey.includes("state") ||
                 lowerKey.includes("finish")) {
                 const v = raw.toLowerCase();
-                if (v.includes("done") ||
-                    v.includes("complete") ||
-                    v.includes("finished") ||
-                    v.includes("stop") ||
-                    v.includes("cancel") ||
-                    v.includes("fail")) {
+                if (TERMINAL_VALUE_PATTERNS.some((p) => p.test(v))) {
                     return true;
                 }
             }

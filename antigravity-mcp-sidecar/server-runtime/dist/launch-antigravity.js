@@ -1,7 +1,26 @@
 import { spawn } from "child_process";
-import fs from "fs";
+import fs, { readFileSync } from "fs";
 import path from "path";
 const DEFAULT_PORT = 9000;
+function isWslRuntime() {
+    if (process.platform !== "linux")
+        return false;
+    try {
+        const v = readFileSync("/proc/version", "utf-8");
+        return v.toLowerCase().includes("microsoft");
+    }
+    catch {
+        return false;
+    }
+}
+function resolveCdpBindAddress() {
+    const override = process.env.ANTIGRAVITY_CDP_BIND_ADDRESS?.trim();
+    if (override)
+        return override;
+    // WSL needs 0.0.0.0 so the Windows gateway IP can reach CDP.
+    // All other platforms restrict to localhost only.
+    return isWslRuntime() ? "0.0.0.0" : "127.0.0.1";
+}
 function parsePort(value) {
     if (!value)
         return undefined;
@@ -62,11 +81,12 @@ export function resolveAntigravityExecutable() {
     return linuxCandidates.find((item) => fileExists(item));
 }
 export function buildLaunchArgs(params) {
+    const bindAddress = resolveCdpBindAddress();
     const args = [
         params.targetDir,
         "--new-window",
         `--remote-debugging-port=${params.port}`,
-        "--remote-debugging-address=0.0.0.0",
+        `--remote-debugging-address=${bindAddress}`,
     ];
     const extra = process.env.ANTIGRAVITY_LAUNCH_EXTRA_ARGS?.trim();
     if (extra) {

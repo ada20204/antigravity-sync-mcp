@@ -452,12 +452,12 @@ async function handleLaunchAntigravity(params) {
     ];
     if (waitForCdp) {
         log(`[launch-antigravity] Waiting up to ${Math.round(COLD_START_WAIT_MS / 1000)}s for CDP...`);
-        const discovered = await waitForDiscoveredCdp(targetDir, COLD_START_WAIT_MS);
+        const discovered = await waitForDiscoveredCdp(dir, COLD_START_WAIT_MS);
         if (discovered) {
             lines.push(`CDP ready: ${discovered.ip}:${discovered.port} — ${discovered.target.title}`);
         }
         else {
-            const diag = await discoverCDPDetailed(targetDir);
+            const diag = await discoverCDPDetailed(dir);
             lines.push(`CDP not detected within ${Math.round(COLD_START_WAIT_MS / 1000)}s — ${formatDiscoverError(diag.error)}`);
         }
     }

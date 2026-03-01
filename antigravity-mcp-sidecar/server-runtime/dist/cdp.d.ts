@@ -72,6 +72,7 @@ export interface RegistryEntry {
         updated_at?: number;
     };
     workspace_id?: string;
+    original_workspace_id?: string;
     workspace_paths?: {
         normalized?: string;
         raw?: string;
