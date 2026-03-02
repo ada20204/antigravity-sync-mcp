@@ -29,6 +29,7 @@ const MCP_METADATA_FILE = path.join(REGISTRY_DIR, 'server-runtime.json');
 const REGISTRY_SCHEMA_VERSION = 2;
 const REGISTRY_COMPAT_SCHEMA_VERSIONS = [2];
 const REGISTRY_CONTROL_KEY = '__control__';
+const CONTROL_NO_CDP_PROMPT_KEY = 'cdp_prompt_requests';
 const REMOTE_MIRROR_POLL_INTERVAL_MS = 3_000;
 const REMOTE_MIRROR_KEY_PREFIX = '__mirror__';
 const HOST_CONTROL_POLL_INTERVAL_MS = 2_500;
@@ -41,6 +42,7 @@ const DEFAULT_CDP_PORT_SPEC = '9000-9014,8997-9003,9229,7800-7850';
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
+const NO_CDP_PROMPT_REQUEST_TTL_MS = 5 * 60 * 1000;
 const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
 
@@ -314,12 +316,15 @@ function errorLog(msg, fields) {
 }
 
 function getControlRecord(registry) {
-    if (!registry || typeof registry !== 'object') return { restart_requests: {} };
+    if (!registry || typeof registry !== 'object') return { restart_requests: {}, [CONTROL_NO_CDP_PROMPT_KEY]: {} };
     const raw = registry[REGISTRY_CONTROL_KEY];
-    if (!raw || typeof raw !== 'object') return { restart_requests: {} };
+    if (!raw || typeof raw !== 'object') return { restart_requests: {}, [CONTROL_NO_CDP_PROMPT_KEY]: {} };
     const control = raw;
     if (!control.restart_requests || typeof control.restart_requests !== 'object') {
         control.restart_requests = {};
+    }
+    if (!control[CONTROL_NO_CDP_PROMPT_KEY] || typeof control[CONTROL_NO_CDP_PROMPT_KEY] !== 'object') {
+        control[CONTROL_NO_CDP_PROMPT_KEY] = {};
     }
     return control;
 }
@@ -399,6 +404,19 @@ function buildCandidateMatrix(hosts, ports, limit = CDP_PROBE_SUMMARY_LIMIT) {
         }
     }
     return out;
+}
+
+function previewTokens(values, limit = 3) {
+    const list = Array.isArray(values) ? values : [];
+    if (list.length === 0) return 'none';
+    if (list.length <= limit) return list.join(',');
+    return `${list.slice(0, limit).join(',')}...(+${list.length - limit})`;
+}
+
+function summarizeProbePlan(hosts, ports) {
+    const hostList = Array.isArray(hosts) ? hosts : [];
+    const portList = Array.isArray(ports) ? ports : [];
+    return `hosts=${hostList.length}[${previewTokens(hostList, 3)}] ports=${portList.length}[${previewTokens(portList, 5)}]`;
 }
 
 function shortError(error) {
@@ -537,9 +555,11 @@ function writeRegistryObject(registry) {
 }
 
 function extractArgValue(cmdline, name) {
-    const re = new RegExp(`(?:--|-)${name}[=\\s]+([^\\s]+)`, 'i');
+    const flag = String(name || '').trim().replace(/[-_]/g, '[-_]');
+    const re = new RegExp(`(?:--|-)${flag}(?:=|\\s+)(\"[^\"]+\"|'[^']+'|[^\\s]+)`, 'i');
     const match = String(cmdline || '').match(re);
-    return match ? match[1] : '';
+    if (!match) return '';
+    return String(match[1] || '').replace(/^["']|["']$/g, '');
 }
 
 function parsePortsFromSsOutput(text, pid) {
@@ -562,6 +582,27 @@ function parsePortsFromLsofOutput(text, pid) {
         if (Number.isFinite(port)) ports.add(port);
     }
     return [...ports].sort((a, b) => a - b);
+}
+
+async function probeLanguageServerEndpoint(host, port, csrfToken) {
+    // Method availability varies across LS versions; try a small set.
+    const probes = [
+        () => postLsJson(host, port, csrfToken, 'GetUnleashData', { wrapper_data: {} }, 1500),
+        () => postLsJson(host, port, csrfToken, 'GetUserStatus', {
+            metadata: {
+                ideName: 'antigravity',
+                extensionName: 'antigravity',
+                locale: 'en',
+            },
+        }, 2000),
+    ];
+    for (const runProbe of probes) {
+        try {
+            await runProbe();
+            return true;
+        } catch { }
+    }
+    return false;
 }
 
 async function postLsJson(host, port, csrfToken, method, body, timeoutMs = 3000) {
@@ -608,34 +649,69 @@ async function postLsJson(host, port, csrfToken, method, body, timeoutMs = 3000)
 async function detectLanguageServer() {
     try {
         if (process.platform === 'win32') {
-            const cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -like \\\"language_server*\\\" -or $_.Name -like \\\"exa_language_server*\\\") -and $_.CommandLine -match \\\"csrf_token\\\" } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"';
-            const { stdout } = await execAsync(cmd);
-            if (!stdout.trim()) return null;
-            let data = JSON.parse(stdout.trim());
-            const items = Array.isArray(data) ? data : [data];
-            const proc = items.find((item) => {
-                const line = String(item.CommandLine || '');
-                return line && (/--app_data_dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line));
-            }) || items[0];
-            if (!proc) return null;
-            const pid = Number(proc.ProcessId);
-            const commandLine = String(proc.CommandLine || '');
-            const csrfToken = extractArgValue(commandLine, 'csrf_token');
-            if (!pid || !csrfToken) return null;
-
-            const portsCmd = `powershell -NoProfile -Command "Get-NetTCPConnection -OwningProcess ${pid} -State Listen | Select-Object -ExpandProperty LocalPort | ConvertTo-Json -Compress"`;
-            const { stdout: portsOut } = await execAsync(portsCmd);
-            let ports = [];
-            if (portsOut.trim()) {
-                const parsed = JSON.parse(portsOut.trim());
-                ports = Array.isArray(parsed) ? parsed : [parsed];
-                ports = ports.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
-            }
-            for (const port of ports) {
+            const processCmds = [
+                'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name=\'language_server_windows_x64.exe\'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"',
+                'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -match \\\"(?i)(language[_-]?server|exa[_-]?language[_-]?server)\\\") -and ($_.CommandLine -match \\\"csrf[_-]token\\\") } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"',
+            ];
+            let items = [];
+            for (const cmd of processCmds) {
                 try {
-                    await postLsJson('127.0.0.1', port, csrfToken, 'GetUnleashData', { wrapper_data: {} }, 1500);
-                    return { pid, port, csrfToken };
+                    const { stdout } = await execAsync(cmd);
+                    if (!stdout.trim()) continue;
+                    const parsed = JSON.parse(stdout.trim());
+                    const list = Array.isArray(parsed) ? parsed : [parsed];
+                    if (list.length > 0) {
+                        items = list;
+                        break;
+                    }
                 } catch { }
+            }
+            if (items.length === 0) return null;
+
+            const prioritized = [
+                ...items.filter((item) => {
+                    const line = String(item.CommandLine || '');
+                    return line && (/--app[_-]data[_-]dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line));
+                }),
+                ...items.filter((item) => {
+                    const line = String(item.CommandLine || '');
+                    return !(line && (/--app[_-]data[_-]dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line)));
+                }),
+            ];
+
+            for (const proc of prioritized) {
+                const pid = Number(proc.ProcessId);
+                const commandLine = String(proc.CommandLine || '');
+                const csrfToken =
+                    extractArgValue(commandLine, 'csrf_token') ||
+                    extractArgValue(commandLine, 'extension_server_csrf_token');
+                if (!pid || !csrfToken) continue;
+
+                const extensionPort = Number(extractArgValue(commandLine, 'extension_server_port'));
+                const portsCmd = `powershell -NoProfile -Command "Get-NetTCPConnection -OwningProcess ${pid} -State Listen | Select-Object -ExpandProperty LocalPort | ConvertTo-Json -Compress"`;
+                let ports = [];
+                try {
+                    const { stdout: portsOut } = await execAsync(portsCmd);
+                    if (portsOut.trim()) {
+                        const parsed = JSON.parse(portsOut.trim());
+                        ports = (Array.isArray(parsed) ? parsed : [parsed])
+                            .map(Number)
+                            .filter((p) => Number.isFinite(p) && p > 0)
+                            .sort((a, b) => a - b);
+                    }
+                } catch { }
+
+                const candidatePorts = [...new Set([
+                    ...ports,
+                    ...(Number.isFinite(extensionPort) && extensionPort > 0 ? [extensionPort] : []),
+                ])];
+                for (const port of candidatePorts) {
+                    try {
+                        if (await probeLanguageServerEndpoint('127.0.0.1', port, csrfToken)) {
+                            return { pid, port, csrfToken };
+                        }
+                    } catch { }
+                }
             }
             return null;
         }
@@ -647,7 +723,9 @@ async function detectLanguageServer() {
         const parts = line.trim().split(/\s+/);
         const pid = Number(parts[0]);
         const commandLine = line.slice(parts[0].length).trim();
-        const csrfToken = extractArgValue(commandLine, 'csrf_token');
+        const csrfToken =
+            extractArgValue(commandLine, 'csrf_token') ||
+            extractArgValue(commandLine, 'extension_server_csrf_token');
         if (!pid || !csrfToken) return null;
 
         const portsCmd = process.platform === 'darwin'
@@ -658,8 +736,9 @@ async function detectLanguageServer() {
         if (ports.length === 0) ports = parsePortsFromLsofOutput(portText, pid);
         for (const port of ports) {
             try {
-                await postLsJson('127.0.0.1', port, csrfToken, 'GetUnleashData', { wrapper_data: {} }, 1500);
-                return { pid, port, csrfToken };
+                if (await probeLanguageServerEndpoint('127.0.0.1', port, csrfToken)) {
+                    return { pid, port, csrfToken };
+                }
             } catch { }
         }
     } catch {
@@ -817,10 +896,10 @@ function summarizeQuota(quota) {
 
     const primaryPercent = activeModelRemaining !== null
         ? activeModelRemaining
-        : (promptRemaining !== null ? promptRemaining : minModelRemaining);
+        : (minModelRemaining !== null ? minModelRemaining : promptRemaining);
     const primaryLabel = activeModelName
         ? `model ${activeModelName}`
-        : (promptRemaining !== null ? 'prompt credits' : 'model quota');
+        : (minModelRemaining !== null ? 'lowest model quota' : 'prompt credits');
 
     return {
         primaryPercent,
@@ -1184,12 +1263,13 @@ async function activate(context) {
     let cdpProbeHosts = [];
     let cdpProbePorts = [];
     let register = () => { };
-    let negotiateCdp = async () => false;
+    let negotiateCdp = async (_options = {}) => false;
     let workspacePath = '';
     let workspaceName = '';
     let bridgeToken = '';
     let bridgeMaxSkewMs = DEFAULT_MAX_SKEW_MS;
     let bridgeRequestTtlMs = 5 * 60 * 1000;
+    let lastSyncStateLogKey = '';
     const nonceCache = new NonceCache();
     let quotaWarnThresholdPercent = DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT;
     let quotaCriticalThresholdPercent = DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT;
@@ -1273,16 +1353,16 @@ async function activate(context) {
             if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
             return { level: 'none', watchedPercent: percent, target };
         }
-        if (summary.promptRemaining !== null) {
-            const percent = summary.promptRemaining;
-            const target = 'prompt credits';
+        if (summary.minModelRemaining !== null) {
+            const percent = summary.minModelRemaining;
+            const target = 'lowest model quota';
             if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
             if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
             return { level: 'none', watchedPercent: percent, target };
         }
-        if (summary.minModelRemaining !== null) {
-            const percent = summary.minModelRemaining;
-            const target = 'lowest model quota';
+        if (summary.promptRemaining !== null) {
+            const percent = summary.promptRemaining;
+            const target = 'prompt credits';
             if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
             if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
             return { level: 'none', watchedPercent: percent, target };
@@ -1369,30 +1449,36 @@ async function activate(context) {
         if (!shouldNotify) return;
 
         const message = `Antigravity quota low: ${levelInfo.target} remaining ${watchedPercent.toFixed(1)}%`;
-
-        if (level === 'critical') {
-            vscode.window.showErrorMessage(message);
-        } else {
-            vscode.window.showWarningMessage(message);
-        }
+        // No popup alerts for quota; keep logs/status bar only.
         log(`Quota alert (${level}): ${message}`);
         lastQuotaAlertLevel = level;
         lastQuotaAlertAt = now;
     }
 
     function syncState() {
+        let nextLogKey = '';
         if (isEnabled && cdpTarget) {
             const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
             startAutoAccept(cdpTarget.port, log, config.get('nativePollInterval', 500), config.get('cdpPollInterval', 1500), cdpTarget.ip);
-            log(`Auto-accept loops running on ${cdpTarget.ip}:${cdpTarget.port}`);
+            nextLogKey = `running:${cdpTarget.ip}:${cdpTarget.port}`;
+            if (nextLogKey !== lastSyncStateLogKey) {
+                log(`Auto-accept loops running on ${cdpTarget.ip}:${cdpTarget.port}`);
+            }
         } else {
             stopAutoAccept();
             if (!cdpTarget) {
-                log('Auto-accept unavailable: no CDP debug port found');
+                nextLogKey = 'paused:no_cdp';
+                if (nextLogKey !== lastSyncStateLogKey) {
+                    log('Auto-accept unavailable: no CDP debug port found');
+                }
             } else {
-                log('Auto-accept paused');
+                nextLogKey = 'paused:disabled';
+                if (nextLogKey !== lastSyncStateLogKey) {
+                    log('Auto-accept paused');
+                }
             }
         }
+        lastSyncStateLogKey = nextLogKey;
         updateStatusBar();
     }
 
@@ -1567,6 +1653,35 @@ async function activate(context) {
         }
     }
 
+    async function showNoCdpPromptFromServer(request = {}) {
+        const platform = process.platform;
+        const state = String(request.state || cdpState || 'unknown');
+        const code = String(request.reason_code || (cdpLastError && cdpLastError.code) || 'cdp_not_ready');
+        const baseMessage =
+            `MCP requested CDP but it is unavailable (state=${state}, code=${code}). ` +
+            'Launch Antigravity with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
+        const actions = ['How to Fix'];
+        if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
+        if (runtimeRole === 'remote' && state === 'app_up_no_cdp') actions.unshift('Request Host Restart');
+
+        const action = await vscode.window.showWarningMessage(baseMessage, ...actions);
+        if (action === 'Request Host Restart') {
+            await requestHostRestart({ reason: 'server_connect_no_cdp' });
+        } else if (action === 'How to Fix') {
+            const guide = platform === 'linux'
+                ? (runtimeRole === 'remote'
+                    ? 'Remote sidecar cannot cold-start host app. Open Antigravity on host with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.'
+                    : 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then retry MCP request.')
+                : platform === 'darwin'
+                    ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0'
+                    : 'Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
+            await vscode.window.showInformationMessage(guide, { modal: true });
+        } else if (action === 'Auto-Fix Shortcut (Windows)') {
+            autoFixWindowsShortcut();
+        }
+        return action || '';
+    }
+
     function rejectControlRequest(registry, request, code, message) {
         const control = getControlRecord(registry);
         const current = control.restart_requests[request.id];
@@ -1584,13 +1699,55 @@ async function activate(context) {
 
     let controlRequestHandling = false;
     async function processHostControlRequests() {
-        if (runtimeRole !== 'host') return;
         if (controlRequestHandling) return;
         controlRequestHandling = true;
         try {
             const registry = readRegistryObject();
             const control = getControlRecord(registry);
             let changed = false;
+
+            const promptRequests = Object.values(control[CONTROL_NO_CDP_PROMPT_KEY] || {})
+                .filter((item) => item && item.status === 'pending')
+                .sort((a, b) => Number(a.created_at || 0) - Number(b.created_at || 0));
+            for (const request of promptRequests) {
+                if (request.workspace_id && request.workspace_id !== workspaceId) continue;
+                const ageMs = Date.now() - Number(request.updated_at || request.created_at || 0);
+                if (ageMs > NO_CDP_PROMPT_REQUEST_TTL_MS) {
+                    const current = control[CONTROL_NO_CDP_PROMPT_KEY][request.id];
+                    if (current) {
+                        control[CONTROL_NO_CDP_PROMPT_KEY][request.id] = {
+                            ...current,
+                            status: 'expired',
+                            updated_at: Date.now(),
+                        };
+                        changed = true;
+                    }
+                    continue;
+                }
+                const selectedAction = await showNoCdpPromptFromServer(request);
+                const current = control[CONTROL_NO_CDP_PROMPT_KEY][request.id];
+                if (current) {
+                    control[CONTROL_NO_CDP_PROMPT_KEY][request.id] = {
+                        ...current,
+                        status: 'shown',
+                        action: selectedAction || undefined,
+                        shown_at: Date.now(),
+                        handled_by: nodeId,
+                        updated_at: Date.now(),
+                    };
+                    changed = true;
+                }
+                break;
+            }
+
+            if (runtimeRole !== 'host') {
+                if (changed) {
+                    registry[REGISTRY_CONTROL_KEY] = control;
+                    writeRegistryObject(registry);
+                }
+                return;
+            }
+
             const requests = Object.values(control.restart_requests || {})
                 .filter((item) => item && item.status === 'pending')
                 .sort((a, b) => Number(a.created_at || 0) - Number(b.created_at || 0));
@@ -1670,10 +1827,10 @@ async function activate(context) {
                     registryAfter[REGISTRY_CONTROL_KEY] = controlAfter;
                     writeRegistryObject(registryAfter);
                 }
-                changed = false;
             }
 
             if (changed) {
+                registry[REGISTRY_CONTROL_KEY] = control;
                 writeRegistryObject(registry);
             }
         } catch (err) {
@@ -1781,46 +1938,39 @@ async function activate(context) {
             outputChannel.appendLine(line);
         }
         if (!latestQuota && latestQuotaError) {
-            vscode.window.showWarningMessage(`Quota snapshot unavailable: ${latestQuotaError}`);
+            log(`Quota snapshot unavailable: ${latestQuotaError}`);
             return;
         }
         const summary = summarizeQuota(latestQuota);
         if (summary && summary.primaryPercent !== null) {
-            vscode.window.showInformationMessage(`Quota: ${summary.primaryPercent.toFixed(1)}% remaining (${summary.primaryLabel})`);
+            log(`Quota: ${summary.primaryPercent.toFixed(1)}% remaining (${summary.primaryLabel})`);
         } else {
-            vscode.window.showInformationMessage('Quota snapshot has been written to output channel.');
+            log('Quota snapshot written to output channel.');
         }
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuotaTable', async () => {
         const models = Array.isArray(latestQuota && latestQuota.models) ? latestQuota.models : [];
+        outputChannel.show(true);
         if (models.length === 0) {
-            vscode.window.showWarningMessage('No model quota snapshot available yet.');
+            outputChannel.appendLine('No model quota snapshot available yet.');
+            log('No model quota snapshot available yet.');
             return;
         }
 
         const sorted = [...models].sort((a, b) =>
             String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
         );
-        const items = sorted.map((model) => {
+        outputChannel.appendLine('=== Antigravity Model Quota ===');
+        for (const model of sorted) {
             const id = model.modelId || model.label || 'unknown';
             const remaining = typeof model.remainingPercentage === 'number'
                 ? `${model.remainingPercentage.toFixed(1)}%`
                 : 'n/a';
             const selectedMark = model.isSelected ? ' [active]' : '';
-            return {
-                label: `${id}${selectedMark}`,
-                description: `remaining=${remaining} exhausted=${model.isExhausted ? 'yes' : 'no'}`,
-                detail: model.resetTime ? `reset=${model.resetTime}` : '',
-            };
-        });
-
-        await vscode.window.showQuickPick(items, {
-            title: 'Antigravity Model Quota',
-            placeHolder: 'Sorted by model id/label',
-            matchOnDescription: true,
-            matchOnDetail: true,
-        });
+            outputChannel.appendLine(`${id}${selectedMark}: remaining=${remaining} exhausted=${model.isExhausted ? 'yes' : 'no'}${model.resetTime ? ` reset=${model.resetTime}` : ''}`);
+        }
+        log(`Quota table written to output channel (${sorted.length} models).`);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.refreshQuota', async () => {
@@ -1828,13 +1978,13 @@ async function activate(context) {
             await refreshQuota();
             const summary = summarizeQuota(latestQuota);
             if (summary && summary.primaryPercent !== null) {
-                vscode.window.showInformationMessage(`Quota refreshed: ${summary.primaryPercent.toFixed(1)}% (${summary.primaryLabel})`);
+                log(`Quota refreshed: ${summary.primaryPercent.toFixed(1)}% (${summary.primaryLabel})`);
             } else {
-                vscode.window.showInformationMessage('Quota refreshed.');
+                log('Quota refreshed.');
             }
         } catch (e) {
             const message = e && e.message ? e.message : String(e);
-            vscode.window.showWarningMessage(`Quota refresh failed: ${message}`);
+            log(`Quota refresh failed: ${message}`);
         }
     }));
 
@@ -1969,7 +2119,8 @@ async function activate(context) {
         writeRegistryObject(registry);
     };
 
-    negotiateCdp = async () => {
+    negotiateCdp = async (options = {}) => {
+        const phase = String((options && options.phase) || 'runtime');
         const previous = readRegistryObject()[workspacePath];
         const previousGeneration = previous && previous.cdp && Number.isFinite(previous.cdp.generation)
             ? Number(previous.cdp.generation)
@@ -1991,7 +2142,12 @@ async function activate(context) {
         cdpVerifiedAt = 0;
         register();
 
-        log(`Probing CDP hosts: ${cdpProbeHosts.join(',') || 'none'} ports=${cdpProbePorts.slice(0, 8).join(',')}${cdpProbePorts.length > 8 ? ',...' : ''}`);
+        if (phase !== 'startup') {
+            log(`CDP probe started (${summarizeProbePlan(cdpProbeHosts, cdpProbePorts)})`, {
+                plane: 'data',
+                state: 'probing',
+            });
+        }
         const result = await findCdpTarget({
             workspaceName,
             hosts: cdpProbeHosts,
@@ -2032,21 +2188,19 @@ async function activate(context) {
             }
         );
         register();
-        errorLog(`Error: Could not find CDP port for workspace: ${workspacePath}`, {
-            plane: 'data',
-            state: mapCdpStateToRegistryState(cdpState),
-            error_code: cdpLastError.code,
-        });
-        log(`Probe hosts: ${cdpProbeHosts.join(',')}`, {
-            plane: 'data',
-            state: mapCdpStateToRegistryState(cdpState),
-            error_code: cdpLastError.code,
-        });
-        log(`CDP last error: ${cdpLastError.code}:${cdpLastError.message}`, {
-            plane: 'data',
-            state: mapCdpStateToRegistryState(cdpState),
-            error_code: cdpLastError.code,
-        });
+        if (phase !== 'startup') {
+            errorLog(
+                `CDP probe failed (${cdpLastError.code}): state=${cdpState} workspace=${workspacePath} last=${cdpLastError.message}`,
+                {
+                    plane: 'data',
+                    state: mapCdpStateToRegistryState(cdpState),
+                    error_code: cdpLastError.code,
+                    extra: {
+                        probe: summarizeProbePlan(cdpProbeHosts, cdpProbePorts),
+                    },
+                }
+            );
+        }
         return false;
     };
 
@@ -2061,36 +2215,39 @@ async function activate(context) {
     }, HOST_CONTROL_POLL_INTERVAL_MS);
     context.subscriptions.push({ dispose: () => clearInterval(controlTimer) });
 
-    if (!(await negotiateCdp())) {
-        updateStatusBar();
-
-        const platform = process.platform;
-        const actions = ['How to Fix'];
-        if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
-        if (runtimeRole === 'remote' && cdpState === 'app_up_no_cdp') {
-            actions.unshift('Request Host Restart');
-        }
-
-        vscode.window.showErrorMessage(
-            '⚡ Sidecar: No CDP debug port found. Antigravity must be launched with an available --remote-debugging-port (for example 9000) and --remote-debugging-address=0.0.0.0.',
-            ...actions
-        ).then(action => {
-            if (action === 'Request Host Restart') {
-                requestHostRestart({ reason: 'auto_prompt_no_cdp' }).catch(() => { });
-            } else if (action === 'How to Fix') {
-                const guide = platform === 'linux'
-                    ? (runtimeRole === 'remote'
-                        ? 'Remote sidecar cannot cold-start host app. Open Antigravity on host with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.'
-                        : 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then restart VS Code window.')
-                    : platform === 'darwin'
-                        ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0'
-                        : 'Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
-                vscode.window.showInformationMessage(guide, { modal: true });
-            } else if (action === 'Auto-Fix Shortcut (Windows)') {
-                autoFixWindowsShortcut();
+    // Heartbeat runs even when initial CDP probe fails so it can auto-recover.
+    const heartbeatRetry = async () => {
+        if (cdpHeartbeatRunning) return;
+        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready') return;
+        cdpHeartbeatRunning = true;
+        try {
+            const recovered = await negotiateCdp({ phase: 'heartbeat-retry' });
+            if (recovered) {
+                log(`CDP auto-recovered via heartbeat retry (${cdpTarget.ip}:${cdpTarget.port})`);
+                updateStatusBar();
+                updateQuotaStatusBar();
+                // One-time quota fetch since we missed normal init.
+                fetchQuotaSnapshot().then((result) => {
+                    latestLs = result.ls || latestLs;
+                    latestQuota = result.quota || latestQuota;
+                    latestQuotaError = result.error;
+                    register();
+                    updateQuotaStatusBar();
+                    maybeNotifyLowQuota();
+                }).catch(() => { });
             }
-        });
+        } finally {
+            cdpHeartbeatRunning = false;
+        }
+    };
 
+    const cdpRetryTimer = setInterval(() => {
+        if (!cdpTarget) heartbeatRetry().catch(() => { });
+    }, CDP_HEARTBEAT_INTERVAL_MS);
+    context.subscriptions.push({ dispose: () => clearInterval(cdpRetryTimer) });
+
+    if (!(await negotiateCdp({ phase: 'startup' }))) {
+        updateStatusBar();
         return;
     }
 
