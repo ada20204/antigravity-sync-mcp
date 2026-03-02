@@ -147,7 +147,10 @@ const TOOLS: Tool[] = [
         description:
             "Send a prompt to Antigravity and wait for the AI to complete its response. " +
             "Antigravity will autonomously accept file changes and run commands (with safety checks). " +
-            "Returns the final AI response text.",
+            "Returns the final AI response text.\n\n" +
+            "IMPORTANT: Always provide `targetDir` matching the workspace currently open in Antigravity. " +
+            "Before sending a task, verify the path is correct — a mismatch causes workspace_id lookup failure. " +
+            "Use the `ping` tool first to confirm CDP is connected to the right workspace.",
         inputSchema: {
             type: "object" as const,
             properties: {
@@ -166,8 +169,10 @@ const TOOLS: Tool[] = [
                 targetDir: {
                     type: "string",
                     description:
-                        "Optional workspace directory for this request. " +
-                        "When provided, it overrides the process --target-dir fallback.",
+                        "Workspace directory path — must exactly match the folder currently open in Antigravity " +
+                        "(e.g. /Users/elliot/myproject or C:\\Users\\elliot\\myproject). " +
+                        "Used to look up the correct registry entry via workspace_id. " +
+                        "If omitted, the server auto-selects the best available workspace from the registry.",
                 },
             },
             required: ["prompt"],
@@ -199,15 +204,20 @@ const TOOLS: Tool[] = [
     {
         name: "launch-antigravity",
         description:
-            "Launch Antigravity with CDP debug ports enabled. " +
-            "Use this when Antigravity is not running and you need to start it before sending tasks. " +
-            "Returns launch status including the executable path and CDP port.",
+            "Launch Antigravity with CDP debug ports enabled. Use this when Antigravity is not running and you need to start it before sending tasks. " +
+            "Returns launch status including the executable path and CDP port.\n\n" +
+            "IMPORTANT: Provide `targetDir` to open the correct workspace. " +
+            "After launch, verify with `ping` that CDP connected to the expected workspace before calling `ask-antigravity`.",
         inputSchema: {
             type: "object" as const,
             properties: {
                 targetDir: {
                     type: "string",
-                    description: "Optional workspace directory to open in Antigravity",
+                    description:
+                        "Workspace directory to open in Antigravity. " +
+                        "Must be the absolute path of the project you want to work on " +
+                        "(e.g. /Users/elliot/myproject or C:\\Users\\elliot\\myproject). " +
+                        "Verify this matches the intended workspace before launching.",
                 },
                 waitForCdp: {
                     type: "boolean",
