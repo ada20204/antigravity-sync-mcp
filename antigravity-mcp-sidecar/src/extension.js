@@ -37,7 +37,7 @@ const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CDP_PROBE_TIMEOUT_MS = 250;
 const CDP_MAX_HOSTS = 8;
 const CDP_PROBE_SUMMARY_LIMIT = 40;
-const DEFAULT_CDP_PORT_SPEC = '9222,9229,9000-9014,8997-9003,7800-7850';
+const DEFAULT_CDP_PORT_SPEC = '9000-9014,8997-9003,9229,7800-7850';
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
@@ -2263,7 +2263,7 @@ function autoFixWindowsShortcut() {
     const cp = require('child_process');
     const psFile = path.join(os.tmpdir(), 'antigravity_patch_shortcut.ps1');
     const psContent = `
-$flag = "--remote-debugging-port=9222"
+$flag = "--remote-debugging-port=9000"
 $WshShell = New-Object -comObject WScript.Shell
 $paths = @(
     "$env:USERPROFILE\\Desktop",
@@ -2317,7 +2317,7 @@ if ($patched) { Write-Output "SUCCESS" } else { Write-Output "NOT_FOUND" }
             );
         } else {
             vscode.window.showWarningMessage(
-                'No Antigravity/Cursor shortcut found. Add --remote-debugging-port=9222 to your shortcut manually.'
+                'No Antigravity/Cursor shortcut found. Add --remote-debugging-port=9000 to your shortcut manually.'
             );
         }
     });

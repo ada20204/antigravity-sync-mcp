@@ -19,3 +19,6 @@
 [submodule "references/AntigravityQuota"]
 	path = references/AntigravityQuota
 	url = https://github.com/Henrik-3/AntigravityQuota
+[submodule "references/zero-gravity"]
+	path = references/zero-gravity
+	url = https://github.com/zhe-gu/zero-gravity

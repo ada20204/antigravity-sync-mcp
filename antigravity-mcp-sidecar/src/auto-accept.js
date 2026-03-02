@@ -14,7 +14,17 @@ const ACCEPT_COMMANDS = [
 function buildPermissionScript() {
     return `
 (function() {
-    var BUTTON_TEXTS = ['run', 'accept', 'always allow', 'allow this conversation', 'allow'];
+    var BUTTON_TEXTS = [
+        'run',
+        'accept',
+        'always allow',
+        'allow this conversation',
+        'allow once',
+        'consenti una volta',
+        'continue',
+        'retry',
+        'allow'
+    ];
     if (!document.querySelector('.react-app-container') && 
         !document.querySelector('[class*="agent"]') &&
         !document.querySelector('[data-vscode-context]')) {

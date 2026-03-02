@@ -34,7 +34,7 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 | `antigravityMcpSidecar.cdpPollInterval` | `1500` | CDP webview polling interval (ms) |
 | `antigravityMcpSidecar.cdpFixedHost` | `""` | Optional fixed CDP host override |
 | `antigravityMcpSidecar.cdpFixedPort` | `0` | Optional fixed CDP port override (`0` = auto). When set, only this port is probed |
-| `antigravityMcpSidecar.cdpPortCandidates` | `9222,9229,9000-9014,8997-9003,7800-7850` | Candidate ports for negotiation |
+| `antigravityMcpSidecar.cdpPortCandidates` | `9000-9014,8997-9003,9229,7800-7850` | Candidate ports for negotiation (avoids legacy 9222 conflicts by default) |
 | `antigravityMcpSidecar.antigravityExecutablePath` | `""` | Optional explicit Antigravity executable path |
 | `antigravityMcpSidecar.antigravityLaunchPort` | `9000` | Launch port when no fixed CDP port is set |
 | `antigravityMcpSidecar.antigravityLaunchExtraArgs` | `""` | Extra launch args appended when starting app |
