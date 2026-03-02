@@ -13,6 +13,9 @@ import WebSocket from "ws";
 const REGISTRY_DIR = ".config/antigravity-mcp";
 const REGISTRY_FILE_NAME = "registry.json";
 const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
+const REGISTRY_CONTROL_KEY = "__control__";
+const CONTROL_NO_CDP_PROMPT_KEY = "cdp_prompt_requests";
+const NO_CDP_PROMPT_COOLDOWN_MS = 15_000;
 const SUPPORTED_SCHEMA_VERSIONS = [2];
 const READY_STATE = "ready";
 function isFreshTimestamp(value, maxAgeMs) {
@@ -42,7 +45,7 @@ export function computeWorkspaceId(rawPath) {
     return crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
 }
 function readRegistryObject() {
-    const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
+    const registryFile = getRegistryFilePath();
     try {
         if (!fs.existsSync(registryFile))
             return null;
@@ -55,6 +58,50 @@ function readRegistryObject() {
         console.error(`[CDP] Failed to read registry '${registryFile}': ${e.message}`);
     }
     return null;
+}
+function getRegistryFilePath() {
+    return process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
+}
+function writeRegistryObject(registryFile, payload) {
+    try {
+        fs.writeFileSync(registryFile, JSON.stringify(payload, null, 2), "utf-8");
+    }
+    catch (e) {
+        console.error(`[CDP] Failed to write registry '${registryFile}': ${e.message}`);
+    }
+}
+function upsertNoCdpPromptRequest(params) {
+    const { registry, registryFile, workspaceId, state, reasonCode, reasonMessage } = params;
+    if (!workspaceId)
+        return;
+    const now = Date.now();
+    const requestId = `no_cdp_${workspaceId}`;
+    const rawControl = registry[REGISTRY_CONTROL_KEY];
+    const control = rawControl && typeof rawControl === "object" ? { ...rawControl } : {};
+    const rawRequests = control[CONTROL_NO_CDP_PROMPT_KEY];
+    const requests = rawRequests && typeof rawRequests === "object" ? { ...rawRequests } : {};
+    const existing = requests[requestId];
+    if (existing && typeof existing === "object") {
+        const updatedAt = Number(existing.updated_at || existing.created_at || 0);
+        if (Number.isFinite(updatedAt) && now - updatedAt < NO_CDP_PROMPT_COOLDOWN_MS) {
+            return;
+        }
+    }
+    requests[requestId] = {
+        id: requestId,
+        type: "cdp_not_ready",
+        source: "server",
+        workspace_id: workspaceId,
+        state: state || "unknown",
+        reason_code: reasonCode,
+        reason_message: reasonMessage,
+        status: "pending",
+        created_at: existing && typeof existing === "object" ? Number(existing.created_at || now) : now,
+        updated_at: now,
+    };
+    control[CONTROL_NO_CDP_PROMPT_KEY] = requests;
+    registry[REGISTRY_CONTROL_KEY] = control;
+    writeRegistryObject(registryFile, registry);
 }
 function discoverError(code, message, extras) {
     return {
@@ -119,6 +166,7 @@ async function resolveTargetFromEndpoint(ip, port) {
 }
 export async function discoverCDPDetailed(targetDir) {
     const targetId = targetDir ? computeWorkspaceId(path.resolve(targetDir)) : undefined;
+    const registryFile = getRegistryFilePath();
     const envPortRaw = process.env.ANTIGRAVITY_CDP_PORT;
     const envHost = process.env.ANTIGRAVITY_CDP_HOST?.trim() || "127.0.0.1";
     // Env override remains highest precedence.
@@ -149,7 +197,6 @@ export async function discoverCDPDetailed(targetDir) {
     }
     const registry = readRegistryObject();
     if (!registry) {
-        const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
         return discoverError("registry_missing", `Registry not found: ${registryFile}`, {
             workspaceId: targetId,
         });
@@ -185,6 +232,14 @@ export async function discoverCDPDetailed(targetDir) {
         });
     }
     if (matched.state !== READY_STATE) {
+        upsertNoCdpPromptRequest({
+            registry,
+            registryFile,
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+            reasonCode: "entry_not_ready",
+            reasonMessage: `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
+        });
         return discoverError("entry_not_ready", `Registry entry is not ready (state=${matched.state ?? "unknown"})`, {
             workspaceId: matched.workspace_id ?? targetId,
             state: matched.state,
@@ -206,6 +261,14 @@ export async function discoverCDPDetailed(targetDir) {
     }
     const endpoint = matched.local_endpoint;
     if (!endpoint?.port || !Number.isFinite(endpoint.port)) {
+        upsertNoCdpPromptRequest({
+            registry,
+            registryFile,
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+            reasonCode: "endpoint_missing",
+            reasonMessage: "Registry entry has no valid local_endpoint",
+        });
         return discoverError("endpoint_missing", "Registry entry has no valid local_endpoint", {
             workspaceId: matched.workspace_id ?? targetId,
             state: matched.state,
@@ -216,6 +279,14 @@ export async function discoverCDPDetailed(targetDir) {
     try {
         const target = await resolveTargetFromEndpoint(ip, port);
         if (!target) {
+            upsertNoCdpPromptRequest({
+                registry,
+                registryFile,
+                workspaceId: matched.workspace_id ?? targetId,
+                state: matched.state,
+                reasonCode: "cdp_target_not_found",
+                reasonMessage: `No CDP page target on ${ip}:${port}`,
+            });
             return discoverError("cdp_target_not_found", `No CDP page target on ${ip}:${port}`, {
                 workspaceId: matched.workspace_id ?? targetId,
                 state: matched.state,
@@ -232,6 +303,14 @@ export async function discoverCDPDetailed(targetDir) {
         };
     }
     catch (error) {
+        upsertNoCdpPromptRequest({
+            registry,
+            registryFile,
+            workspaceId: matched.workspace_id ?? targetId,
+            state: matched.state,
+            reasonCode: "endpoint_unreachable",
+            reasonMessage: `Failed to connect to ${ip}:${port}`,
+        });
         return discoverError("endpoint_unreachable", `Failed to connect to ${ip}:${port}`, {
             workspaceId: matched.workspace_id ?? targetId,
             state: matched.state,

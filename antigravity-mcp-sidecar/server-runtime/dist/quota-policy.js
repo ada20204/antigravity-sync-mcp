@@ -3,25 +3,58 @@ const DEFAULT_STALE_AFTER_MS = 10 * 60 * 1000;
 const MODE_CHAINS = {
     fast: [
         "gemini-3-flash",
+        "sonnet-4.6",
         "gemini-3-pro-low",
         "gemini-3-pro-high",
-        "opus-4.5",
         "opus-4.6",
     ],
     plan: [
         "opus-4.6",
-        "opus-4.5",
         "gemini-3-pro-high",
+        "sonnet-4.6",
         "gemini-3-pro-low",
         "gemini-3-flash",
     ],
 };
 const MODEL_ALIASES = {
-    "gemini-3-flash": ["gemini-3-flash", "gemini flash", "flash"],
-    "gemini-3-pro-low": ["gemini-3-pro-low", "gemini pro low", "pro low"],
-    "gemini-3-pro-high": ["gemini-3-pro-high", "gemini-3-pro", "gemini pro", "pro high"],
+    "gemini-3-flash": ["gemini-3-flash", "gemini 3 flash", "flash"],
+    "gemini-3-pro-low": [
+        "gemini-3-pro-low",
+        "gemini 3.1 pro (low)", // matches actual UI label
+        "gemini 3 pro (low)", // old label variant
+        "3.1 pro (low)",
+        "gemini pro low",
+        "pro low",
+    ],
+    "gemini-3-pro-high": [
+        "gemini-3-pro-high",
+        "gemini 3.1 pro (high)", // matches actual UI label
+        "gemini 3 pro (high)", // old label variant
+        "gemini 3.1 pro",
+        "3.1 pro (high)",
+        "gemini-3-pro",
+        "gemini pro",
+        "pro high",
+    ],
     "opus-4.5": ["opus-4.5", "claude opus 4.5", "opus 4.5"],
-    "opus-4.6": ["opus-4.6", "claude opus 4.6", "opus 4.6"],
+    "opus-4.6": [
+        "opus-4.6",
+        "claude opus 4.6 (thinking)", // matches actual UI label
+        "claude opus 4.6",
+        "opus 4.6",
+    ],
+    "sonnet-4.6": [
+        "sonnet-4.6",
+        "claude sonnet 4.6 (thinking)", // matches actual UI label
+        "claude sonnet 4.6",
+        "sonnet 4.6",
+    ],
+    "gpt-oss-120b": [
+        "gpt-oss-120b",
+        "gpt-oss 120b (medium)", // matches actual UI label
+        "gpt-oss 120b",
+        "gpt oss 120b",
+    ],
 };
 function normalizeMode(input) {
     const value = (input || "").trim().toLowerCase();

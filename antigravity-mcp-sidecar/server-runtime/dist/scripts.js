@@ -62,10 +62,12 @@ export function cleanExtractedResponseText(rawText, prompt) {
 }
 const MODEL_UI_LABELS = {
     "gemini-3-flash": ["Gemini 3 Flash", "Gemini Flash", "Flash"],
-    "gemini-3-pro-low": ["Gemini 3 Pro (Low)", "Gemini Pro Low", "Pro (Low)"],
-    "gemini-3-pro-high": ["Gemini 3 Pro", "Gemini Pro", "Pro (High)", "Pro"],
-    "opus-4.5": ["Claude Opus 4.5", "Opus 4.5", "Claude 4.5"],
-    "opus-4.6": ["Claude Opus 4.6", "Opus 4.6", "Claude Opus"],
+    "gemini-3-pro-low": ["Gemini 3.1 Pro (Low)", "Gemini 3 Pro (Low)", "Pro (Low)"],
+    "gemini-3-pro-high": ["Gemini 3.1 Pro (High)", "Gemini 3.1 Pro", "Gemini 3 Pro", "Pro (High)"],
+    "opus-4.5": ["Claude Opus 4.5", "Opus 4.5"],
+    "opus-4.6": ["Claude Opus 4.6 (Thinking)", "Claude Opus 4.6", "Opus 4.6"],
+    "sonnet-4.6": ["Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6", "Sonnet 4.6"],
+    "gpt-oss-120b": ["GPT-OSS 120B (Medium)", "GPT-OSS 120B", "GPT OSS 120B"],
 };
 function toModeKeyword(mode) {
     const normalized = (mode || "").trim().toLowerCase();
