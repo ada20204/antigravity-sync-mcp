@@ -149,6 +149,9 @@ function buildAiConfigPrompt(params) {
 function normalizePath(rawPath) {
     let p = String(rawPath || '').trim();
     if (!p) return '';
+    // Resolve symlinks and relative segments — must match server-side normalizePathForId.
+    try { p = fs.realpathSync(p); } catch { /* path may not exist locally; fall back to resolve */ }
+    p = path.resolve(p);
     p = p.replace(/\\/g, '/');
     p = p.replace(/^([A-Z]):/, (_, d) => d.toLowerCase() + ':');
     if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
