@@ -74,6 +74,15 @@ export function resolveAntigravityExecutable() {
         ];
         return candidates.find((item) => fileExists(item));
     }
+    if (process.platform === "darwin") {
+        const candidates = [
+            "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
+            "/Applications/Antigravity.app/Contents/MacOS/Electron",
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+            "/Applications/Cursor.app/Contents/MacOS/Cursor",
+        ];
+        return candidates.find((item) => fileExists(item));
+    }
     const linuxCandidates = [
         ...findWindowsExecutableCandidates(),
         "/mnt/c/Program Files/Antigravity/Antigravity.exe",
