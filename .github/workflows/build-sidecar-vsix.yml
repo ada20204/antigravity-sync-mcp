@@ -57,6 +57,8 @@ jobs:
           OUT_VSIX="${VSIX_BASE%-base.vsix}.vsix"
           rm -rf /tmp/ag-vsix-repack && mkdir -p /tmp/ag-vsix-repack
           unzip -q "$VSIX_BASE" -d /tmp/ag-vsix-repack
+          # Prune dev dependencies before injecting into VSIX to reduce size.
+          (cd antigravity-mcp-sidecar && npm prune --omit=dev)
           cp -a antigravity-mcp-sidecar/node_modules /tmp/ag-vsix-repack/extension/node_modules
           (cd /tmp/ag-vsix-repack && zip -qr /tmp/ag-vsix-packed.vsix .)
           mv /tmp/ag-vsix-packed.vsix "$OUT_VSIX"

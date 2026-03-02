@@ -195,6 +195,9 @@ function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
 function normalizePathForId(rawPath: string): string {
     let p = rawPath.trim();
     if (!p) return "";
+    // Resolve relative paths and symlinks before normalizing.
+    try { p = fs.realpathSync(p); } catch { /* path may not exist locally; fall back to resolve */ }
+    p = path.resolve(p);
     p = p.replace(/\\/g, "/");
     p = p.replace(/^([A-Z]):/, (_, d: string) => d.toLowerCase() + ":");
     if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);

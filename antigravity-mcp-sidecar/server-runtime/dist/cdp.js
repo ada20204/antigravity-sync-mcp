@@ -25,6 +25,12 @@ function normalizePathForId(rawPath) {
     let p = rawPath.trim();
     if (!p)
         return "";
+    // Resolve relative paths and symlinks before normalizing.
+    try {
+        p = fs.realpathSync(p);
+    }
+    catch { /* path may not exist locally; fall back to resolve */ }
+    p = path.resolve(p);
     p = p.replace(/\\/g, "/");
     p = p.replace(/^([A-Z]):/, (_, d) => d.toLowerCase() + ":");
     if (p.length > 1 && p.endsWith("/"))
