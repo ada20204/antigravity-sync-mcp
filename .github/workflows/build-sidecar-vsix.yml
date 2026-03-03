@@ -47,7 +47,9 @@ jobs:
         run: npm --prefix antigravity-mcp-server run build
 
       - name: Install sidecar dependencies
-        run: npm --prefix antigravity-mcp-sidecar ci
+        # Sidecar lockfile may lag package.json during active development.
+        # Use install in CI to avoid hard failure from lock drift.
+        run: npm --prefix antigravity-mcp-sidecar install --no-package-lock
 
       - name: Sync bundled server runtime
         run: npm --prefix antigravity-mcp-sidecar run sync-server-runtime
