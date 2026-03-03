@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,6 +34,11 @@ jobs:
           cache-dependency-path: |
             antigravity-mcp-server/package-lock.json
             antigravity-mcp-sidecar/package-lock.json
+
+      - name: Normalize lockfile registry URLs
+        run: |
+          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' antigravity-mcp-server/package-lock.json
+          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' antigravity-mcp-sidecar/package-lock.json
 
       - name: Install server dependencies
         run: npm --prefix antigravity-mcp-server ci
@@ -49,7 +56,8 @@ jobs:
         run: |
           mkdir -p build
           cd antigravity-mcp-sidecar
-          npx -y vsce@2.15.0 package --no-yarn --no-dependencies --allow-missing-repository --out ../build/antigravity-mcp-sidecar-${GITHUB_SHA::7}-base.vsix
+          SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
+          npx -y @vscode/vsce@2.26.1 package --no-yarn --no-dependencies --allow-missing-repository --out ../build/antigravity-mcp-sidecar-${SHORT_SHA}-base.vsix
 
       - name: Inject runtime dependencies into VSIX
         run: |
