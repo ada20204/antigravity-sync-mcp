@@ -54,6 +54,8 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - `Install Bundled MCP Server Launcher`
 - `Show AI MCP Config Prompt`
 
+`Request Host Restart (Remote)` currently requires an external host-bridge transport; if not configured, the command shows guidance only.
+
 ## One VSIX Deployment
 
 After installing sidecar VSIX:
@@ -70,7 +72,7 @@ This lets you configure MCP clients without separately installing `antigravity-m
 
 Use command `Show AI MCP Config Prompt` to output and copy a ready-to-use snippet.
 
-Linux/macOS / WSL MCP client example:
+Linux/macOS MCP client example:
 
 ```json
 {
@@ -100,11 +102,28 @@ Windows recommendation (avoid extra cmd window popup):
 }
 ```
 
+If your MCP client requires shell-style invocation on Windows, this compatibility form also works:
+
+```json
+{
+  "mcpServers": {
+    "antigravity-mcp": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "node",
+        "c:\\Users\\<you>\\.antigravity\\extensions\\antigravity.antigravity-mcp-sidecar-<version>\\server-runtime\\dist\\index.js"
+      ]
+    }
+  }
+}
+```
+
 ## Requirements
 
 Antigravity should run with debug port enabled, typically:
 
-`--remote-debugging-port=9000 --remote-debugging-address=0.0.0.0`
+`--remote-debugging-port=9000 --remote-debugging-address=127.0.0.1`
 
 ## Usage
 
@@ -114,3 +133,9 @@ Antigravity should run with debug port enabled, typically:
 4. Click the status bar item to toggle auto-accept on/off
 5. Use command palette for launch/restart and quota tools
 6. View logs: Output panel → "Antigravity MCP Sidecar"
+
+## SSH Remote Note
+
+- Current build treats sidecar as host-side (`extensionKind: ui`) by default.
+- If MCP server runs on an SSH remote host, it reads that host's local `~/.config/antigravity-mcp/registry.json`.
+- Automatic host↔remote registry bridge is not bundled in this build; configure your own bridge/tunnel if server must run remotely.

@@ -69,6 +69,38 @@ test('discoverCDPDetailed returns entry_not_ready with state when registry entry
   assert.equal(result.error.state, 'app_down');
 });
 
+test('discoverCDPDetailed writes a pending no-cdp prompt request when entry is not ready', async () => {
+  const registryFile = path.join(os.tmpdir(), `ag-mcp-not-ready-prompt-${Date.now()}.json`);
+  const workspacePath = '/tmp/project-not-ready-prompt';
+  const workspaceId = computeWorkspaceId(workspacePath);
+  writeRegistry(registryFile, {
+    [workspacePath]: {
+      schema_version: 2,
+      workspace_id: workspaceId,
+      role: 'host',
+      state: 'app_up_no_cdp',
+      verified_at: Date.now(),
+      ttl_ms: 30_000,
+      local_endpoint: { host: '127.0.0.1', port: 9000, mode: 'direct' },
+    },
+  });
+  process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
+
+  const result = await discoverCDPDetailed(workspacePath);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'entry_not_ready');
+
+  const registryAfter = JSON.parse(fs.readFileSync(registryFile, 'utf-8'));
+  const control = registryAfter.__control__;
+  assert.ok(control && typeof control === 'object');
+  const requests = control.cdp_prompt_requests;
+  assert.ok(requests && typeof requests === 'object');
+  const key = `no_cdp_${workspaceId}`;
+  assert.equal(requests[key].status, 'pending');
+  assert.equal(requests[key].reason_code, 'entry_not_ready');
+  assert.equal(requests[key].workspace_id, workspaceId);
+});
+
 test('discoverCDPDetailed returns entry_stale when verified_at is too old', async () => {
   const registryFile = path.join(os.tmpdir(), `ag-mcp-stale-${Date.now()}.json`);
   const workspacePath = '/tmp/project-stale';
@@ -91,18 +123,18 @@ test('discoverCDPDetailed returns entry_stale when verified_at is too old', asyn
   assert.equal(result.error.code, 'entry_stale');
 });
 
-test('discoverCDPDetailed matches entry by original_workspace_id for WSL mirror', async () => {
+test('discoverCDPDetailed matches entry by original_workspace_id for remote mirror', async () => {
   const registryFile = path.join(os.tmpdir(), `ag-mcp-mirror-${Date.now()}.json`);
-  const wslPath = '/home/elliot/wsl-project';
-  const windowsPath = '/mnt/c/Users/elliot/win-project'; // different path → different workspace_id
-  const wslId = computeWorkspaceId(wslPath);
-  const windowsId = computeWorkspaceId(windowsPath);
-  // Entry has workspace_id=WSL hash, original_workspace_id=Windows hash
+  const remotePath = '/home/remote/dev/project';
+  const hostPath = 'c:/Users/elliot/win-project'; // different path → different workspace_id
+  const remoteId = computeWorkspaceId(remotePath);
+  const hostId = computeWorkspaceId(hostPath);
+  // Entry has workspace_id=remote hash, original_workspace_id=host hash
   writeRegistry(registryFile, {
-    [wslPath]: {
+    [remotePath]: {
       schema_version: 2,
-      workspace_id: wslId,
-      original_workspace_id: windowsId,
+      workspace_id: remoteId,
+      original_workspace_id: hostId,
       role: 'host',
       state: 'ready',
       verified_at: Date.now() - 120_000, // stale so we don't reach network
@@ -112,8 +144,8 @@ test('discoverCDPDetailed matches entry by original_workspace_id for WSL mirror'
   });
   process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
 
-  // Look up using the Windows path (original_workspace_id should match)
-  const result = await discoverCDPDetailed(windowsPath);
+  // Look up using the host path (original_workspace_id should match)
+  const result = await discoverCDPDetailed(hostPath);
   assert.equal(result.ok, false);
   // entry_stale means the entry was FOUND (not workspace_not_found)
   assert.equal(result.error.code, 'entry_stale',

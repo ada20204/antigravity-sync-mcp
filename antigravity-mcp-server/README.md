@@ -57,6 +57,8 @@ Add to your MCP config:
 | `ask-antigravity` | Send a prompt to Antigravity and wait for the AI response. Supports optional `mode` (`fast`/`plan`), `model`, and per-request `targetDir`; server applies quota-aware model fallback. |
 | `antigravity-stop` | Stop the current AI generation in Antigravity. |
 | `ping` | Test connectivity and check CDP availability. |
+| `quota-status` | Query quota status for models/prompt credits. Prefers live LS query and falls back to registry snapshot; also prints policy recommendation preview for model routing. |
+| `launch-antigravity` | Launch Antigravity in a new window with CDP flags and optionally wait for CDP readiness. |
 
 ## Configuration
 

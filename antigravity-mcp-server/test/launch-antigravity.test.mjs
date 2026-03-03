@@ -1,14 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { buildLaunchArgs, resolveLaunchPort } from '../build/dist/launch-antigravity.js';
-
-function isWSL() {
-    try {
-        return readFileSync('/proc/version', 'utf-8').toLowerCase().includes('microsoft');
-    } catch { return false; }
-}
 
 test('buildLaunchArgs includes target directory and new-window semantics', () => {
     const args = buildLaunchArgs({
@@ -49,10 +42,9 @@ test('buildLaunchArgs respects ANTIGRAVITY_CDP_BIND_ADDRESS override', () => {
     }
 });
 
-test('buildLaunchArgs uses 0.0.0.0 in WSL, 127.0.0.1 otherwise', () => {
+test('buildLaunchArgs uses 127.0.0.1 by default', () => {
     delete process.env.ANTIGRAVITY_CDP_BIND_ADDRESS;
     const args = buildLaunchArgs({ targetDir: '/tmp/test', port: 9000 });
     const addrArg = args.find(a => a.startsWith('--remote-debugging-address='));
-    const expected = isWSL() ? '--remote-debugging-address=0.0.0.0' : '--remote-debugging-address=127.0.0.1';
-    assert.equal(addrArg, expected);
+    assert.equal(addrArg, '--remote-debugging-address=127.0.0.1');
 });

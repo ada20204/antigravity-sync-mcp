@@ -5,7 +5,7 @@ Use this with your AI client setup flow:
 1. Ensure sidecar command `Install Bundled MCP Server Launcher` has been run at least once.
 2. Use launcher path in MCP config.
 
-Example config (Linux/macOS / WSL MCP client):
+Example config (Linux/macOS MCP client):
 
 ```json
 {
@@ -25,6 +25,23 @@ Windows recommendation (avoid extra cmd window popups):
     "antigravity-mcp": {
       "command": "node",
       "args": [
+        "c:\\Users\\<you>\\.antigravity\\extensions\\antigravity.antigravity-mcp-sidecar-<version>\\server-runtime\\dist\\index.js"
+      ]
+    }
+  }
+}
+```
+
+Windows compatibility (for MCP clients that require `cmd` wrapping):
+
+```json
+{
+  "mcpServers": {
+    "antigravity-mcp": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "node",
         "c:\\Users\\<you>\\.antigravity\\extensions\\antigravity.antigravity-mcp-sidecar-<version>\\server-runtime\\dist\\index.js"
       ]
     }

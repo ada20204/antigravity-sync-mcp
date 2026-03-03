@@ -5,7 +5,7 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const { exec, spawn } = require('child_process');
-const { createHash, randomBytes } = require('crypto');
+const { createHash } = require('crypto');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const {
@@ -17,7 +17,6 @@ const {
 const {
     NonceCache,
     ensureBridgeToken,
-    signControlRequest,
     verifyControlRequest,
     DEFAULT_MAX_SKEW_MS,
 } = require('./bridge-auth');
@@ -30,8 +29,6 @@ const REGISTRY_SCHEMA_VERSION = 2;
 const REGISTRY_COMPAT_SCHEMA_VERSIONS = [2];
 const REGISTRY_CONTROL_KEY = '__control__';
 const CONTROL_NO_CDP_PROMPT_KEY = 'cdp_prompt_requests';
-const REMOTE_MIRROR_POLL_INTERVAL_MS = 3_000;
-const REMOTE_MIRROR_KEY_PREFIX = '__mirror__';
 const HOST_CONTROL_POLL_INTERVAL_MS = 2_500;
 const QUOTA_POLL_INTERVAL_MS = 60_000;
 const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -179,95 +176,14 @@ function mapCdpStateToRegistryState(state) {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
-// ── Remote mirror helpers (WSL) ───────────────────────────────────────────
-function isWslRuntime() {
-    return process.platform === 'linux' && os.release().toLowerCase().includes('microsoft');
+function resolveRuntimeRole() {
+    const forced = String(process.env.ANTIGRAVITY_SIDECAR_ROLE || '').trim().toLowerCase();
+    if (forced === 'host' || forced === 'remote') return forced;
+    // This extension is UI-kind and runs in the desktop host process.
+    // Treat it as host by default; use ANTIGRAVITY_SIDECAR_ROLE=remote only
+    // when an explicit remote-side deployment is configured.
+    return 'host';
 }
-
-function getWslGatewayIp() {
-    if (!isWslRuntime()) return null;
-    try {
-        const routeFile = '/proc/net/route';
-        if (!fs.existsSync(routeFile)) return null;
-        const content = fs.readFileSync(routeFile, 'utf-8');
-        const lines = content.split(/\r?\n/).filter(Boolean);
-        for (const line of lines.slice(1)) {
-            const parts = line.trim().split(/\s+/);
-            if (parts.length < 3) continue;
-            const dest = parts[1];
-            const gatewayHex = parts[2];
-            if (dest !== '00000000' || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
-            const b1 = parseInt(gatewayHex.slice(6, 8), 16);
-            const b2 = parseInt(gatewayHex.slice(4, 6), 16);
-            const b3 = parseInt(gatewayHex.slice(2, 4), 16);
-            const b4 = parseInt(gatewayHex.slice(0, 2), 16);
-            return `${b1}.${b2}.${b3}.${b4}`;
-        }
-    } catch { }
-    return null;
-}
-
-function findHostRegistryFile() {
-    if (!isWslRuntime()) return null;
-    const usersDir = '/mnt/c/Users';
-    try {
-        if (!fs.existsSync(usersDir)) return null;
-        const users = fs.readdirSync(usersDir, { withFileTypes: true });
-        for (const user of users) {
-            if (!user.isDirectory()) continue;
-            const candidate = path.posix.join(usersDir, user.name, '.config/antigravity-mcp/registry.json');
-            if (fs.existsSync(candidate)) return candidate;
-        }
-    } catch { }
-    return null;
-}
-
-function findHostBridgeTokenFile() {
-    if (!isWslRuntime()) return null;
-    const usersDir = '/mnt/c/Users';
-    try {
-        if (!fs.existsSync(usersDir)) return null;
-        const users = fs.readdirSync(usersDir, { withFileTypes: true });
-        for (const user of users) {
-            if (!user.isDirectory()) continue;
-            const candidate = path.posix.join(usersDir, user.name, '.config/antigravity-mcp/bridge.token');
-            if (fs.existsSync(candidate)) return candidate;
-        }
-    } catch { }
-    return null;
-}
-
-function mirrorHostEntry(hostEntry, wslWorkspacePath, gatewayIp) {
-    if (!hostEntry || hostEntry.role !== 'host') return null;
-    if (!REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(hostEntry.schema_version))) return null;
-    const sourceEndpoint = hostEntry.source_endpoint;
-    if (!sourceEndpoint || !sourceEndpoint.port) return null;
-    const localWorkspaceId = computeWorkspaceId(wslWorkspacePath);
-
-    const mirrorEntry = {
-        ...hostEntry,
-        role: 'remote',
-        workspace_id: localWorkspaceId,
-        original_workspace_id: hostEntry.workspace_id || undefined,
-        workspace_paths: {
-            normalized: normalizePath(wslWorkspacePath),
-            raw: wslWorkspacePath,
-        },
-        local_endpoint: {
-            host: gatewayIp || '127.0.0.1',
-            port: sourceEndpoint.port,
-            mode: 'direct',
-        },
-        quota_meta: hostEntry.quota_meta ? {
-            ...hostEntry.quota_meta,
-            source: 'mirrored',
-        } : undefined,
-        protocol: hostEntry.protocol,
-        last_error: hostEntry.last_error,
-    };
-    return mirrorEntry;
-}
-// ──────────────────────────────────────────────────────────────────────────
 
 let outputChannel;
 let structuredLogger;
@@ -389,8 +305,8 @@ function parsePortCandidates(spec) {
 function trimProbeSummary(summary) {
     if (!Array.isArray(summary)) return [];
     if (summary.length <= CDP_PROBE_SUMMARY_LIMIT) return summary;
-    // Keep first half + last half so early primary-host failures stay visible
-    // alongside the trailing gateway-probe failures.
+    // Keep first half + last half so early failures remain visible together
+    // with the tail of the probe sequence.
     const half = Math.floor(CDP_PROBE_SUMMARY_LIMIT / 2);
     return [...summary.slice(0, half), ...summary.slice(summary.length - half)];
 }
@@ -422,116 +338,6 @@ function summarizeProbePlan(hosts, ports) {
 function shortError(error) {
     const message = error && error.message ? error.message : String(error || 'unknown');
     return message.slice(0, 180);
-}
-
-function inferGatewayIpFromRouteTable(routeTable) {
-    const lines = String(routeTable || '').split(/\r?\n/).filter(Boolean);
-    for (const line of lines.slice(1)) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 3) continue;
-        const destination = parts[1];
-        const gatewayHex = parts[2];
-        if (destination !== '00000000' || !/^[0-9A-Fa-f]{8}$/.test(gatewayHex)) continue;
-
-        const b1 = parseInt(gatewayHex.slice(6, 8), 16);
-        const b2 = parseInt(gatewayHex.slice(4, 6), 16);
-        const b3 = parseInt(gatewayHex.slice(2, 4), 16);
-        const b4 = parseInt(gatewayHex.slice(0, 2), 16);
-        return `${b1}.${b2}.${b3}.${b4}`;
-    }
-    return null;
-}
-
-function isRoutablePrivateHost(ip) {
-    const v = String(ip || '').trim();
-    if (!v) return false;
-    if (v === '127.0.0.1' || v === 'localhost') return true;
-    if (v === '::1') return true;
-
-    const m = v.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (!m) return false;
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT range (often tailscale local)
-    if (a === 169 && b === 254) return true;
-    return false;
-}
-
-function getHostIps(fixedHost) {
-    const ips = ['127.0.0.1', 'localhost'];
-    if (fixedHost && String(fixedHost).trim()) ips.unshift(String(fixedHost).trim());
-
-    const envHosts = []
-        .concat(String(process.env.ANTIGRAVITY_CDP_HOSTS || '').split(','))
-        .concat(String(process.env.ANTIGRAVITY_CDP_HOST || '').split(','))
-        .map((v) => String(v || '').trim())
-        .filter(Boolean);
-    ips.push(...envHosts);
-
-    // In WSL, the Windows host gateway from /proc/net/route is the most stable probe target.
-    try {
-        if (fs.existsSync('/proc/net/route')) {
-            const routeTable = fs.readFileSync('/proc/net/route', 'utf8');
-            const gatewayIp = inferGatewayIpFromRouteTable(routeTable);
-            if (gatewayIp) ips.push(gatewayIp);
-        }
-    } catch { }
-
-    // In some environments the host still appears as nameserver in resolv.conf.
-    try {
-        if (fs.existsSync('/etc/resolv.conf')) {
-            const resolv = fs.readFileSync('/etc/resolv.conf', 'utf8');
-            const matches = [...resolv.matchAll(/^nameserver\s+([\d.]+)/gm)];
-            for (const match of matches) {
-                const candidate = match && match[1] ? match[1] : '';
-                if (isRoutablePrivateHost(candidate)) ips.push(candidate);
-            }
-        }
-    } catch { }
-
-    // Add local interface addresses (useful for Tailscale and non-localhost bindings).
-    try {
-        const interfaces = os.networkInterfaces();
-        for (const rows of Object.values(interfaces)) {
-            for (const row of rows || []) {
-                if (!row || row.family !== 'IPv4' || row.internal) continue;
-                if (isRoutablePrivateHost(row.address)) ips.push(row.address);
-            }
-        }
-    } catch { }
-    return dedupeStrings(ips);
-}
-
-function readRegistryIps(workspacePath) {
-    try {
-        if (!fs.existsSync(REGISTRY_FILE)) return [];
-        const parsed = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
-        if (!parsed || typeof parsed !== 'object') return [];
-
-        const ips = [];
-        const entries = Object.entries(parsed);
-        const normalizedWorkspacePath = String(workspacePath || '').replace(/\\/g, '/');
-
-        for (const [rawKey, value] of entries) {
-            if (!value || typeof value !== 'object') continue;
-            const entryIp = String(value.ip || '').trim();
-            if (!entryIp) continue;
-
-            const normalizedKey = String(rawKey || '').replace(/\\/g, '/');
-            const sameWorkspace = normalizedWorkspacePath && normalizedKey === normalizedWorkspacePath;
-            if (sameWorkspace) {
-                ips.unshift(entryIp); // Prefer exact workspace hit.
-            } else {
-                ips.push(entryIp);
-            }
-        }
-        return dedupeStrings(ips);
-    } catch {
-        return [];
-    }
 }
 
 function readRegistryObject() {
@@ -1091,8 +897,8 @@ async function isAntigravityProcessRunning() {
 
 function buildCdpProbePlan(params) {
     const { workspacePath, fixedHost, fixedPort, portSpec } = params;
-    // The sidecar always runs co-located with Antigravity, so 127.0.0.1 is
-    // sufficient. Avoid probing network interface IPs (WSL bridge, VPN, etc.)
+    // The sidecar should probe loopback by default to avoid stale or unrelated
+    // network-interface addresses that only add timeout cost.
     // and stale registry IPs from other workspaces — they only cause timeouts.
     const baseHosts = ['127.0.0.1', 'localhost'];
     if (fixedHost && String(fixedHost).trim()) baseHosts.unshift(String(fixedHost).trim());
@@ -1136,18 +942,25 @@ function resolveDefaultExecutablePath() {
         return '';
     }
 
-    const candidates = [];
-    const usersRoot = '/mnt/c/Users';
-    try {
-        if (fs.existsSync(usersRoot)) {
-            const users = fs.readdirSync(usersRoot, { withFileTypes: true });
-            for (const user of users) {
-                if (!user.isDirectory()) continue;
-                candidates.push(path.posix.join(usersRoot, user.name, 'AppData/Local/Programs/Antigravity/Antigravity.exe'));
-                candidates.push(path.posix.join(usersRoot, user.name, 'AppData/Local/Programs/Cursor/Cursor.exe'));
-            }
+    if (process.platform === 'darwin') {
+        const candidates = [
+            '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity',
+            '/Applications/Antigravity.app/Contents/MacOS/Electron',
+            '/Applications/Cursor.app/Contents/Resources/app/bin/cursor',
+            '/Applications/Cursor.app/Contents/MacOS/Cursor',
+        ];
+        for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) return candidate;
         }
-    } catch { }
+        return '';
+    }
+
+    const candidates = [
+        '/usr/bin/antigravity',
+        '/usr/local/bin/antigravity',
+        '/usr/bin/cursor',
+        '/usr/local/bin/cursor',
+    ];
     for (const candidate of candidates) {
         if (fs.existsSync(candidate)) return candidate;
     }
@@ -1158,12 +971,17 @@ function psQuote(value) {
     return String(value || '').replace(/'/g, "''");
 }
 
+function resolveCdpBindAddress() {
+    const override = String(process.env.ANTIGRAVITY_CDP_BIND_ADDRESS || '').trim();
+    return override || '127.0.0.1';
+}
+
 function buildLaunchArgsForWorkspace(workspacePath, port, extraArgs) {
     return [
         workspacePath,
         '--new-window',
         `--remote-debugging-port=${port}`,
-        '--remote-debugging-address=0.0.0.0',
+        `--remote-debugging-address=${resolveCdpBindAddress()}`,
         ...extraArgs,
     ];
 }
@@ -1201,8 +1019,9 @@ function launchAntigravityDetached(params) {
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
     context.subscriptions.push(outputChannel);
-    const runtimeRole = isWslRuntime() ? 'remote' : 'host';
+    const runtimeRole = resolveRuntimeRole();
     const nodeId = createNodeId(runtimeRole);
+    const remoteName = String((vscode.env && vscode.env.remoteName) || '').trim();
     let workspaceId = '';
     structuredLogger = createStructuredLogger({
         baseDir: REGISTRY_DIR,
@@ -1216,6 +1035,7 @@ async function activate(context) {
         state: 'activating',
         extra: {
             role: runtimeRole,
+            remote_name: remoteName || 'local',
             node_id: nodeId,
             log_retention_days: LOG_RETENTION_MS / (24 * 60 * 60 * 1000),
         },
@@ -1566,124 +1386,46 @@ async function activate(context) {
         );
     }
 
-    function pickRemoteMirrorEntry(registry) {
-        const values = Object.values(registry || {}).filter(
-            (entry) => entry && typeof entry === 'object' && entry.role === 'remote' && entry.original_workspace_id
-        );
-        if (values.length === 0) return null;
-        const normalizedCurrent = normalizePath(workspacePath);
-        const exact = values.find((entry) =>
-            entry.workspace_paths &&
-            normalizePath(entry.workspace_paths.normalized || entry.workspace_paths.raw) === normalizedCurrent
-        );
-        return exact || values[0];
-    }
-
     async function requestHostRestart(params = {}) {
         const reason = String(params.reason || 'remote_request').slice(0, 200);
-        if (!isWslRuntime()) {
-            warn('Host restart request ignored: not running in remote/WSL mode', {
+        if (runtimeRole !== 'remote') {
+            warn('Host restart request ignored: sidecar is not in remote mode', {
                 plane: 'ctrl',
                 error_code: 'remote_request_not_supported',
             });
             return false;
         }
-        const hostRegistryFile = findHostRegistryFile();
-        if (!hostRegistryFile) {
-            vscode.window.showWarningMessage('Host registry not found. Open Antigravity on host first.');
-            return false;
-        }
-
-        try {
-            const localRegistry = readRegistryObject();
-            const mirror = pickRemoteMirrorEntry(localRegistry);
-            const hostRegistry = JSON.parse(fs.readFileSync(hostRegistryFile, 'utf-8'));
-            const hostEntries = Object.values(hostRegistry)
-                .filter((entry) =>
-                    entry &&
-                    typeof entry === 'object' &&
-                    REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(entry.schema_version)) &&
-                    entry.role === 'host'
-                );
-
-            let targetHostEntry = null;
-            if (mirror && mirror.original_workspace_id) {
-                targetHostEntry = hostEntries.find((entry) => entry.workspace_id === mirror.original_workspace_id) || null;
-            }
-            if (!targetHostEntry && hostEntries.length > 0) {
-                targetHostEntry = hostEntries[0];
-            }
-            if (!targetHostEntry || !targetHostEntry.workspace_id) {
-                vscode.window.showWarningMessage('No host workspace entry available for restart request.');
-                return false;
-            }
-
-            const tokenFile = findHostBridgeTokenFile();
-            const requestToken = tokenFile
-                ? String(fs.readFileSync(tokenFile, 'utf-8') || '').trim()
-                : bridgeToken;
-            const request = {
-                id: `rr_${Date.now()}_${randomBytes(4).toString('hex')}`,
-                workspace_id: targetHostEntry.workspace_id,
-                action: 'restart_antigravity_with_cdp',
-                ts: Date.now(),
-                nonce: randomBytes(12).toString('hex'),
-                from_node_id: nodeId,
-                to_node_id: targetHostEntry.node_id || '',
-                reason,
-            };
-            request.signature = signControlRequest(request, requestToken);
-
-            const control = getControlRecord(hostRegistry);
-            control.restart_requests[request.id] = {
-                ...request,
-                status: 'pending',
-                created_at: Date.now(),
-                updated_at: Date.now(),
-            };
-            hostRegistry[REGISTRY_CONTROL_KEY] = control;
-            fs.writeFileSync(hostRegistryFile, JSON.stringify(hostRegistry, null, 2), 'utf-8');
-
-            log(`Remote restart request submitted (${request.id})`, {
-                plane: 'ctrl',
-                state: 'app_up_no_cdp',
-                extra: { request_id: request.id, host_registry: hostRegistryFile, reason },
-            });
-            vscode.window.showInformationMessage('Host restart request submitted. Please confirm on the host side.');
-            return true;
-        } catch (err) {
-            const message = shortError(err);
-            errorLog(`Failed to submit host restart request: ${message}`, {
-                plane: 'ctrl',
-                error_code: 'remote_restart_request_failed',
-            });
-            vscode.window.showWarningMessage(`Failed to submit host restart request: ${message}`);
-            return false;
-        }
+        warn('Host restart bridge is not configured in this build; request cannot be forwarded automatically', {
+            plane: 'ctrl',
+            error_code: 'remote_restart_bridge_unavailable',
+            extra: { reason },
+        });
+        vscode.window.showInformationMessage(
+            'Remote host restart bridge is not configured. Restart Antigravity on host manually with CDP flags.'
+        );
+        return false;
     }
 
     async function showNoCdpPromptFromServer(request = {}) {
         const platform = process.platform;
         const state = String(request.state || cdpState || 'unknown');
         const code = String(request.reason_code || (cdpLastError && cdpLastError.code) || 'cdp_not_ready');
+        const bindAddress = resolveCdpBindAddress();
         const baseMessage =
             `MCP requested CDP but it is unavailable (state=${state}, code=${code}). ` +
-            'Launch Antigravity with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
+            `Launch Antigravity with --remote-debugging-port=9000 --remote-debugging-address=${bindAddress}.`;
         const actions = ['How to Fix'];
         if (platform === 'win32') actions.unshift('Auto-Fix Shortcut (Windows)');
-        if (runtimeRole === 'remote' && state === 'app_up_no_cdp') actions.unshift('Request Host Restart');
 
         const action = await vscode.window.showWarningMessage(baseMessage, ...actions);
-        if (action === 'Request Host Restart') {
-            await requestHostRestart({ reason: 'server_connect_no_cdp' });
-        } else if (action === 'How to Fix') {
+        if (action === 'How to Fix') {
             const guide = platform === 'linux'
                 ? (runtimeRole === 'remote'
-                    ? 'Remote sidecar cannot cold-start host app. Open Antigravity on host with --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.'
-                    : 'Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0, then retry MCP request.')
+                    ? `Remote sidecar cannot cold-start host app. Open Antigravity on host with --remote-debugging-port=9000 --remote-debugging-address=${bindAddress}.`
+                    : `Launch Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=${bindAddress}, then retry MCP request.`)
                 : platform === 'darwin'
-                    ? 'Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0'
-                    : 'Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=0.0.0.0.';
+                    ? `Open Terminal and run: open -a "Antigravity" --args --remote-debugging-port=9000 --remote-debugging-address=${bindAddress}`
+                    : `Restart Antigravity with: --remote-debugging-port=9000 --remote-debugging-address=${bindAddress}.`;
             await vscode.window.showInformationMessage(guide, { modal: true });
         } else if (action === 'Auto-Fix Shortcut (Windows)') {
             autoFixWindowsShortcut();
@@ -1912,7 +1654,7 @@ async function activate(context) {
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.requestHostRestart', async () => {
         const confirm = await vscode.window.showWarningMessage(
-            'Submit host restart request now? Host side will ask for confirmation before restart.',
+            'Submit host restart request now? This requires a configured host-bridge transport.',
             { modal: true },
             'Submit'
         );
@@ -1923,7 +1665,7 @@ async function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.restartAntigravity', async () => {
         if (runtimeRole === 'remote') {
             const confirm = await vscode.window.showWarningMessage(
-                'Request host restart now? Host side will ask for confirmation before restart.',
+                'Request host restart now? This requires a configured host-bridge transport.',
                 { modal: true },
                 'Request Restart'
             );
@@ -2079,7 +1821,7 @@ async function activate(context) {
             },
             node_id: nodeId,
             role: runtimeRole,
-            source_of_truth: 'host',
+            source_of_truth: runtimeRole === 'host' ? 'host' : 'remote',
             source_endpoint: { host: endpointHost, port: endpointPort },
             local_endpoint: {
                 host: endpointHost,
@@ -2091,7 +1833,7 @@ async function activate(context) {
             ttl_ms: 30000,
             priority: runtimeRole === 'host' ? 100 : 80,
             quota_meta: {
-                source: runtimeRole === 'host' ? 'host' : 'mirrored',
+                source: runtimeRole === 'host' ? 'host' : 'remote',
                 stale: false,
                 refreshed_at: now,
                 refresh_interval_ms: QUOTA_POLL_INTERVAL_MS,
@@ -2335,71 +2077,6 @@ async function activate(context) {
     context.subscriptions.push({
         dispose: () => clearInterval(cdpHeartbeatTimer),
     });
-
-    // ─── Remote Mirror (WSL only) ─────────────────────────────────────
-    // When running inside WSL, poll the Windows host registry file and
-    // write translated mirror entries so the local MCP server can find them.
-    if (isWslRuntime()) {
-        const gatewayIp = getWslGatewayIp();
-        log(`WSL runtime detected. Gateway IP: ${gatewayIp || 'unknown'}. Starting remote mirror polling.`);
-
-        const pollRemoteMirror = () => {
-            try {
-                const hostRegistryFile = findHostRegistryFile();
-                if (!hostRegistryFile) return;
-
-                const hostRegistry = JSON.parse(fs.readFileSync(hostRegistryFile, 'utf-8'));
-                const localRegistry = readRegistryObject();
-
-                let changed = false;
-                // Remove stale mirror entries first
-                for (const key of Object.keys(localRegistry)) {
-                    if (key.startsWith(REMOTE_MIRROR_KEY_PREFIX)) {
-                        const mirrorEntry = localRegistry[key];
-                        // Check if the corresponding host entry still exists
-                        const hostId = mirrorEntry.original_workspace_id || mirrorEntry.workspace_id;
-                        const hostStillExists = Object.values(hostRegistry).some(
-                            (e) =>
-                                REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(e.schema_version)) &&
-                                e.workspace_id === hostId &&
-                                e.role === 'host'
-                        );
-                        if (!hostStillExists) {
-                            delete localRegistry[key];
-                            changed = true;
-                        }
-                    }
-                }
-
-                // Upsert mirror entries for each host entry
-                for (const [, hostEntry] of Object.entries(hostRegistry)) {
-                    if (!REGISTRY_COMPAT_SCHEMA_VERSIONS.includes(Number(hostEntry.schema_version)) || hostEntry.role !== 'host') continue;
-                    const rawPath = hostEntry.workspace_paths && hostEntry.workspace_paths.raw;
-                    if (!rawPath) continue;
-
-                    // Translate Windows path to WSL path for the mirror key
-                    const wslPath = rawPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
-                    const mirrorKey = REMOTE_MIRROR_KEY_PREFIX + (hostEntry.workspace_id || computeWorkspaceId(rawPath));
-                    const mirrored = mirrorHostEntry(hostEntry, wslPath, gatewayIp);
-                    if (!mirrored) continue;
-
-                    localRegistry[mirrorKey] = mirrored;
-                    changed = true;
-                }
-
-                if (changed) {
-                    writeRegistryObject(localRegistry);
-                    log(`Remote mirror updated (${Object.keys(localRegistry).filter(k => k.startsWith(REMOTE_MIRROR_KEY_PREFIX)).length} mirror entries)`);
-                }
-            } catch (e) {
-                // Non-fatal: host registry may not exist yet
-            }
-        };
-
-        pollRemoteMirror();
-        const mirrorTimer = setInterval(pollRemoteMirror, REMOTE_MIRROR_POLL_INTERVAL_MS);
-        context.subscriptions.push({ dispose: () => clearInterval(mirrorTimer) });
-    }
 
     syncState();
 

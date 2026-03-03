@@ -30,6 +30,7 @@ export interface RegistryQuotaModel {
     remainingFraction?: number;
     remainingPercentage?: number;
     isExhausted?: boolean;
+    isSelected?: boolean;
     resetTime?: string;
     resetInMs?: number;
 }
@@ -43,6 +44,7 @@ export interface RegistryQuotaSnapshot {
         remainingPercentage?: number;
     };
     models?: RegistryQuotaModel[];
+    activeModelId?: string;
     lastError?: string;
 }
 export interface RegistryLsEndpoint {

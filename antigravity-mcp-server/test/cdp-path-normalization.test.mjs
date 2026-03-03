@@ -26,16 +26,14 @@ test('computeWorkspaceId produces 16-character hex string', () => {
   assert.match(id, /^[0-9a-f]+$/);
 });
 
-// WSL mirror workspace_id matching tests
-test('WSL path produces different workspace_id than Windows path', () => {
+test('Different normalized path roots produce different workspace_id', () => {
   const windowsPath = 'c:/Users/elliot/workspace';
-  const wslPath = '/mnt/c/Users/elliot/workspace';
+  const remotePath = '/home/elliot/workspace';
 
   const windowsId = computeWorkspaceId(windowsPath);
-  const wslId = computeWorkspaceId(wslPath);
+  const remoteId = computeWorkspaceId(remotePath);
 
-  // They should be different because the normalized paths are different
-  assert.notEqual(windowsId, wslId);
+  assert.notEqual(windowsId, remoteId);
 });
 
 test('Same normalized path produces same workspace_id', () => {

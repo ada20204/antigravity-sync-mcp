@@ -48,6 +48,11 @@ import {
     withTimeout,
 } from "./task-runtime.js";
 import { selectModelWithQuotaPolicy } from "./quota-policy.js";
+import {
+    fetchLiveQuotaSnapshot,
+    formatQuotaReport,
+    summarizeQuota,
+} from "./quota-query.js";
 import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
 import { launchAntigravityForWorkspace } from "./launch-antigravity.js";
 
@@ -197,6 +202,36 @@ const TOOLS: Tool[] = [
                 message: {
                     type: "string",
                     description: "Optional message to echo back",
+                },
+            },
+        },
+    },
+    {
+        name: "quota-status",
+        description:
+            "Query Antigravity model quota status. Prefer live LS query, with registry snapshot fallback. " +
+            "Use this before model/account routing decisions.",
+        inputSchema: {
+            type: "object" as const,
+            properties: {
+                targetDir: {
+                    type: "string",
+                    description:
+                        "Optional workspace directory path used to locate the registry/CDP entry. " +
+                        "If omitted, uses --target-dir from server startup.",
+                },
+                live: {
+                    type: "boolean",
+                    description:
+                        "If true (default), query LS live via GetUserStatus. If false, use registry snapshot only.",
+                },
+                mode: {
+                    type: "string",
+                    description: "Optional policy mode hint for recommendation preview: fast or plan.",
+                },
+                requestedModel: {
+                    type: "string",
+                    description: "Optional preferred model to include in recommendation preview.",
                 },
             },
         },
@@ -645,6 +680,61 @@ async function handleLaunchAntigravity(params: {
     return lines.join("\n");
 }
 
+async function handleQuotaStatus(params: {
+    targetDir?: string;
+    live?: boolean;
+    mode?: string;
+    requestedModel?: string;
+}): Promise<string> {
+    const targetDir = params.targetDir || globalTargetDir;
+    const discoveredResult = await discoverCDPDetailed(targetDir);
+    if (!discoveredResult.ok || !discoveredResult.discovered) {
+        return `Quota status unavailable: ${formatDiscoverError(discoveredResult.error)}`;
+    }
+
+    const discovered = discoveredResult.discovered;
+    let source = "registry_snapshot";
+    let quota = discovered.registry?.quota;
+    let liveError: string | undefined;
+
+    if (params.live !== false) {
+        try {
+            quota = await withTimeout(fetchLiveQuotaSnapshot(discovered), 10000, "fetchLiveQuotaSnapshot");
+            source = "live_ls";
+        } catch (error) {
+            liveError = toErrorMessage(error);
+            source = "registry_snapshot_fallback";
+        }
+    }
+
+    const lines = [formatQuotaReport({ quota, source, targetDir, liveError })];
+    if (quota) {
+        const selection = selectModelWithQuotaPolicy({
+            mode: params.mode,
+            requestedModel: params.requestedModel,
+            quota,
+        });
+        const summary = summarizeQuota(quota);
+        lines.push("");
+        lines.push(
+            `policyRecommendation: mode=${selection.mode}, selected=${selection.selectedModel}, staleQuota=${selection.staleQuota}`
+        );
+        lines.push(`policyChain: ${selection.chain.join(" -> ")}`);
+        if (selection.skipped.length > 0) {
+            lines.push(
+                `policySkipped: ${selection.skipped.map((item) => `${item.model}:${item.reason}`).join(", ")}`
+            );
+        }
+        if (summary) {
+            lines.push(
+                `watchSignals: active=${summary.activeModelName || "unknown"}:${summary.activeModelRemaining ?? "n/a"} ` +
+                `prompt=${summary.promptRemaining ?? "n/a"} lowest=${summary.minModelRemaining ?? "n/a"}`
+            );
+        }
+    }
+    return lines.join("\n");
+}
+
 // --- Parse CLI Args ---
 const argvTargetDirIndex = process.argv.indexOf("--target-dir");
 const globalTargetDir = argvTargetDirIndex !== -1 ? process.argv[argvTargetDirIndex + 1] : undefined;
@@ -693,6 +783,15 @@ server.setRequestHandler(
 
                 case "ping":
                     resultText = await handlePing(args.message, globalTargetDir);
+                    break;
+
+                case "quota-status":
+                    resultText = await handleQuotaStatus({
+                        targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
+                        live: typeof args.live === "boolean" ? args.live : true,
+                        mode: typeof args.mode === "string" ? args.mode : undefined,
+                        requestedModel: typeof args.requestedModel === "string" ? args.requestedModel : undefined,
+                    });
                     break;
 
                 case "launch-antigravity":

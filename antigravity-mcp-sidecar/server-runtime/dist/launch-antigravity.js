@@ -1,25 +1,12 @@
 import { spawn } from "child_process";
-import fs, { readFileSync } from "fs";
+import fs from "fs";
 import path from "path";
 const DEFAULT_PORT = 9000;
-function isWslRuntime() {
-    if (process.platform !== "linux")
-        return false;
-    try {
-        const v = readFileSync("/proc/version", "utf-8");
-        return v.toLowerCase().includes("microsoft");
-    }
-    catch {
-        return false;
-    }
-}
 function resolveCdpBindAddress() {
     const override = process.env.ANTIGRAVITY_CDP_BIND_ADDRESS?.trim();
     if (override)
         return override;
-    // WSL needs 0.0.0.0 so the Windows gateway IP can reach CDP.
-    // All other platforms restrict to localhost only.
-    return isWslRuntime() ? "0.0.0.0" : "127.0.0.1";
+    return "127.0.0.1";
 }
 function parsePort(value) {
     if (!value)
@@ -36,25 +23,6 @@ function fileExists(filePath) {
     catch {
         return false;
     }
-}
-function findWindowsExecutableCandidates() {
-    const candidates = [];
-    const usersRoot = "/mnt/c/Users";
-    if (!fileExists(usersRoot))
-        return candidates;
-    try {
-        const users = fs.readdirSync(usersRoot, { withFileTypes: true });
-        for (const user of users) {
-            if (!user.isDirectory())
-                continue;
-            candidates.push(path.posix.join(usersRoot, user.name, "AppData/Local/Programs/Antigravity/Antigravity.exe"));
-            candidates.push(path.posix.join(usersRoot, user.name, "AppData/Local/Programs/Cursor/Cursor.exe"));
-        }
-    }
-    catch {
-        // best effort
-    }
-    return candidates;
 }
 export function resolveLaunchPort() {
     return (parsePort(process.env.ANTIGRAVITY_LAUNCH_PORT) ??
@@ -84,8 +52,10 @@ export function resolveAntigravityExecutable() {
         return candidates.find((item) => fileExists(item));
     }
     const linuxCandidates = [
-        ...findWindowsExecutableCandidates(),
-        "/mnt/c/Program Files/Antigravity/Antigravity.exe",
+        "/usr/bin/antigravity",
+        "/usr/local/bin/antigravity",
+        "/usr/bin/cursor",
+        "/usr/local/bin/cursor",
     ];
     return linuxCandidates.find((item) => fileExists(item));
 }
