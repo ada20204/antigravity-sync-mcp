@@ -1091,10 +1091,19 @@ async function isAntigravityProcessRunning() {
 
 function buildCdpProbePlan(params) {
     const { workspacePath, fixedHost, fixedPort, portSpec } = params;
-    const allHosts = dedupeStrings([
-        ...readRegistryIps(workspacePath),
-        ...getHostIps(fixedHost),
-    ]);
+    // The sidecar always runs co-located with Antigravity, so 127.0.0.1 is
+    // sufficient. Avoid probing network interface IPs (WSL bridge, VPN, etc.)
+    // and stale registry IPs from other workspaces — they only cause timeouts.
+    const baseHosts = ['127.0.0.1', 'localhost'];
+    if (fixedHost && String(fixedHost).trim()) baseHosts.unshift(String(fixedHost).trim());
+    // Allow explicit multi-host override via env var for unusual remote setups.
+    const envHosts = []
+        .concat(String(process.env.ANTIGRAVITY_CDP_HOSTS || '').split(','))
+        .concat(String(process.env.ANTIGRAVITY_CDP_HOST || '').split(','))
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+    baseHosts.push(...envHosts);
+    const allHosts = dedupeStrings(baseHosts);
     const hosts = allHosts.slice(0, CDP_MAX_HOSTS);
 
     const parsedPorts = parsePortCandidates(portSpec || DEFAULT_CDP_PORT_SPEC);
