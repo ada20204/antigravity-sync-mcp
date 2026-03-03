@@ -111,11 +111,46 @@ export async function launchAntigravityForWorkspace(params) {
         port,
     });
     try {
-        const child = spawn(executable, args, {
-            detached: true,
-            stdio: "ignore",
-            shell: false,
-        });
+        let child;
+        // On macOS, use 'open' command for .app bundles to ensure proper initialization
+        if (process.platform === "darwin" && executable.endsWith(".app")) {
+            // Extract app name from path (e.g., "/Applications/Antigravity.app" -> "Antigravity")
+            const appName = path.basename(executable, ".app");
+            child = spawn("open", ["-a", appName, "--args", ...args], {
+                detached: true,
+                stdio: "ignore",
+                shell: false,
+            });
+        }
+        else if (process.platform === "darwin" && executable.includes(".app/Contents/")) {
+            // If executable points inside .app bundle, extract the .app path and use 'open'
+            const appMatch = executable.match(/^(.+\.app)\//);
+            if (appMatch) {
+                const appPath = appMatch[1];
+                const appName = path.basename(appPath, ".app");
+                child = spawn("open", ["-a", appName, "--args", ...args], {
+                    detached: true,
+                    stdio: "ignore",
+                    shell: false,
+                });
+            }
+            else {
+                // Fallback to direct execution
+                child = spawn(executable, args, {
+                    detached: true,
+                    stdio: "ignore",
+                    shell: false,
+                });
+            }
+        }
+        else {
+            // Windows/Linux: direct execution
+            child = spawn(executable, args, {
+                detached: true,
+                stdio: "ignore",
+                shell: false,
+            });
+        }
         child.unref();
         params.log?.(`Launched Antigravity: executable='${executable}', port=${port}, targetDir='${params.targetDir}'`);
         return { started: true, executable, port, killed };
