@@ -74,18 +74,40 @@ export function buildLaunchArgs(params) {
     return args;
 }
 async function killExistingAntigravity(executablePath, log) {
-    if (process.platform !== "win32")
-        return 0;
-    const exeName = path.win32.basename(executablePath);
+    const { execSync } = await import("child_process");
+    if (process.platform === "win32") {
+        const exeName = path.win32.basename(executablePath);
+        try {
+            const out = execSync(`taskkill /IM "${exeName}" /F /T`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+            const killed = (out.match(/SUCCESS/gi) || []).length;
+            log?.(`Killed ${killed} existing ${exeName} process(es)`);
+            return killed;
+        }
+        catch {
+            return 0;
+        }
+    }
+    if (process.platform === "darwin") {
+        // On macOS, kill by app name (e.g., "Antigravity" or "Cursor")
+        const appName = executablePath.includes("Antigravity") ? "Antigravity" : "Cursor";
+        try {
+            const out = execSync(`pkill -9 -i "${appName}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+            log?.(`Killed existing ${appName} process(es)`);
+            // pkill doesn't output count, assume success means at least 1
+            return 1;
+        }
+        catch {
+            return 0;
+        }
+    }
+    // Linux: kill by process name
+    const processName = path.basename(executablePath);
     try {
-        const { execSync } = await import("child_process");
-        const out = execSync(`taskkill /IM "${exeName}" /F /T`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-        const killed = (out.match(/SUCCESS/gi) || []).length;
-        log?.(`Killed ${killed} existing ${exeName} process(es)`);
-        return killed;
+        const out = execSync(`pkill -9 "${processName}"`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        log?.(`Killed existing ${processName} process(es)`);
+        return 1;
     }
     catch {
-        // No existing process — that's fine
         return 0;
     }
 }
