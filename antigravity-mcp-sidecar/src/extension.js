@@ -35,7 +35,7 @@ const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CDP_PROBE_TIMEOUT_MS = 250;
 const CDP_MAX_HOSTS = 8;
 const CDP_PROBE_SUMMARY_LIMIT = 40;
-const DEFAULT_CDP_PORT_SPEC = '9000-9014,8997-9003,9229,7800-7850';
+const DEFAULT_CDP_PORT_SPEC = '9000-9014';
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
@@ -923,6 +923,33 @@ function buildCdpProbePlan(params) {
     return { hosts, ports };
 }
 
+/**
+ * Scan registry for occupied CDP ports and return the lowest available port
+ * in portRange. Falls back to portRange[0] if all ports are exhausted.
+ * @param {object} registry - registry object (may be null/undefined)
+ * @param {[number, number]} portRange - [lo, hi] inclusive
+ * @returns {number} allocated port
+ */
+function allocateFreeCdpPort(registry, portRange) {
+    const lo = portRange ? portRange[0] : 9000;
+    const hi = portRange ? portRange[1] : 9014;
+    const occupied = new Set();
+    try {
+        for (const [key, entry] of Object.entries(registry || {})) {
+            if (key.startsWith('__')) continue;
+            const port = entry && entry.local_endpoint && Number(entry.local_endpoint.port);
+            if (Number.isFinite(port) && port > 0) occupied.add(port);
+        }
+    } catch (_) {
+        // registry read failure — fall through to return lo
+    }
+    for (let port = lo; port <= hi; port++) {
+        if (!occupied.has(port)) return port;
+    }
+    // All ports exhausted — fall back to first port
+    return lo;
+}
+
 function splitArgs(raw) {
     const source = String(raw || '').trim();
     if (!source) return [];
@@ -1324,8 +1351,14 @@ async function activate(context) {
             return;
         }
 
-        const selectedPort = cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort;
-        const launchArgs = buildLaunchArgsForWorkspace(workspacePath, selectedPort, antigravityLaunchExtraArgs);
+        const registry = readRegistryObject() || {};
+        const allocatedPort = cdpFixedPort > 0
+            ? cdpFixedPort
+            : allocateFreeCdpPort(registry, [9000, 9014]);
+        if (cdpFixedPort <= 0 && allocatedPort === 9000 && Object.keys(registry).filter(k => !k.startsWith('__')).length >= 15) {
+            log('All CDP ports (9000-9014) occupied, falling back to 9000', { plane: 'ctrl', state: 'warn' });
+        }
+        const launchArgs = buildLaunchArgsForWorkspace(workspacePath, allocatedPort, antigravityLaunchExtraArgs);
         try {
             launchAntigravityDetached({
                 executable: antigravityExecutablePath,
@@ -1333,11 +1366,11 @@ async function activate(context) {
                 restart: action === 'restart',
             });
             log(
-                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${selectedPort} workspace=${workspacePath}`,
+                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${allocatedPort} workspace=${workspacePath}`,
                 {
                     plane: 'ctrl',
                     state: 'launching',
-                    extra: { action, trigger, selected_port: selectedPort },
+                    extra: { action, trigger, allocated_port: allocatedPort },
                 }
             );
         } catch (error) {
@@ -2172,5 +2205,10 @@ function deactivate() {
 
 module.exports = {
     activate,
-    deactivate
+    deactivate,
+    // Exported for unit testing only
+    _testExports: {
+        allocateFreeCdpPort,
+        parsePortCandidates,
+    },
 };
