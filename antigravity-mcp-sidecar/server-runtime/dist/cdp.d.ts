@@ -137,8 +137,10 @@ export interface DiscoveredCDP {
     ip: string;
     target: CDPTarget;
     registry?: RegistryEntry;
+    matchMode: "exact" | "auto_fallback";
+    workspaceKey: string;
 }
-export type DiscoverErrorCode = "registry_missing" | "workspace_not_found" | "schema_mismatch" | "entry_not_ready" | "entry_stale" | "endpoint_missing" | "endpoint_unreachable" | "cdp_target_not_found" | "invalid_env_port";
+export type DiscoverErrorCode = "registry_missing" | "no_workspace_ever_opened" | "workspace_not_found" | "schema_mismatch" | "entry_not_ready" | "entry_stale" | "endpoint_missing" | "endpoint_unreachable" | "cdp_target_not_found" | "invalid_env_port";
 export interface DiscoverCDPError {
     code: DiscoverErrorCode;
     message: string;
@@ -151,13 +153,18 @@ export interface DiscoverCDPResult {
     discovered?: DiscoveredCDP;
     error?: DiscoverCDPError;
 }
+export interface DiscoverCDPOptions {
+    exactWorkspaceOnly?: boolean;
+}
 export declare function computeWorkspaceId(rawPath: string): string;
-export declare function discoverCDPDetailed(targetDir?: string): Promise<DiscoverCDPResult>;
+export declare function discoverCDPDetailed(targetDir?: string, options?: DiscoverCDPOptions): Promise<DiscoverCDPResult>;
 export declare function discoverCDP(targetDir?: string): Promise<{
     port: number;
     ip: string;
     target: CDPTarget;
     registry?: RegistryEntry;
+    matchMode: "exact" | "auto_fallback";
+    workspaceKey: string;
 } | null>;
 export declare function connectCDP(wsUrl: string): Promise<CDPConnection>;
 export declare function evaluateInAllContexts(cdp: CDPConnection, expression: string, awaitPromise?: boolean): Promise<any>;

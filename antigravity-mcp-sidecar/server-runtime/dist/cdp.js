@@ -120,6 +120,9 @@ function listRegistryEntries(registry) {
         .filter(([key, value]) => !key.startsWith("__") && !!value && typeof value === "object")
         .map(([, value]) => value);
 }
+function computeWorkspaceKey(entry, ip, port) {
+    return entry?.workspace_id ?? entry?.original_workspace_id ?? `${ip}:${port}`;
+}
 function rankRegistryEntries(entries) {
     return [...entries].sort((a, b) => {
         const readyScore = (x) => (x.state === READY_STATE ? 1 : 0);
@@ -164,7 +167,8 @@ async function resolveTargetFromEndpoint(ip, port) {
         !t.url?.includes("jetski"));
     return workbench || fallbackPage || null;
 }
-export async function discoverCDPDetailed(targetDir) {
+export async function discoverCDPDetailed(targetDir, options = {}) {
+    const { exactWorkspaceOnly = false } = options;
     const targetId = targetDir ? computeWorkspaceId(path.resolve(targetDir)) : undefined;
     const registryFile = getRegistryFilePath();
     const envPortRaw = process.env.ANTIGRAVITY_CDP_PORT;
@@ -180,13 +184,17 @@ export async function discoverCDPDetailed(targetDir) {
             if (!target) {
                 return discoverError("cdp_target_not_found", `No CDP page target on ${envHost}:${envPort}`);
             }
+            const discovered = {
+                ip: envHost,
+                port: envPort,
+                target,
+                matchMode: "auto_fallback",
+                workspaceKey: `${envHost}:${envPort}`,
+            };
+            console.error(`[CDP] discovery success: matchMode=${discovered.matchMode} workspaceKey=${discovered.workspaceKey}`);
             return {
                 ok: true,
-                discovered: {
-                    ip: envHost,
-                    port: envPort,
-                    target,
-                },
+                discovered,
             };
         }
         catch (error) {
@@ -195,36 +203,47 @@ export async function discoverCDPDetailed(targetDir) {
             });
         }
     }
+    if (!fs.existsSync(registryFile)) {
+        return discoverError("no_workspace_ever_opened", `Registry not found: ${registryFile}`, {
+            workspaceId: targetId,
+        });
+    }
     const registry = readRegistryObject();
     if (!registry) {
-        return discoverError("registry_missing", `Registry not found: ${registryFile}`, {
+        return discoverError("registry_missing", `Registry could not be read: ${registryFile}`, {
             workspaceId: targetId,
         });
     }
     const entries = listRegistryEntries(registry);
     if (entries.length === 0) {
-        return discoverError("workspace_not_found", "Registry has no workspace entries", {
+        return discoverError("no_workspace_ever_opened", "Registry has no workspace entries", {
             workspaceId: targetId,
         });
     }
-    const scoped = targetId
-        ? entries.filter((entry) => entry.workspace_id === targetId ||
-            entry.original_workspace_id === targetId)
-        : entries;
-    if (scoped.length === 0) {
-        return discoverError("workspace_not_found", `No registry entry matched workspace id ${targetId}`, {
-            workspaceId: targetId,
-        });
-    }
-    const withSupportedSchema = scoped.filter((entry) => entrySupportsSchema(entry));
+    const withSupportedSchema = entries.filter((entry) => entrySupportsSchema(entry));
     if (withSupportedSchema.length === 0) {
-        const seenSchemas = [...new Set(scoped.map((entry) => Number(entry.schema_version)))].filter((n) => Number.isFinite(n));
+        const seenSchemas = [...new Set(entries.map((entry) => Number(entry.schema_version)))].filter((n) => Number.isFinite(n));
         return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${SUPPORTED_SCHEMA_VERSIONS.join(",")})`, {
             workspaceId: targetId,
             details: { seen_schema_versions: seenSchemas },
         });
     }
-    const ranked = rankRegistryEntries(withSupportedSchema);
+    const exactMatches = targetId
+        ? withSupportedSchema.filter((entry) => entry.workspace_id === targetId ||
+            entry.original_workspace_id === targetId)
+        : [];
+    let matchMode = "auto_fallback";
+    let discoveryPool = withSupportedSchema;
+    if (targetId && exactMatches.length > 0) {
+        matchMode = "exact";
+        discoveryPool = exactMatches;
+    }
+    else if (targetId && exactWorkspaceOnly) {
+        return discoverError("workspace_not_found", `No registry entry matched workspace id ${targetId}`, {
+            workspaceId: targetId,
+        });
+    }
+    const ranked = rankRegistryEntries(discoveryPool);
     const matched = ranked[0];
     if (!matched) {
         return discoverError("workspace_not_found", "No usable registry entry found after ranking", {
@@ -292,14 +311,18 @@ export async function discoverCDPDetailed(targetDir) {
                 state: matched.state,
             });
         }
+        const discovered = {
+            ip,
+            port,
+            target,
+            registry: matched,
+            matchMode,
+            workspaceKey: computeWorkspaceKey(matched, ip, port),
+        };
+        console.error(`[CDP] discovery success: matchMode=${discovered.matchMode} workspaceKey=${discovered.workspaceKey}`);
         return {
             ok: true,
-            discovered: {
-                ip,
-                port,
-                target,
-                registry: matched,
-            },
+            discovered,
         };
     }
     catch (error) {

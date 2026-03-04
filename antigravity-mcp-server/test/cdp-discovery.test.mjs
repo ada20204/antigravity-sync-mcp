@@ -13,15 +13,46 @@ function writeRegistry(filePath, payload) {
 
 test.after(() => {
   delete process.env.ANTIGRAVITY_REGISTRY_FILE;
+  delete globalThis.fetch;
 });
 
-test('discoverCDPDetailed returns registry_missing when registry file does not exist', async () => {
+function mockCdpListFetch() {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    async json() {
+      return [
+        {
+          id: 'target-1',
+          title: 'Antigravity',
+          url: 'file:///workbench.html',
+          webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/1',
+          type: 'page',
+        },
+      ];
+    },
+  });
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+test('discoverCDPDetailed returns no_workspace_ever_opened when registry file does not exist', async () => {
   const missing = path.join(os.tmpdir(), `ag-mcp-missing-${Date.now()}.json`);
   process.env.ANTIGRAVITY_REGISTRY_FILE = missing;
 
   const result = await discoverCDPDetailed('/tmp/does-not-matter');
   assert.equal(result.ok, false);
-  assert.equal(result.error.code, 'registry_missing');
+  assert.equal(result.error.code, 'no_workspace_ever_opened');
+});
+
+test('discoverCDPDetailed returns no_workspace_ever_opened for empty registry entries', async () => {
+  const registryFile = path.join(os.tmpdir(), `ag-mcp-empty-${Date.now()}.json`);
+  writeRegistry(registryFile, { __control__: { ping: true } });
+  process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
+
+  const result = await discoverCDPDetailed('/tmp/any');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'no_workspace_ever_opened');
 });
 
 test('discoverCDPDetailed returns schema_mismatch for unsupported schema_version', async () => {
@@ -150,4 +181,85 @@ test('discoverCDPDetailed matches entry by original_workspace_id for remote mirr
   // entry_stale means the entry was FOUND (not workspace_not_found)
   assert.equal(result.error.code, 'entry_stale',
     `expected entry_stale but got ${result.error.code}: ${result.error.message}`);
+});
+
+test('discoverCDPDetailed falls back to best ready entry when targetDir mismatches', async () => {
+  const restoreFetch = mockCdpListFetch();
+  const registryFile = path.join(os.tmpdir(), `ag-mcp-fallback-${Date.now()}.json`);
+  const readyPath = '/tmp/project-ready-a';
+  const readyId = computeWorkspaceId(readyPath);
+  writeRegistry(registryFile, {
+    [readyPath]: {
+      schema_version: 2,
+      workspace_id: readyId,
+      role: 'host',
+      state: 'ready',
+      verified_at: Date.now(),
+      ttl_ms: 30_000,
+      priority: 10,
+      local_endpoint: { host: '127.0.0.1', port: 9222, mode: 'direct' },
+    },
+  });
+  process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
+
+  const result = await discoverCDPDetailed('/tmp/non-matching-workspace');
+  restoreFetch();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.discovered.matchMode, 'auto_fallback');
+  assert.equal(result.discovered.workspaceKey, readyId);
+});
+
+test('discoverCDPDetailed without targetDir selects best ready entry via auto_fallback', async () => {
+  const restoreFetch = mockCdpListFetch();
+  const registryFile = path.join(os.tmpdir(), `ag-mcp-no-target-${Date.now()}.json`);
+  const readyPath = '/tmp/project-ready-b';
+  const readyId = computeWorkspaceId(readyPath);
+  writeRegistry(registryFile, {
+    [readyPath]: {
+      schema_version: 2,
+      workspace_id: readyId,
+      role: 'host',
+      state: 'ready',
+      verified_at: Date.now(),
+      ttl_ms: 30_000,
+      priority: 7,
+      local_endpoint: { host: '127.0.0.1', port: 9222, mode: 'direct' },
+    },
+  });
+  process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
+
+  const result = await discoverCDPDetailed(undefined);
+  restoreFetch();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.discovered.matchMode, 'auto_fallback');
+  assert.equal(result.discovered.workspaceKey, readyId);
+});
+
+test('discoverCDPDetailed with exact match sets matchMode=exact', async () => {
+  const restoreFetch = mockCdpListFetch();
+  const registryFile = path.join(os.tmpdir(), `ag-mcp-exact-${Date.now()}.json`);
+  const workspacePath = '/tmp/project-exact';
+  const workspaceId = computeWorkspaceId(workspacePath);
+  writeRegistry(registryFile, {
+    [workspacePath]: {
+      schema_version: 2,
+      workspace_id: workspaceId,
+      role: 'host',
+      state: 'ready',
+      verified_at: Date.now(),
+      ttl_ms: 30_000,
+      priority: 1,
+      local_endpoint: { host: '127.0.0.1', port: 9222, mode: 'direct' },
+    },
+  });
+  process.env.ANTIGRAVITY_REGISTRY_FILE = registryFile;
+
+  const result = await discoverCDPDetailed(workspacePath);
+  restoreFetch();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.discovered.matchMode, 'exact');
+  assert.equal(result.discovered.workspaceKey, workspaceId);
 });

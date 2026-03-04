@@ -10,10 +10,14 @@
  * - OmniAntigravityRemoteChat (CDP Discovery + DOM Injection)
  * - auto-accept-agent (Auto-click confirmation dialogs)
  */
+import fs from "fs";
+import path from "path";
+import os from "os";
+import { pathToFileURL } from "url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-import { discoverCDP, discoverCDPDetailed, connectCDP, } from "./cdp.js";
+import { computeWorkspaceId, discoverCDP, discoverCDPDetailed, connectCDP, } from "./cdp.js";
 import { applyModeAndModelSelection, injectMessage, pollCompletionStatus, extractLatestResponse, stopGeneration, } from "./scripts.js";
 import { createAskTask, incrementTaskAttempt, isTaskTerminal, RetryableError, transitionAskTask, withRetry, withTimeout, } from "./task-runtime.js";
 import { selectModelWithQuotaPolicy } from "./quota-policy.js";
@@ -32,7 +36,12 @@ const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
 const VERSION = "0.1.2";
-let activeAskTask = null;
+const activeAskTasks = new Map();
+const activeWorkspaceRoutes = new Map();
+const REGISTRY_FILE = path.join(os.homedir(), ".config/antigravity-mcp/registry.json");
+const SUPPORTED_SCHEMA_VERSIONS = [2];
+const NO_WORKSPACE_GUIDANCE = "No Antigravity workspace is open yet. Open Antigravity, open your workspace folder, " +
+    "complete first-time authorization, then retry ask-antigravity.";
 // --- Logging ---
 function log(msg) {
     const ts = new Date().toISOString().split("T")[1].split(".")[0];
@@ -61,6 +70,55 @@ function uniqueStrings(items) {
         out.push(value);
     }
     return out;
+}
+function entrySupportsSchema(entry) {
+    const declared = new Set();
+    if (Number.isFinite(Number(entry.schema_version))) {
+        declared.add(Number(entry.schema_version));
+    }
+    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
+        for (const raw of entry.protocol.compatible_schema_versions) {
+            const version = Number(raw);
+            if (Number.isFinite(version))
+                declared.add(version);
+        }
+    }
+    if (declared.size === 0)
+        return false;
+    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
+}
+function readRegistryObjectFromDisk() {
+    const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || REGISTRY_FILE;
+    try {
+        if (!fs.existsSync(registryFile))
+            return null;
+        const parsed = JSON.parse(fs.readFileSync(registryFile, "utf-8"));
+        return parsed && typeof parsed === "object" ? parsed : null;
+    }
+    catch {
+        return null;
+    }
+}
+function summarizeQuotaForWorkspace(quota) {
+    if (!quota)
+        return undefined;
+    const modelCount = Array.isArray(quota.models) ? quota.models.length : 0;
+    const promptRemaining = quota.promptCredits?.remainingPercentage;
+    return `models=${modelCount}, promptRemaining=${promptRemaining ?? "n/a"}`;
+}
+function claimWorkspaceTask(workspaceKey, task) {
+    const activeForWorkspace = activeAskTasks.get(workspaceKey);
+    if (activeForWorkspace && !isTaskTerminal(activeForWorkspace.status)) {
+        throw new Error(`ask-antigravity already running for workspace ${workspaceKey} ` +
+            `(active task id=${activeForWorkspace.id}, status=${activeForWorkspace.status}).`);
+    }
+    activeAskTasks.set(workspaceKey, task);
+}
+function shouldAttemptColdStartLaunch(launchAttempted, errorCode) {
+    return (!launchAttempted &&
+        errorCode !== "schema_mismatch" &&
+        errorCode !== "invalid_env_port" &&
+        errorCode !== "no_workspace_ever_opened");
 }
 function formatDiscoverError(error) {
     const payload = {
@@ -97,9 +155,9 @@ const TOOLS = [
         description: "Send a prompt to Antigravity and wait for the AI to complete its response. " +
             "Antigravity will autonomously accept file changes and run commands (with safety checks). " +
             "Returns the final AI response text.\n\n" +
-            "IMPORTANT: Always provide `targetDir` matching the workspace currently open in Antigravity. " +
-            "Before sending a task, verify the path is correct — a mismatch causes workspace_id lookup failure. " +
-            "Use the `ping` tool first to confirm CDP is connected to the right workspace.",
+            "Optional `targetDir` is a routing hint. The server tries exact workspace match first and falls back " +
+            "to the best available workspace when exact match is missing. Use `list-workspaces` for explicit routing " +
+            "and `ping` to confirm match diagnostics.",
         inputSchema: {
             type: "object",
             properties: {
@@ -117,10 +175,8 @@ const TOOLS = [
                 },
                 targetDir: {
                     type: "string",
-                    description: "Workspace directory path — must exactly match the folder currently open in Antigravity " +
-                        "(e.g. /Users/elliot/myproject or C:\\Users\\elliot\\myproject). " +
-                        "Used to look up the correct registry entry via workspace_id. " +
-                        "If omitted, the server auto-selects the best available workspace from the registry.",
+                    description: "Optional workspace directory path routing hint (e.g. /Users/elliot/myproject). " +
+                        "Exact workspace_id is preferred, then the server auto-fallback selects best ready workspace.",
                 },
             },
             required: ["prompt"],
@@ -128,15 +184,22 @@ const TOOLS = [
     },
     {
         name: "antigravity-stop",
-        description: "Stop the current AI generation in Antigravity. Use this to cancel a long-running task.",
+        description: "Stop running ask-antigravity generation. With multiple active workspaces, provide `targetDir` to " +
+            "select one workspace by exact workspace_id match. If omitted and multiple are active, returns ambiguity error.",
         inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+                targetDir: {
+                    type: "string",
+                    description: "Optional workspace path for exact workspace_id match. No auto-fallback is used for stop.",
+                },
+            },
         },
     },
     {
         name: "ping",
-        description: "Test connectivity to the MCP server and check if Antigravity CDP is available.",
+        description: "Test connectivity to the MCP server and check if Antigravity CDP is available. " +
+            "Diagnostics include discovery matchMode.",
         inputSchema: {
             type: "object",
             properties: {
@@ -145,6 +208,15 @@ const TOOLS = [
                     description: "Optional message to echo back",
                 },
             },
+        },
+    },
+    {
+        name: "list-workspaces",
+        description: "List schema-compatible Antigravity workspaces from local registry only. " +
+            "Read-only: no CDP/WebSocket connection is opened.",
+        inputSchema: {
+            type: "object",
+            properties: {},
         },
     },
     {
@@ -223,12 +295,8 @@ async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
         ? params.targetDir.trim()
         : undefined;
     const targetDir = paramTargetDir || fallbackTargetDir;
-    if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
-        throw new Error(`Another ask-antigravity task is running (id=${activeAskTask.id}, status=${activeAskTask.status}). ` +
-            "Wait for completion or call antigravity-stop first.");
-    }
     const task = createAskTask(prompt);
-    activeAskTask = task;
+    let claimedWorkspaceKey = null;
     const setStatus = (status, note) => {
         transitionAskTask(task, status, note);
         const notePart = note ? ` (${note})` : "";
@@ -252,9 +320,10 @@ async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
             const found = await withTimeout(discoverCDPDetailed(targetDir), DISCOVER_TIMEOUT_MS, "discoverCDP");
             if (!found.ok || !found.discovered) {
                 lastDiscoverError = found.error;
-                const shouldTryLaunch = !launchAttempted &&
-                    found.error?.code !== "schema_mismatch" &&
-                    found.error?.code !== "invalid_env_port";
+                if (found.error?.code === "no_workspace_ever_opened") {
+                    throw new Error(NO_WORKSPACE_GUIDANCE);
+                }
+                const shouldTryLaunch = shouldAttemptColdStartLaunch(launchAttempted, found.error?.code);
                 if (shouldTryLaunch) {
                     launchAttempted = true;
                     const launch = await launchAntigravityForWorkspace({
@@ -280,6 +349,12 @@ async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
             baseDelayMs: RETRY_BASE_DELAY_MS,
             onRetry: onRetry("discover"),
         });
+        claimWorkspaceTask(discovered.workspaceKey, task);
+        activeWorkspaceRoutes.set(discovered.workspaceKey, {
+            wsUrl: discovered.target.webSocketDebuggerUrl,
+            workspaceKey: discovered.workspaceKey,
+        });
+        claimedWorkspaceKey = discovered.workspaceKey;
         log(`[${task.id}] Found target: ${discovered.target.title} on port ${discovered.port}`);
         // 2. Connect
         setStatus("connecting");
@@ -443,21 +518,49 @@ async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
             cdp.close();
             log(`[${task.id}] CDP connection closed.`);
         }
-        activeAskTask = null;
+        if (claimedWorkspaceKey) {
+            const active = activeAskTasks.get(claimedWorkspaceKey);
+            if (active?.id === task.id) {
+                activeAskTasks.delete(claimedWorkspaceKey);
+            }
+            const route = activeWorkspaceRoutes.get(claimedWorkspaceKey);
+            if (route) {
+                activeWorkspaceRoutes.delete(claimedWorkspaceKey);
+            }
+        }
     }
 }
 async function handleStop(targetDir) {
-    const discoveredResult = await discoverCDPDetailed(targetDir);
-    if (!discoveredResult.ok || !discoveredResult.discovered) {
-        return `No Antigravity CDP target found: ${formatDiscoverError(discoveredResult.error)}`;
+    if (activeAskTasks.size === 0) {
+        return "Nothing is running.";
     }
-    const discovered = discoveredResult.discovered;
-    const cdp = await connectCDP(discovered.target.webSocketDebuggerUrl);
+    let selectedWorkspaceKey;
+    if (!targetDir) {
+        if (activeAskTasks.size > 1) {
+            const keys = [...activeAskTasks.keys()].sort().join(", ");
+            throw new Error(`Multiple workspaces are active (${keys}). Provide targetDir to select one workspace.`);
+        }
+        selectedWorkspaceKey = [...activeAskTasks.keys()][0];
+    }
+    else {
+        const targetId = computeWorkspaceId(path.resolve(targetDir));
+        selectedWorkspaceKey = targetId;
+        if (!activeAskTasks.has(selectedWorkspaceKey)) {
+            throw new Error(`No active task found for targetDir workspace_id=${targetId}. ` +
+                "antigravity-stop requires exact workspace match and does not auto-fallback.");
+        }
+    }
+    const route = activeWorkspaceRoutes.get(selectedWorkspaceKey);
+    if (!route) {
+        throw new Error(`No active CDP route for workspace ${selectedWorkspaceKey}.`);
+    }
+    const cdp = await connectCDP(route.wsUrl);
     try {
         const result = await stopGeneration(cdp);
         if (result.success) {
-            if (activeAskTask && !isTaskTerminal(activeAskTask.status)) {
-                transitionAskTask(activeAskTask, "cancelled", "stop requested");
+            const task = activeAskTasks.get(selectedWorkspaceKey);
+            if (task && !isTaskTerminal(task.status)) {
+                transitionAskTask(task, "cancelled", "stop requested");
             }
             return `Generation stopped successfully (method: ${result.method}).`;
         }
@@ -467,10 +570,44 @@ async function handleStop(targetDir) {
         cdp.close();
     }
 }
+async function handleListWorkspaces() {
+    const registry = readRegistryObjectFromDisk();
+    if (!registry) {
+        return JSON.stringify({
+            message: "No workspaces found. Open a workspace in Antigravity first.",
+            workspaces: [],
+        }, null, 2);
+    }
+    const workspaces = Object.entries(registry)
+        .filter(([key, value]) => !key.startsWith("__") && !!value && typeof value === "object")
+        .filter(([, entry]) => entrySupportsSchema(entry))
+        .map(([registryKey, entry]) => ({
+        workspacePath: entry.workspace_paths?.raw ??
+            entry.workspace_paths?.normalized ??
+            registryKey,
+        workspaceId: entry.workspace_id ?? entry.original_workspace_id ?? null,
+        state: entry.state ?? "unknown",
+        port: entry.local_endpoint?.port ?? null,
+        role: entry.role ?? null,
+        verifiedAt: entry.verified_at ?? null,
+        quotaSummary: summarizeQuotaForWorkspace(entry.quota),
+    }));
+    if (workspaces.length === 0) {
+        return JSON.stringify({
+            message: "No open workspaces found in registry.",
+            workspaces: [],
+        }, null, 2);
+    }
+    return JSON.stringify({
+        message: `Found ${workspaces.length} workspace(s).`,
+        workspaces,
+    }, null, 2);
+}
 async function handlePing(message, targetDir) {
     const discovered = await discoverCDPDetailed(targetDir);
     const cdpStatus = discovered.ok && discovered.discovered
-        ? `Connected — ${discovered.discovered.target.title} on ${discovered.discovered.ip}:${discovered.discovered.port}`
+        ? `Connected — ${discovered.discovered.target.title} on ${discovered.discovered.ip}:${discovered.discovered.port} ` +
+            `(matchMode=${discovered.discovered.matchMode}, workspaceKey=${discovered.discovered.workspaceKey})`
         : `Not ready — ${formatDiscoverError(discovered.error)}`;
     return [
         `antigravity-mcp-server v${VERSION}`,
@@ -577,10 +714,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }, globalTargetDir, progressToken);
                 break;
             case "antigravity-stop":
-                resultText = await handleStop(globalTargetDir);
+                resultText = await handleStop(typeof args.targetDir === "string" && args.targetDir.trim()
+                    ? args.targetDir.trim()
+                    : globalTargetDir);
                 break;
             case "ping":
                 resultText = await handlePing(args.message, globalTargetDir);
+                break;
+            case "list-workspaces":
+                resultText = await handleListWorkspaces();
                 break;
             case "quota-status":
                 resultText = await handleQuotaStatus({
@@ -623,8 +765,22 @@ async function main() {
     await server.connect(transport);
     log("antigravity-mcp-server listening on stdio");
 }
-main().catch((error) => {
-    log(`Fatal error: ${error}`);
-    process.exit(1);
-});
+export const __testExports = {
+    activeAskTasks,
+    activeWorkspaceRoutes,
+    claimWorkspaceTask,
+    shouldAttemptColdStartLaunch,
+    handleStop,
+    handleListWorkspaces,
+    NO_WORKSPACE_GUIDANCE,
+};
+const isDirectRun = process.argv[1]
+    ? import.meta.url === pathToFileURL(process.argv[1]).href
+    : false;
+if (isDirectRun) {
+    main().catch((error) => {
+        log(`Fatal error: ${error}`);
+        process.exit(1);
+    });
+}
 //# sourceMappingURL=index.js.map
