@@ -21,7 +21,7 @@
 ## 核心架构
 
 1. Sidecar 负责发现/验证 CDP，并写入 registry。
-2. Server 只读取本地 registry，不写 registry。
+2. Server 默认只读取本地 registry；当 CDP 不可用时会写入 `__control__.cdp_prompt_requests` 触发 Sidecar 端提示弹窗。
 3. Server 通过 `ask-antigravity / ping / launch-antigravity / quota-status` 等工具提供能力。
 4. 配额策略基于 Sidecar 快照 + Server 侧策略选择。
 

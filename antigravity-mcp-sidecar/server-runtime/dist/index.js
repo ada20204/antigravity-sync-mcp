@@ -31,7 +31,7 @@ const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 let activeAskTask = null;
 // --- Logging ---
 function log(msg) {

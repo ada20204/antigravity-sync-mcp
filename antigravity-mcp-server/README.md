@@ -66,9 +66,11 @@ Add to your MCP config:
 |---------------------|---------|-------------|
 | `ANTIGRAVITY_CDP_PORT` | auto-detect | Override CDP port (skips port scanning) |
 | `ANTIGRAVITY_CDP_HOST` | auto-detect | Override CDP host (used with port overrides) |
+| `ANTIGRAVITY_CDP_BIND_ADDRESS` | `127.0.0.1` | Bind address used when server cold-starts Antigravity with CDP flags |
 | `ANTIGRAVITY_EXECUTABLE` | auto-detect | Absolute path to Antigravity executable for cold-start launch |
 | `ANTIGRAVITY_LAUNCH_PORT` | `9000` | Port used when server cold-starts Antigravity |
 | `ANTIGRAVITY_LAUNCH_EXTRA_ARGS` | empty | Extra args appended on cold-start launch |
+| `ANTIGRAVITY_REGISTRY_FILE` | `~/.config/antigravity-mcp/registry.json` | Override registry file path used for discovery/control requests |
 
 `ask-antigravity` input schema:
 - `prompt` (required): prompt text
@@ -90,6 +92,8 @@ Target directory resolution order for `ask-antigravity`:
 5. Connects via WebSocket and injects the prompt through CDP (send path unchanged)
 6. Waits for completion with LS-first strategy: reactive stream -> cascade trajectory -> DOM fallback
 7. Extracts the final answer segment and returns it to the calling agent
+
+When CDP is unavailable, server may also write `__control__.cdp_prompt_requests` into registry so sidecar can show deferred user guidance at connection time.
 
 ## Safety
 

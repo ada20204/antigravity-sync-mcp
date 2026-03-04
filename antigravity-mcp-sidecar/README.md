@@ -41,6 +41,10 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 | `antigravityMcpSidecar.bridgeSharedToken` | `""` | Optional shared auth token for sidecar control plane (auto-managed if empty) |
 | `antigravityMcpSidecar.bridgeMaxSkewMs` | `120000` | Max allowed timestamp skew for signed control requests |
 | `antigravityMcpSidecar.bridgeRequestTtlMs` | `300000` | Auto-expire pending control requests after this age |
+| `antigravityMcpSidecar.quotaWarnThresholdPercent` | `15` | Warning threshold (%) for quota status styling |
+| `antigravityMcpSidecar.quotaCriticalThresholdPercent` | `5` | Critical threshold (%) for quota status styling |
+| `antigravityMcpSidecar.quotaAlertCooldownMinutes` | `30` | Cooldown between repeated quota-level transitions |
+| `antigravityMcpSidecar.quotaStaleMinutes` | `3` | Mark quota snapshot as stale after this many minutes |
 
 ## Commands
 
