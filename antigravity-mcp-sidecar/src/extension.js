@@ -2390,18 +2390,9 @@ async function activate(context) {
     // Heartbeat runs even when initial CDP probe fails so it can auto-recover.
     const heartbeatRetry = async () => {
         if (cdpHeartbeatRunning) return;
-        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready' && cdpState !== 'app_down') return;
+        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready') return;
         cdpHeartbeatRunning = true;
         try {
-            // If process is down and we have an executable, attempt auto-relaunch.
-            if (cdpState === 'app_down' && antigravityExecutablePath && fs.existsSync(antigravityExecutablePath)) {
-                log('CDP heartbeat: process down, attempting auto-relaunch with CDP args', {
-                    plane: 'ctrl',
-                    state: 'launching',
-                });
-                await executeManualLaunch('launch', { trigger: 'heartbeat-auto-relaunch' });
-                return;
-            }
             const recovered = await negotiateCdp({ phase: 'heartbeat-retry' });
             if (recovered) {
                 log(`CDP auto-recovered via heartbeat retry (${cdpTarget.ip}:${cdpTarget.port})`);
