@@ -59,6 +59,42 @@ function isTransientError(error) {
         msg.includes("network") ||
         msg.includes("busy"));
 }
+// --- SSH hint integration ---
+const SSH_HINT_ERROR_CODES = new Set([
+    "registry_missing",
+    "workspace_not_found",
+    "endpoint_unreachable",
+    "entry_not_ready",
+    "entry_stale",
+]);
+function isSshRemoteContext() {
+    if (process.env.SSH_CLIENT || process.env.SSH_TTY || process.env.SSH_CONNECTION) {
+        return true;
+    }
+    const registry = readRegistryObjectFromDisk();
+    if (!registry)
+        return false;
+    for (const [key, entry] of Object.entries(registry)) {
+        if (key === "__control__" || !entry || typeof entry !== "object")
+            continue;
+        if (entry.role === "remote")
+            return true;
+    }
+    return false;
+}
+function buildSshHint(errorCode) {
+    if (!errorCode || !SSH_HINT_ERROR_CODES.has(errorCode))
+        return null;
+    if (!isSshRemoteContext())
+        return null;
+    return {
+        hint_code: "ssh_host_antigravity_not_reachable_yet",
+        hint_message: "SSH remote context detected. Please ensure: " +
+            "(1) Antigravity is open on the host machine with --remote-debugging-port=9000, " +
+            "(2) the SSH session is active with port forwarding enabled, " +
+            "(3) the host sidecar bridge is reachable at 127.0.0.1:18900.",
+    };
+}
 function uniqueStrings(items) {
     const seen = new Set();
     const out = [];
@@ -122,6 +158,7 @@ function shouldAttemptColdStartLaunch(launchAttempted, errorCode) {
         errorCode !== "entry_stale");
 }
 function formatDiscoverError(error) {
+    const hint = buildSshHint(error?.code);
     const payload = {
         error: "registry_not_ready",
         error_code: error?.code ?? "unknown",
@@ -130,6 +167,10 @@ function formatDiscoverError(error) {
         state: error?.state ?? null,
         details: error?.details ?? null,
     };
+    if (hint) {
+        payload.hint_code = hint.hint_code;
+        payload.hint_message = hint.hint_message;
+    }
     return JSON.stringify(payload);
 }
 async function waitForDiscoveredCdp(targetDir, timeoutMs, intervalMs = 1000) {
