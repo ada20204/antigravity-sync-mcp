@@ -1965,7 +1965,7 @@ async function activate(context) {
             },
             state: v1State,
             verified_at: cdpVerifiedAt || previous.verified_at,
-            ttl_ms: 30000,
+            ttl_ms: 90000,
             priority: runtimeRole === 'host' ? 100 : 80,
             quota_meta: {
                 source: runtimeRole === 'host' ? 'host' : 'remote',
