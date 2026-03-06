@@ -2,6 +2,11 @@
 
 All notable changes to `antigravity-mcp-sidecar` are tracked in git history.
 
+## [Unreleased]
+
+- Fixed multi-window CDP port conflicts: each Antigravity window now gets a unique port from `9000-9014` range via dynamic allocation
+- Reduced CDP probe time by 79% (35s → 7.5s worst case) by narrowing default port spec from 70 ports to 15 (`9000-9014`)
+
 ## [0.1.11]
 
 - Sync package-lock with `package.json` dependencies to keep CI/npm workflows deterministic.

@@ -1,7 +1,0 @@
-.git
-.gitignore
-src/extension.ts
-tsconfig.json
-**/*.map
-node_modules/@types/**
-node_modules/typescript/**
