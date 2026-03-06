@@ -7,7 +7,7 @@
  * 使用模拟的 registry 文件和 fetch 函数验证核心逻辑
  */
 
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -79,7 +79,7 @@ async function testCDPDiscovery() {
   console.log('========================================\n');
 
   // 动态导入模块
-  const cdpModule = await import(join(SERVER_BUILD_DIR, 'cdp.js'));
+  const cdpModule = await import(pathToFileURL(join(SERVER_BUILD_DIR, 'cdp.js')).href);
   const { discoverCDPDetailed, computeWorkspaceId } = cdpModule;
 
   // Test 1: 空 registry 返回 no_workspace_ever_opened
@@ -350,7 +350,7 @@ async function testWorkspaceRouting() {
   console.log('========================================\n');
 
   // 动态导入模块
-  const indexModule = await import(join(SERVER_BUILD_DIR, 'index.js'));
+  const indexModule = await import(pathToFileURL(join(SERVER_BUILD_DIR, 'index.js')).href);
   const { __testExports } = indexModule;
 
   if (!__testExports) {
@@ -371,7 +371,7 @@ async function testWorkspaceRouting() {
 
   // Test 1: 并发任务声明
   log('INFO', 'Test 1: Concurrent workspace task claims');
-  const { createAskTask } = await import(join(SERVER_BUILD_DIR, 'task-runtime.js'));
+  const { createAskTask } = await import(pathToFileURL(join(SERVER_BUILD_DIR, 'task-runtime.js')).href);
 
   try {
     const taskA = createAskTask('test-a');

@@ -5,6 +5,7 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const { exec, spawn } = require('child_process');
+const net = require('net');
 const { createHash } = require('crypto');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
@@ -36,9 +37,12 @@ const CDP_PROBE_TIMEOUT_MS = 250;
 const CDP_MAX_HOSTS = 8;
 const CDP_PROBE_SUMMARY_LIMIT = 40;
 const DEFAULT_CDP_PORT_SPEC = '9000-9014';
+const CDP_PORT_RANGE_MIN = 9000;
+const CDP_PORT_RANGE_MAX = 9014;
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
+const CDP_HEARTBEAT_REPEAT_LOG_COOLDOWN_MS = 5 * 60 * 1000;
 const NO_CDP_PROMPT_REQUEST_TTL_MS = 5 * 60 * 1000;
 const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
@@ -300,6 +304,12 @@ function parsePortCandidates(spec) {
         if (port >= 1 && port <= 65535) out.push(port);
     }
     return [...new Set(out)];
+}
+
+function isStrictCdpPortSpec(spec) {
+    const parsed = parsePortCandidates(spec);
+    if (parsed.length === 0) return false;
+    return parsed.every((port) => port >= CDP_PORT_RANGE_MIN && port <= CDP_PORT_RANGE_MAX);
 }
 
 function trimProbeSummary(summary) {
@@ -924,15 +934,33 @@ function buildCdpProbePlan(params) {
 }
 
 /**
- * Scan registry for occupied CDP ports and return the lowest available port
- * in portRange. Falls back to portRange[0] if all ports are exhausted.
+ * Scan registry for occupied CDP ports and return the lowest available port.
+ * Returns null when no port is available in range.
  * @param {object} registry - registry object (may be null/undefined)
  * @param {[number, number]} portRange - [lo, hi] inclusive
- * @returns {number} allocated port
+ * @param {{ preferredPort?: number, unavailablePorts?: Set<number> }} options
+ * @returns {number|null} allocated port
  */
-function allocateFreeCdpPort(registry, portRange) {
+function allocateFreeCdpPort(registry, portRange, options = {}) {
     const lo = portRange ? portRange[0] : 9000;
     const hi = portRange ? portRange[1] : 9014;
+    const preferred = Number(options.preferredPort);
+    const occupied = collectRegistryOccupiedPorts(registry);
+    const unavailable = options.unavailablePorts instanceof Set
+        ? options.unavailablePorts
+        : new Set();
+    for (const p of unavailable) {
+        occupied.add(Number(p));
+    }
+
+    const ordered = buildPortCandidateOrder([lo, hi], preferred);
+    for (const port of ordered) {
+        if (!occupied.has(port)) return port;
+    }
+    return null;
+}
+
+function collectRegistryOccupiedPorts(registry) {
     const occupied = new Set();
     try {
         for (const [key, entry] of Object.entries(registry || {})) {
@@ -941,13 +969,46 @@ function allocateFreeCdpPort(registry, portRange) {
             if (Number.isFinite(port) && port > 0) occupied.add(port);
         }
     } catch (_) {
-        // registry read failure — fall through to return lo
+        // Ignore malformed registry payloads.
+    }
+    return occupied;
+}
+
+function buildPortCandidateOrder(portRange, preferredPort) {
+    const lo = portRange ? Number(portRange[0]) : 9000;
+    const hi = portRange ? Number(portRange[1]) : 9014;
+    const ordered = [];
+    const preferred = Number(preferredPort);
+    if (Number.isFinite(preferred) && preferred >= lo && preferred <= hi) {
+        ordered.push(preferred);
     }
     for (let port = lo; port <= hi; port++) {
-        if (!occupied.has(port)) return port;
+        if (port === preferred) continue;
+        ordered.push(port);
     }
-    // All ports exhausted — fall back to first port
-    return lo;
+    return ordered;
+}
+
+async function isTcpPortAvailable(host, port, timeoutMs = 600) {
+    return await new Promise((resolve) => {
+        const server = net.createServer();
+        let settled = false;
+
+        const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try {
+                server.close(() => resolve(ok));
+            } catch (_) {
+                resolve(ok);
+            }
+        };
+
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        server.on('error', () => finish(false));
+        server.listen({ host, port, exclusive: true }, () => finish(true));
+    });
 }
 
 function splitArgs(raw) {
@@ -1108,6 +1169,8 @@ async function activate(context) {
     let cdpVerifiedAt = 0;
     let cdpSource = null;
     let cdpHeartbeatRunning = false;
+    let lastHeartbeatFailureSignature = '';
+    let lastHeartbeatFailureLogAt = 0;
     let launchTimeoutHandle = null;
     const LAUNCH_TIMEOUT_MS = 60_000;
     let cdpFixedHost = '';
@@ -1164,7 +1227,10 @@ async function activate(context) {
         const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
         cdpFixedHost = String(config.get('cdpFixedHost', '') || '').trim();
         cdpFixedPort = clampNumber(config.get('cdpFixedPort', 0), 0, 65535);
-        cdpPortSpec = String(config.get('cdpPortCandidates', DEFAULT_CDP_PORT_SPEC) || DEFAULT_CDP_PORT_SPEC);
+        const configuredPortSpec = String(config.get('cdpPortCandidates', DEFAULT_CDP_PORT_SPEC) || '').trim();
+        cdpPortSpec = isStrictCdpPortSpec(configuredPortSpec)
+            ? configuredPortSpec
+            : DEFAULT_CDP_PORT_SPEC;
         const configuredExe = String(config.get('antigravityExecutablePath', '') || '').trim();
         antigravityExecutablePath = configuredExe || resolveDefaultExecutablePath();
         antigravityLaunchExtraArgs = splitArgs(config.get('antigravityLaunchExtraArgs', ''));
@@ -1352,11 +1418,47 @@ async function activate(context) {
         }
 
         const registry = readRegistryObject() || {};
-        const allocatedPort = cdpFixedPort > 0
-            ? cdpFixedPort
-            : allocateFreeCdpPort(registry, [9000, 9014]);
-        if (cdpFixedPort <= 0 && allocatedPort === 9000 && Object.keys(registry).filter(k => !k.startsWith('__')).length >= 15) {
-            log('All CDP ports (9000-9014) occupied, falling back to 9000', { plane: 'ctrl', state: 'warn' });
+        const bindAddress = resolveCdpBindAddress();
+        let allocatedPort = null;
+
+        if (cdpFixedPort > 0) {
+            const fixedAvailable = await isTcpPortAvailable(bindAddress, cdpFixedPort);
+            if (!fixedAvailable) {
+                const message = `Configured CDP fixed port ${cdpFixedPort} is unavailable on ${bindAddress}.`;
+                cdpLastError = createErrorInfo('cdp_fixed_port_unavailable', message, {
+                    bind_address: bindAddress,
+                    fixed_port: cdpFixedPort,
+                });
+                register();
+                vscode.window.showWarningMessage(`${message} Please choose another fixed port.`);
+                return;
+            }
+            allocatedPort = cdpFixedPort;
+        } else {
+            const unavailable = new Set();
+            while (true) {
+                const nextPort = allocateFreeCdpPort(registry, [9000, 9014], {
+                    preferredPort: antigravityLaunchPort,
+                    unavailablePorts: unavailable,
+                });
+                if (!Number.isFinite(nextPort) || nextPort <= 0) break;
+                const available = await isTcpPortAvailable(bindAddress, nextPort);
+                if (available) {
+                    allocatedPort = nextPort;
+                    break;
+                }
+                unavailable.add(nextPort);
+            }
+            if (!Number.isFinite(allocatedPort) || allocatedPort <= 0) {
+                const message = `No available CDP port in range 9000-9014 on ${bindAddress}.`;
+                cdpLastError = createErrorInfo('cdp_port_exhausted', message, {
+                    bind_address: bindAddress,
+                    preferred_port: antigravityLaunchPort,
+                });
+                register();
+                vscode.window.showErrorMessage(`${message} Close old Antigravity windows or set a fixed CDP port.`);
+                return;
+            }
         }
         const launchArgs = buildLaunchArgsForWorkspace(workspacePath, allocatedPort, antigravityLaunchExtraArgs);
         try {
@@ -1926,7 +2028,7 @@ async function activate(context) {
         cdpVerifiedAt = 0;
         register();
 
-        if (phase !== 'startup') {
+        if (phase !== 'startup' && phase !== 'heartbeat-retry') {
             log(`CDP probe started (${summarizeProbePlan(cdpProbeHosts, cdpProbePorts)})`, {
                 plane: 'data',
                 state: 'probing',
@@ -1945,6 +2047,8 @@ async function activate(context) {
             cdpSource = result.target.source || 'probe';
             cdpVerifiedAt = Date.now();
             cdpLastError = null;
+            lastHeartbeatFailureSignature = '';
+            lastHeartbeatFailureLogAt = 0;
             register();
             log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port} (source=${cdpSource})`, {
                 plane: 'data',
@@ -1973,17 +2077,26 @@ async function activate(context) {
         );
         register();
         if (phase !== 'startup') {
-            errorLog(
-                `CDP probe failed (${cdpLastError.code}): state=${cdpState} workspace=${workspacePath} last=${cdpLastError.message}`,
-                {
-                    plane: 'data',
-                    state: mapCdpStateToRegistryState(cdpState),
-                    error_code: cdpLastError.code,
-                    extra: {
-                        probe: summarizeProbePlan(cdpProbeHosts, cdpProbePorts),
-                    },
-                }
-            );
+            const failureSignature = `${cdpState}|${cdpLastError.code}|${cdpLastError.message}`;
+            const now = Date.now();
+            const shouldLogHeartbeatFailure = phase !== 'heartbeat-retry'
+                || failureSignature !== lastHeartbeatFailureSignature
+                || (now - lastHeartbeatFailureLogAt) >= CDP_HEARTBEAT_REPEAT_LOG_COOLDOWN_MS;
+            if (shouldLogHeartbeatFailure) {
+                errorLog(
+                    `CDP probe failed (${cdpLastError.code}): state=${cdpState} workspace=${workspacePath} last=${cdpLastError.message}`,
+                    {
+                        plane: 'data',
+                        state: mapCdpStateToRegistryState(cdpState),
+                        error_code: cdpLastError.code,
+                        extra: {
+                            probe: summarizeProbePlan(cdpProbeHosts, cdpProbePorts),
+                        },
+                    }
+                );
+                lastHeartbeatFailureSignature = failureSignature;
+                lastHeartbeatFailureLogAt = now;
+            }
         }
         return false;
     };
@@ -2210,5 +2323,8 @@ module.exports = {
     _testExports: {
         allocateFreeCdpPort,
         parsePortCandidates,
+        isStrictCdpPortSpec,
+        buildPortCandidateOrder,
+        collectRegistryOccupiedPorts,
     },
 };

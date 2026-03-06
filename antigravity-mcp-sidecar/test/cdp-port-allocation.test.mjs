@@ -54,7 +54,13 @@ Module._load = function (id, ...rest) {
 
 const extensionPath = join(__dirname, '..', 'src', 'extension.js');
 const { _testExports } = require(extensionPath);
-const { allocateFreeCdpPort, parsePortCandidates } = _testExports;
+const {
+    allocateFreeCdpPort,
+    parsePortCandidates,
+    isStrictCdpPortSpec,
+    buildPortCandidateOrder,
+    collectRegistryOccupiedPorts,
+} = _testExports;
 
 // ─── allocateFreeCdpPort ────────────────────────────────────────────────────
 
@@ -83,12 +89,12 @@ test('4.3 allocateFreeCdpPort: non-sequential occupied ports returns lowest gap'
     assert.equal(allocateFreeCdpPort(registry, [9000, 9014]), 9001);
 });
 
-test('4.4 allocateFreeCdpPort: all ports occupied falls back to 9000', () => {
+test('4.4 allocateFreeCdpPort: all ports occupied returns null', () => {
     const registry = {};
     for (let p = 9000; p <= 9014; p++) {
         registry[`/ws/${p}`] = { local_endpoint: { port: p } };
     }
-    assert.equal(allocateFreeCdpPort(registry, [9000, 9014]), 9000);
+    assert.equal(allocateFreeCdpPort(registry, [9000, 9014]), null);
 });
 
 test('4.5 allocateFreeCdpPort: missing registry file (undefined) returns 9000', () => {
@@ -113,6 +119,21 @@ test('4.6 allocateFreeCdpPort: __control__ entries are ignored', () => {
     assert.equal(allocateFreeCdpPort(registry, [9000, 9014]), 9000);
 });
 
+test('allocateFreeCdpPort: preferred port is selected when available', () => {
+    const registry = {
+        '/ws/a': { local_endpoint: { port: 9000 } },
+    };
+    const port = allocateFreeCdpPort(registry, [9000, 9014], { preferredPort: 9003 });
+    assert.equal(port, 9003);
+});
+
+test('allocateFreeCdpPort: unavailablePorts are skipped', () => {
+    const registry = {};
+    const unavailable = new Set([9000, 9001, 9002]);
+    const port = allocateFreeCdpPort(registry, [9000, 9014], { unavailablePorts: unavailable });
+    assert.equal(port, 9003);
+});
+
 test('allocateFreeCdpPort: idempotent — same registry returns same port', () => {
     const registry = {
         '/ws/a': { local_endpoint: { port: 9000 } },
@@ -122,6 +143,20 @@ test('allocateFreeCdpPort: idempotent — same registry returns same port', () =
     const second = allocateFreeCdpPort(registry, [9000, 9014]);
     assert.equal(first, second);
     assert.equal(first, 9002);
+});
+
+test('buildPortCandidateOrder: preferred port is first then ascending range', () => {
+    const ordered = buildPortCandidateOrder([9000, 9004], 9003);
+    assert.deepEqual(ordered, [9003, 9000, 9001, 9002, 9004]);
+});
+
+test('collectRegistryOccupiedPorts: ignores control entries', () => {
+    const occupied = collectRegistryOccupiedPorts({
+        __control__: { local_endpoint: { port: 9000 } },
+        '/ws/a': { local_endpoint: { port: 9002 } },
+    });
+    assert.equal(occupied.has(9000), false);
+    assert.equal(occupied.has(9002), true);
 });
 
 // ─── parsePortCandidates ────────────────────────────────────────────────────
@@ -154,6 +189,16 @@ test('parsePortCandidates: single port spec', () => {
 test('parsePortCandidates: empty spec returns empty array', () => {
     const ports = parsePortCandidates('');
     assert.deepEqual(ports, []);
+});
+
+test('isStrictCdpPortSpec: accepts 9000-9014 only', () => {
+    assert.equal(isStrictCdpPortSpec('9000-9014'), true);
+    assert.equal(isStrictCdpPortSpec('9000,9001,9014'), true);
+});
+
+test('isStrictCdpPortSpec: rejects legacy/wide specs', () => {
+    assert.equal(isStrictCdpPortSpec('9000-9014,8997-9003,9229,7800-7850'), false);
+    assert.equal(isStrictCdpPortSpec('9000,9229'), false);
 });
 
 // ─── Multi-instance sequential launch simulation ────────────────────────────
@@ -192,16 +237,16 @@ test('multi-instance: closing middle window frees port for reuse', () => {
     assert.equal(port, 9001);
 });
 
-test('multi-instance: 15 windows fill all ports, 16th falls back to 9000', () => {
+test('multi-instance: 15 windows fill all ports, 16th returns null', () => {
     const registry = {};
     for (let i = 0; i < 15; i++) {
         const port = allocateFreeCdpPort(registry, [9000, 9014]);
         assert.equal(port, 9000 + i, `window ${i + 1} should get port ${9000 + i}`);
         registry[`/ws/${i}`] = { local_endpoint: { port } };
     }
-    // All 15 ports occupied, 16th falls back to 9000
+    // All 15 ports occupied, 16th returns null (no silent fallback)
     const overflow = allocateFreeCdpPort(registry, [9000, 9014]);
-    assert.equal(overflow, 9000);
+    assert.equal(overflow, null);
 });
 
 test('multi-instance: each window gets a unique port across 5 sequential launches', () => {

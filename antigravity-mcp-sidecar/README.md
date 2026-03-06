@@ -34,9 +34,9 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 | `antigravityMcpSidecar.cdpPollInterval` | `1500` | CDP webview polling interval (ms) |
 | `antigravityMcpSidecar.cdpFixedHost` | `""` | Optional fixed CDP host override |
 | `antigravityMcpSidecar.cdpFixedPort` | `0` | Optional fixed CDP port override (`0` = auto). When set, only this port is probed |
-| `antigravityMcpSidecar.cdpPortCandidates` | `9000-9014,8997-9003,9229,7800-7850` | Candidate ports for negotiation (avoids legacy 9222 conflicts by default) |
+| `antigravityMcpSidecar.cdpPortCandidates` | `9000-9014` | Candidate ports for CDP negotiation |
 | `antigravityMcpSidecar.antigravityExecutablePath` | `""` | Optional explicit Antigravity executable path |
-| `antigravityMcpSidecar.antigravityLaunchPort` | `9000` | Launch port when no fixed CDP port is set |
+| `antigravityMcpSidecar.antigravityLaunchPort` | `9000` | Preferred launch port when no fixed CDP port is set; sidecar scans `9000-9014` if unavailable |
 | `antigravityMcpSidecar.antigravityLaunchExtraArgs` | `""` | Extra launch args appended when starting app |
 | `antigravityMcpSidecar.bridgeSharedToken` | `""` | Optional shared auth token for sidecar control plane (auto-managed if empty) |
 | `antigravityMcpSidecar.bridgeMaxSkewMs` | `120000` | Max allowed timestamp skew for signed control requests |

@@ -328,8 +328,22 @@ async function handleAskAntigravity(params, fallbackTargetDir, progressToken) {
                     launchAttempted = true;
                     const launch = await launchAntigravityForWorkspace({
                         targetDir: targetDir || process.cwd(),
+                        killExisting: false,
                         log: (message) => log(`[${task.id}] ${message}`),
                     });
+                    if (!launch.started && lastDiscoverError?.state?.startsWith("app_up")) {
+                        throw new Error("Antigravity is running but CDP is not enabled. " +
+                            "Please restart Antigravity with --remote-debugging-port=9000, " +
+                            "or use the launch-antigravity tool with killExisting=true to force restart.");
+                    }
+                    if (launch.started && launch.cdpVerified === false) {
+                        // Process spawned but CDP never responded — likely squirrel
+                        // updater or single-instance lock stole the launch.
+                        throw new Error(`Antigravity was launched but CDP did not respond on port ${launch.port}. ` +
+                            "The process may have been intercepted by the auto-updater. " +
+                            "Please restart Antigravity manually with --remote-debugging-port, " +
+                            "or use the launch-antigravity tool with killExisting=true to force restart.");
+                    }
                     if (launch.started) {
                         await sendProgressNotification(progressToken, 2, "🚀 Launching Antigravity...");
                         const recovered = await waitForDiscoveredCdp(targetDir, COLD_START_WAIT_MS);
@@ -633,6 +647,13 @@ async function handleLaunchAntigravity(params) {
         `CDP port: ${launch.port}`,
         `Target dir: ${dir}`,
     ];
+    // Surface CDP verification result from the launch itself
+    if (launch.cdpVerified === true) {
+        lines.push(`CDP verified: true (port ${launch.port})`);
+    }
+    else if (launch.cdpVerified === false) {
+        lines.push(`CDP verified: false — ${launch.error ?? "CDP did not respond after launch"}`);
+    }
     if (waitForCdp) {
         log(`[launch-antigravity] Waiting up to ${Math.round(COLD_START_WAIT_MS / 1000)}s for CDP...`);
         const discovered = await waitForDiscoveredCdp(dir, COLD_START_WAIT_MS);

@@ -95,8 +95,8 @@
                 },
                 "antigravityMcpSidecar.cdpPortCandidates": {
                     "type": "string",
-                    "default": "9000-9014,8997-9003,9229,7800-7850",
-                    "description": "Comma-separated ports/ranges used for CDP probing, e.g. 9000-9014,9229,7800-7810."
+                    "default": "9000-9014",
+                    "description": "Comma-separated ports/ranges used for CDP probing, e.g. 9000-9014."
                 },
                 "antigravityMcpSidecar.antigravityExecutablePath": {
                     "type": "string",
@@ -106,7 +106,7 @@
                 "antigravityMcpSidecar.antigravityLaunchPort": {
                     "type": "number",
                     "default": 9000,
-                    "description": "Default launch port when cdpFixedPort is 0."
+                    "description": "Preferred launch port when cdpFixedPort is 0. If unavailable, sidecar scans 9000-9014 for the next free port."
                 },
                 "antigravityMcpSidecar.antigravityLaunchExtraArgs": {
                     "type": "string",

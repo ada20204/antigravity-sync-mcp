@@ -11,10 +11,8 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import WebSocket from "ws";
+import { readRegistryObject as _readRegistry, getRegistryFilePath as _getRegistryFilePath } from "./registry-io.js";
 
-const REGISTRY_DIR = ".config/antigravity-mcp";
-const REGISTRY_FILE_NAME = "registry.json";
-const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
 const REGISTRY_CONTROL_KEY = "__control__";
 const CONTROL_NO_CDP_PROMPT_KEY = "cdp_prompt_requests";
 const NO_CDP_PROMPT_COOLDOWN_MS = 15_000;
@@ -222,21 +220,11 @@ export function computeWorkspaceId(rawPath: string): string {
 }
 
 function readRegistryObject(): Record<string, RegistryEntry> | null {
-    const registryFile = getRegistryFilePath();
-    try {
-        if (!fs.existsSync(registryFile)) return null;
-        const parsed = JSON.parse(fs.readFileSync(registryFile, "utf-8"));
-        if (parsed && typeof parsed === "object") {
-            return parsed as Record<string, RegistryEntry>;
-        }
-    } catch (e) {
-        console.error(`[CDP] Failed to read registry '${registryFile}': ${(e as Error).message}`);
-    }
-    return null;
+    return _readRegistry() as Record<string, RegistryEntry> | null;
 }
 
 function getRegistryFilePath(): string {
-    return process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
+    return _getRegistryFilePath();
 }
 
 function writeRegistryObject(registryFile: string, payload: Record<string, unknown>): void {
