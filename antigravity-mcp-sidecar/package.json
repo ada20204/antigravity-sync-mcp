@@ -128,6 +128,11 @@
                     "default": 300000,
                     "description": "Maximum age for pending sidecar control requests before auto-reject."
                 },
+                "antigravityMcpSidecar.bridgeHostEndpoint": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Host bridge endpoint for remote sidecar to connect to (e.g. 127.0.0.1:18900). Leave empty to use default. Configure when using SSH port forwarding to reach the host bridge."
+                },
                 "antigravityMcpSidecar.quotaWarnThresholdPercent": {
                     "type": "number",
                     "default": 15,

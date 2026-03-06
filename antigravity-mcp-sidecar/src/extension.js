@@ -6,7 +6,7 @@ const http = require('http');
 const https = require('https');
 const { exec, spawn } = require('child_process');
 const net = require('net');
-const { createHash } = require('crypto');
+const { createHash, randomBytes } = require('crypto');
 const { promisify } = require('util');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const {
@@ -20,6 +20,8 @@ const {
     ensureBridgeToken,
     verifyControlRequest,
     DEFAULT_MAX_SKEW_MS,
+    signBridgeHttpRequest,
+    verifyBridgeHttpRequest,
 } = require('./bridge-auth');
 
 const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
@@ -39,6 +41,9 @@ const CDP_PROBE_SUMMARY_LIMIT = 40;
 const DEFAULT_CDP_PORT_SPEC = '9000-9014';
 const CDP_PORT_RANGE_MIN = 9000;
 const CDP_PORT_RANGE_MAX = 9014;
+const HOST_BRIDGE_PORT = 18900;
+const HOST_BRIDGE_BIND_HOST = '127.0.0.1';
+const BRIDGE_VERSION = 1;
 const DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT = 15;
 const DEFAULT_QUOTA_CRITICAL_THRESHOLD_PERCENT = 5;
 const DEFAULT_QUOTA_ALERT_COOLDOWN_MINUTES = 30;
@@ -267,6 +272,49 @@ function getJson(url, timeoutMs = 1000) {
             req.destroy();
             reject(new Error('timeout'));
         });
+    });
+}
+
+function postJson(url, body, headers = {}, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const bodyBuf = Buffer.from(body, 'utf8');
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port,
+            path: parsed.pathname + parsed.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': bodyBuf.length,
+                ...headers,
+            },
+            timeout: timeoutMs,
+        };
+        const req = http.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => (data += chunk));
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (res.statusCode >= 400) {
+                        const err = Object.assign(
+                            new Error(parsed.error || `HTTP ${res.statusCode}`),
+                            { statusCode: res.statusCode, body: parsed }
+                        );
+                        reject(err);
+                    } else {
+                        resolve(parsed);
+                    }
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+        req.write(bodyBuf);
+        req.end();
     });
 }
 
@@ -1104,6 +1152,135 @@ function launchAntigravityDetached(params) {
     child.unref();
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// HostBridgeService — exposes host CDP snapshot over HTTP for remote sidecars
+// ──────────────────────────────────────────────────────────────────────────
+
+function createHostBridgeServer({ getSnapshot, bridgeToken, nonceCache, nodeId, log, warn }) {
+    const server = http.createServer((req, res) => {
+        const urlPath = req.url ? req.url.split('?')[0] : '/';
+
+        if (req.method === 'GET' && urlPath === '/v1/health') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'ok', bridge_version: BRIDGE_VERSION, node_role: 'host' }));
+            return;
+        }
+
+        if (req.method === 'POST' && urlPath === '/v1/snapshot') {
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; });
+            req.on('end', () => {
+                const ts = req.headers['x-ag-bridge-ts'];
+                const nonce = req.headers['x-ag-bridge-nonce'];
+                const signature = req.headers['x-ag-bridge-signature'];
+                const fromNodeId = req.headers['x-ag-bridge-node-id'];
+                const bodyHash = createHash('sha256').update(body || '').digest('hex');
+
+                const authResult = verifyBridgeHttpRequest(
+                    { method: 'POST', path: '/v1/snapshot', bodyHash, ts, nonce, nodeId: fromNodeId, signature },
+                    bridgeToken,
+                    { nonceCache }
+                );
+                if (!authResult.ok) {
+                    warn(`HostBridge auth rejected: ${authResult.code} from node=${fromNodeId}`);
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: authResult.code }));
+                    return;
+                }
+
+                let reqBody = {};
+                try { reqBody = JSON.parse(body || '{}'); } catch { }
+
+                const snapshot = getSnapshot(reqBody.workspace_id, reqBody.workspace_path);
+                if (!snapshot) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'workspace_not_found' }));
+                    return;
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    schema_version: REGISTRY_SCHEMA_VERSION,
+                    entry: snapshot,
+                    server_time: Date.now(),
+                    ttl_ms: 30_000,
+                }));
+            });
+            return;
+        }
+
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+    });
+
+    server.on('error', (err) => {
+        warn(`HostBridgeService error: ${err.message}`, { plane: 'ctrl', error_code: 'bridge_server_error' });
+    });
+
+    server.listen(HOST_BRIDGE_PORT, HOST_BRIDGE_BIND_HOST, () => {
+        log(`HostBridgeService listening on ${HOST_BRIDGE_BIND_HOST}:${HOST_BRIDGE_PORT}`, {
+            plane: 'ctrl',
+            state: 'ready',
+        });
+    });
+
+    return { dispose: () => server.close() };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// RemoteBridgeClient — polls host bridge and mirrors entry into remote registry
+// ──────────────────────────────────────────────────────────────────────────
+
+function createRemoteBridgeClient({ bridgeEndpoint, bridgeToken, nodeId, onSnapshot, log, warn }) {
+    const POLL_MS = 3_000;
+    const BACKOFF = [10_000, 30_000];
+    let stopped = false;
+    let failures = 0;
+    let handle = null;
+
+    async function poll() {
+        if (stopped) return;
+        try {
+            const ts = Date.now();
+            const nonce = randomBytes(16).toString('hex');
+            const body = JSON.stringify({});
+            const bodyHash = createHash('sha256').update(body).digest('hex');
+            const signature = signBridgeHttpRequest(
+                { method: 'POST', path: '/v1/snapshot', bodyHash, ts, nonce, nodeId },
+                bridgeToken
+            );
+            const result = await postJson(
+                `http://${bridgeEndpoint}/v1/snapshot`,
+                body,
+                {
+                    'x-ag-bridge-ts': String(ts),
+                    'x-ag-bridge-nonce': nonce,
+                    'x-ag-bridge-signature': signature,
+                    'x-ag-bridge-node-id': nodeId,
+                }
+            );
+            failures = 0;
+            onSnapshot(result);
+        } catch (err) {
+            failures++;
+            if (failures === 1 || failures % 10 === 0) {
+                warn(`RemoteBridgeClient poll failed (attempt ${failures}): ${err.message}`, {
+                    plane: 'ctrl',
+                    error_code: 'bridge_poll_error',
+                });
+            }
+        }
+        if (!stopped) {
+            const delay = failures === 0 ? POLL_MS : failures <= 3 ? BACKOFF[0] : BACKOFF[1];
+            handle = setTimeout(() => poll().catch(() => {}), delay);
+        }
+    }
+
+    poll().catch(() => {});
+
+    return { dispose: () => { stopped = true; if (handle) clearTimeout(handle); } };
+}
+
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
     context.subscriptions.push(outputChannel);
@@ -1188,6 +1365,7 @@ async function activate(context) {
     let bridgeToken = '';
     let bridgeMaxSkewMs = DEFAULT_MAX_SKEW_MS;
     let bridgeRequestTtlMs = 5 * 60 * 1000;
+    let bridgeHostEndpoint = `127.0.0.1:${HOST_BRIDGE_PORT}`;
     let lastSyncStateLogKey = '';
     const nonceCache = new NonceCache();
     let quotaWarnThresholdPercent = DEFAULT_QUOTA_WARN_THRESHOLD_PERCENT;
@@ -1249,6 +1427,8 @@ async function activate(context) {
             30_000,
             30 * 60 * 1000
         );
+        const configuredEndpoint = String(config.get('bridgeHostEndpoint', '') || '').trim();
+        bridgeHostEndpoint = configuredEndpoint || `127.0.0.1:${HOST_BRIDGE_PORT}`;
     }
 
     reloadCdpConfig();
@@ -2004,6 +2184,101 @@ async function activate(context) {
         registry[REGISTRY_CONTROL_KEY] = getControlRecord(registry);
         writeRegistryObject(registry);
     };
+
+    // ─── Bridge startup ───────────────────────────────────────────────
+    if (runtimeRole === 'host') {
+        const getSnapshot = (reqWorkspaceId, reqWorkspacePath) => {
+            const registry = readRegistryObject();
+            for (const [key, entry] of Object.entries(registry)) {
+                if (key === REGISTRY_CONTROL_KEY || typeof entry !== 'object' || !entry) continue;
+                if (reqWorkspaceId && entry.workspace_id === reqWorkspaceId) return entry;
+                if (reqWorkspacePath && (key === reqWorkspacePath ||
+                    (entry.workspace_paths && entry.workspace_paths.normalized === reqWorkspacePath))) return entry;
+            }
+            // Fallback: return own workspace entry
+            return (registry[workspacePath] && typeof registry[workspacePath] === 'object')
+                ? registry[workspacePath]
+                : null;
+        };
+        const bridgeServer = createHostBridgeServer({
+            getSnapshot,
+            bridgeToken,
+            nonceCache,
+            nodeId,
+            log,
+            warn,
+        });
+        context.subscriptions.push(bridgeServer);
+    }
+
+    if (runtimeRole === 'remote') {
+        const onSnapshot = (snapshotResponse) => {
+            const entry = snapshotResponse && snapshotResponse.entry;
+            if (!entry || typeof entry !== 'object') return;
+            const now = Date.now();
+            const registry = readRegistryObject();
+            const previous = (registry[workspacePath] && typeof registry[workspacePath] === 'object')
+                ? registry[workspacePath]
+                : {};
+            registry[workspacePath] = {
+                ...previous,
+                schema_version: REGISTRY_SCHEMA_VERSION,
+                protocol: {
+                    schema_version: REGISTRY_SCHEMA_VERSION,
+                    compatible_schema_versions: REGISTRY_COMPAT_SCHEMA_VERSIONS,
+                    writer_role: 'remote',
+                    writer_node_id: nodeId,
+                    updated_at: now,
+                },
+                workspace_id: workspaceId,
+                original_workspace_id: entry.workspace_id,
+                workspace_paths: {
+                    normalized: normalizePath(workspacePath),
+                    raw: workspacePath,
+                },
+                node_id: nodeId,
+                role: 'remote',
+                source_of_truth: 'host',
+                source_endpoint: entry.source_endpoint || entry.local_endpoint,
+                local_endpoint: {
+                    host: '127.0.0.1',
+                    port: (entry.local_endpoint && entry.local_endpoint.port) || 9000,
+                    mode: 'forwarded',
+                },
+                state: entry.state,
+                verified_at: entry.verified_at,
+                ttl_ms: snapshotResponse.ttl_ms || 30_000,
+                priority: 80,
+                pid: process.pid,
+                lastActive: now,
+                ls: entry.ls,
+                quota: entry.quota,
+                cdp: entry.cdp,
+            };
+            writeRegistryObject(registry);
+
+            // Update local CDP state so status bar reflects host state
+            if (entry.local_endpoint && entry.state === 'ready') {
+                const port = entry.local_endpoint.port || 9000;
+                if (!cdpTarget || cdpTarget.port !== port) {
+                    cdpTarget = { ip: '127.0.0.1', port };
+                    cdpState = 'ready';
+                    cdpVerifiedAt = entry.verified_at || now;
+                    cdpSource = 'bridge';
+                    updateStatusBar();
+                }
+            }
+        };
+        const bridgeClient = createRemoteBridgeClient({
+            bridgeEndpoint: bridgeHostEndpoint,
+            bridgeToken,
+            nodeId,
+            onSnapshot,
+            log,
+            warn,
+        });
+        context.subscriptions.push(bridgeClient);
+    }
 
     negotiateCdp = async (options = {}) => {
         const phase = String((options && options.phase) || 'runtime');

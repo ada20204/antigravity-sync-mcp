@@ -118,7 +118,8 @@ function shouldAttemptColdStartLaunch(launchAttempted, errorCode) {
     return (!launchAttempted &&
         errorCode !== "schema_mismatch" &&
         errorCode !== "invalid_env_port" &&
-        errorCode !== "no_workspace_ever_opened");
+        errorCode !== "no_workspace_ever_opened" &&
+        errorCode !== "entry_stale");
 }
 function formatDiscoverError(error) {
     const payload = {

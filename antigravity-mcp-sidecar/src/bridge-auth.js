@@ -134,6 +134,48 @@ function verifyControlRequest(req, token, opts = {}) {
     return { ok: true };
 }
 
+/**
+ * Sign an HTTP bridge request.
+ * Canonical string: METHOD\nPATH\nBODY_SHA256\nTS\nNONCE\nNODE_ID
+ */
+function signBridgeHttpRequest({ method, path, bodyHash, ts, nonce, nodeId }, token) {
+    const key = String(token || '').trim();
+    if (!key) return '';
+    const canonical = [method, path, bodyHash, String(ts), nonce, nodeId].join('\n');
+    return crypto.createHmac('sha256', key).update(canonical, 'utf8').digest('hex');
+}
+
+/**
+ * Verify an HTTP bridge request.
+ * Returns { ok: true } or { ok: false, code: string }.
+ */
+function verifyBridgeHttpRequest({ method, path, bodyHash, ts, nonce, nodeId, signature }, token, opts = {}) {
+    const nowMs = typeof opts.nowMs === 'number' ? opts.nowMs : Date.now();
+    const maxSkewMs = typeof opts.maxSkewMs === 'number' ? opts.maxSkewMs : DEFAULT_MAX_SKEW_MS;
+    const nonceCache = opts.nonceCache;
+    const key = String(token || '').trim();
+
+    if (!key) return { ok: false, code: 'auth_token_missing' };
+    if (!nonce || !nodeId || !signature) return { ok: false, code: 'auth_headers_missing' };
+
+    const tsNum = Number(ts);
+    if (!Number.isFinite(tsNum)) return { ok: false, code: 'auth_timestamp_invalid' };
+    if (Math.abs(nowMs - tsNum) > maxSkewMs) return { ok: false, code: 'auth_timestamp_skew' };
+    if (nonceCache && nonceCache.seen(nonce, nowMs)) return { ok: false, code: 'auth_nonce_replay' };
+
+    const expected = signBridgeHttpRequest({ method, path, bodyHash, ts: tsNum, nonce, nodeId }, key);
+    let sigMatch = false;
+    try {
+        const expectedBuf = Buffer.from(expected, 'hex');
+        const actualBuf = Buffer.from(String(signature), 'hex');
+        sigMatch = expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf);
+    } catch { sigMatch = false; }
+    if (!sigMatch) return { ok: false, code: 'auth_signature_invalid' };
+
+    if (nonceCache) nonceCache.add(nonce, nowMs);
+    return { ok: true };
+}
+
 module.exports = {
     BRIDGE_TOKEN_FILE,
     DEFAULT_MAX_SKEW_MS,
@@ -143,4 +185,6 @@ module.exports = {
     readTokenFile,
     signControlRequest,
     verifyControlRequest,
+    signBridgeHttpRequest,
+    verifyBridgeHttpRequest,
 };
