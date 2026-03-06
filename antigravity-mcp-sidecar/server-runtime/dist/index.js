@@ -207,6 +207,10 @@ const TOOLS = [
                     type: "string",
                     description: "Optional message to echo back",
                 },
+                targetDir: {
+                    type: "string",
+                    description: "Optional workspace directory path used to locate the registry/CDP entry. If omitted, uses --target-dir from server startup.",
+                },
             },
         },
     },
@@ -740,7 +744,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     : globalTargetDir);
                 break;
             case "ping":
-                resultText = await handlePing(args.message, globalTargetDir);
+                resultText = await handlePing(args.message, typeof args.targetDir === "string" && args.targetDir.trim()
+                    ? args.targetDir.trim()
+                    : globalTargetDir);
                 break;
             case "list-workspaces":
                 resultText = await handleListWorkspaces();
