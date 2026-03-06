@@ -1080,7 +1080,7 @@ function launchAntigravityDetached(params) {
         const exe = psQuote(executable);
         const argList = args.map((item) => `'${psQuote(item)}'`).join(',');
         const script = restart
-            ? `$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity,Cursor | Stop-Process -Force; Start-Sleep -Milliseconds 500; Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`
+            ? `$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity,Cursor | Stop-Process -Force; $deadline=(Get-Date).AddSeconds(8); while((Get-Date)-lt $deadline){if(-not(Get-Process Antigravity,Cursor -EA SilentlyContinue)){break};Start-Sleep -Milliseconds 200}; Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`
             : `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
 
         const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
@@ -2115,9 +2115,18 @@ async function activate(context) {
     // Heartbeat runs even when initial CDP probe fails so it can auto-recover.
     const heartbeatRetry = async () => {
         if (cdpHeartbeatRunning) return;
-        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready') return;
+        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready' && cdpState !== 'app_down') return;
         cdpHeartbeatRunning = true;
         try {
+            // If process is down and we have an executable, attempt auto-relaunch.
+            if (cdpState === 'app_down' && antigravityExecutablePath && fs.existsSync(antigravityExecutablePath)) {
+                log('CDP heartbeat: process down, attempting auto-relaunch with CDP args', {
+                    plane: 'ctrl',
+                    state: 'launching',
+                });
+                await executeManualLaunch('launch', { trigger: 'heartbeat-auto-relaunch' });
+                return;
+            }
             const recovered = await negotiateCdp({ phase: 'heartbeat-retry' });
             if (recovered) {
                 log(`CDP auto-recovered via heartbeat retry (${cdpTarget.ip}:${cdpTarget.port})`);
