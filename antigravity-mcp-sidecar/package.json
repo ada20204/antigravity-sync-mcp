@@ -12,7 +12,8 @@
         "onStartupFinished"
     ],
     "extensionKind": [
-        "ui"
+        "ui",
+        "workspace"
     ],
     "main": "./src/extension.js",
     "files": [
