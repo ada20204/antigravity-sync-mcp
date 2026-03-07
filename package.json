@@ -1,0 +1,19 @@
+{
+  "name": "antigravity-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.1.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
