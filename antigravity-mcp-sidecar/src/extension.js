@@ -2213,6 +2213,22 @@ async function activate(context) {
     }
 
     if (runtimeRole === 'remote') {
+        // Warn if bridgeSharedToken is not configured — host and remote must share
+        // the same token for HMAC auth to succeed. Either set bridgeSharedToken in
+        // VS Code settings on both sides, or copy bridge.token from host to remote.
+        const configuredToken = String(
+            vscode.workspace.getConfiguration('antigravityMcpSidecar').get('bridgeSharedToken', '') || ''
+        ).trim();
+        if (!configuredToken) {
+            warn(
+                'bridgeSharedToken is not configured. ' +
+                'Host and remote must share the same token for bridge auth to succeed. ' +
+                'Set antigravityMcpSidecar.bridgeSharedToken to the same value on both sides, ' +
+                'or copy ~/.config/antigravity-mcp/bridge.token from host to remote.',
+                { plane: 'ctrl', error_code: 'bridge_token_not_configured' }
+            );
+        }
+
         const onSnapshot = (snapshotResponse) => {
             const entry = snapshotResponse && snapshotResponse.entry;
             if (!entry || typeof entry !== 'object') return;

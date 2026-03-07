@@ -138,8 +138,57 @@ Antigravity should run with debug port enabled, typically:
 5. Use command palette for launch/restart and quota tools
 6. View logs: Output panel → "Antigravity MCP Sidecar"
 
-## SSH Remote Note
+## SSH Remote Setup
 
-- Current build treats sidecar as host-side (`extensionKind: ui`) by default.
-- If MCP server runs on an SSH remote host, it reads that host's local `~/.config/antigravity-mcp/registry.json`.
-- Automatic host↔remote registry bridge is not bundled in this build; configure your own bridge/tunnel if server must run remotely.
+The sidecar supports SSH remote workflows where Antigravity runs on the host machine and the MCP server runs on a remote (SSH) machine.
+
+### How it works
+
+- **Host sidecar** (runs inside Antigravity on your local machine): starts a bridge HTTP server on `127.0.0.1:18900`
+- **Remote sidecar** (runs inside code-server on the remote machine): polls the host bridge every 3s and mirrors the host registry entry locally
+- **MCP server** (on the remote): reads the mirrored local registry entry and connects to CDP via the forwarded port
+
+The role is detected automatically: when VS Code is connected to a remote (`vscode.env.remoteName` is non-empty), the sidecar activates as `remote`. On the local desktop it activates as `host`.
+
+### Setup steps
+
+1. **Install the sidecar on both sides** — install the VSIX in Antigravity (host) and in code-server (remote)
+
+2. **Start Antigravity with CDP enabled** on the host:
+   ```
+   --remote-debugging-port=9000 --remote-debugging-address=127.0.0.1
+   ```
+
+3. **Configure port forwarding** in Antigravity so the remote can reach:
+   - `127.0.0.1:18900` — host bridge (sidecar-to-sidecar snapshot sync)
+   - `127.0.0.1:9000` — host CDP (MCP server → Antigravity)
+
+4. **Share the bridge token** — host and remote must use the same HMAC token.
+
+   **Option A** (recommended): set the same value in VS Code settings on both sides:
+   ```json
+   "antigravityMcpSidecar.bridgeSharedToken": "your-shared-secret"
+   ```
+
+   **Option B**: copy the auto-generated token file from host to remote:
+   ```bash
+   scp host:~/.config/antigravity-mcp/bridge.token ~/.config/antigravity-mcp/bridge.token
+   ```
+
+5. **Install the MCP server launcher** on the remote — run command `Install Bundled MCP Server Launcher` in code-server
+
+6. **Configure your MCP client** on the remote with `--target-dir` pointing to your remote workspace
+
+### Diagnostics
+
+- Remote sidecar logs bridge poll results to Output → "Antigravity MCP Sidecar"
+- If `bridgeSharedToken` is not configured, a warning is logged at startup
+- When CDP discovery fails in SSH context, the MCP server returns `hint_code: ssh_host_antigravity_not_reachable_yet` with actionable guidance
+
+### Settings (SSH-specific)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `antigravityMcpSidecar.bridgeSharedToken` | `""` | Shared HMAC token — must match on host and remote |
+| `antigravityMcpSidecar.bridgeHostEndpoint` | `127.0.0.1:18900` | Host bridge endpoint as seen from the remote (override if forwarded to a different port) |
+
