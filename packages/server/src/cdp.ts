@@ -8,193 +8,62 @@
 
 import fs from "fs";
 import path from "path";
-import os from "os";
 import crypto from "crypto";
 import WebSocket from "ws";
-import { readRegistryObject as _readRegistry, getRegistryFilePath as _getRegistryFilePath } from "./registry-io.js";
+import {
+    readRegistryObject as _readRegistry,
+    getRegistryFilePath as _getRegistryFilePath,
+    COMPATIBLE_SCHEMA_VERSIONS,
+    entrySupportsCurrentSchema,
+    REGISTRY_CONTROL_KEY,
+    CONTROL_NO_CDP_PROMPT_KEY,
+    NO_CDP_PROMPT_COOLDOWN_MS,
+} from "@antigravity-mcp/core";
+import type {
+    CDPTarget,
+    ExecutionContext,
+    RegistryEntry,
+    RegistryQuotaModel,
+    RegistryQuotaSnapshot,
+    RegistryLsEndpoint,
+    RegistryV1Endpoint,
+    RegistryV1QuotaMeta,
+    CDPConnection,
+    RegistryCdpCandidate,
+    RegistryCdpProbeItem,
+    RegistryCdpActiveEndpoint,
+    RegistryCdpState,
+    DiscoveredCDP,
+    DiscoverErrorCode,
+    DiscoverCDPError,
+    DiscoverCDPResult,
+    DiscoverCDPOptions,
+} from "@antigravity-mcp/core";
 
-const REGISTRY_CONTROL_KEY = "__control__";
-const CONTROL_NO_CDP_PROMPT_KEY = "cdp_prompt_requests";
-const NO_CDP_PROMPT_COOLDOWN_MS = 15_000;
-const SUPPORTED_SCHEMA_VERSIONS = [2];
+export type {
+    CDPTarget,
+    ExecutionContext,
+    RegistryEntry,
+    RegistryQuotaModel,
+    RegistryQuotaSnapshot,
+    RegistryLsEndpoint,
+    RegistryV1Endpoint,
+    RegistryV1QuotaMeta,
+    CDPConnection,
+    RegistryCdpCandidate,
+    RegistryCdpProbeItem,
+    RegistryCdpActiveEndpoint,
+    RegistryCdpState,
+    DiscoveredCDP,
+    DiscoverErrorCode,
+    DiscoverCDPError,
+    DiscoverCDPResult,
+    DiscoverCDPOptions,
+};
+
+
+const SUPPORTED_SCHEMA_VERSIONS = COMPATIBLE_SCHEMA_VERSIONS as number[];
 const READY_STATE = "ready";
-
-// --- Types ---
-
-export interface CDPTarget {
-    id: string;
-    title: string;
-    url: string;
-    webSocketDebuggerUrl: string;
-    type: string;
-}
-
-export interface ExecutionContext {
-    id: number;
-    name: string;
-    origin: string;
-}
-
-export interface CDPConnection {
-    ws: WebSocket;
-    call: (method: string, params?: Record<string, unknown>) => Promise<any>;
-    contexts: ExecutionContext[];
-    close: () => void;
-}
-
-export interface RegistryQuotaModel {
-    label?: string;
-    modelId?: string;
-    remainingFraction?: number;
-    remainingPercentage?: number;
-    isExhausted?: boolean;
-    isSelected?: boolean;
-    resetTime?: string;
-    resetInMs?: number;
-}
-
-export interface RegistryQuotaSnapshot {
-    timestamp?: number;
-    source?: string;
-    promptCredits?: {
-        available?: number;
-        monthly?: number;
-        usedPercentage?: number;
-        remainingPercentage?: number;
-    };
-    models?: RegistryQuotaModel[];
-    activeModelId?: string;
-    lastError?: string;
-}
-
-export interface RegistryLsEndpoint {
-    port?: number;
-    csrfToken?: string;
-    lastDetectedAt?: number;
-    sourceHost?: string;
-}
-
-export interface RegistryV1Endpoint {
-    host?: string;
-    port?: number;
-    mode?: string;
-}
-
-export interface RegistryV1QuotaMeta {
-    source?: string;
-    stale?: boolean;
-    refreshed_at?: number;
-    refresh_interval_ms?: number;
-}
-
-export interface RegistryEntry {
-    schema_version?: number;
-    protocol?: {
-        schema_version?: number;
-        compatible_schema_versions?: number[];
-        writer_role?: string;
-        writer_node_id?: string;
-        updated_at?: number;
-    };
-    workspace_id?: string;
-    original_workspace_id?: string;
-    workspace_paths?: { normalized?: string; raw?: string };
-    node_id?: string;
-    role?: string;
-    source_of_truth?: string;
-    source_endpoint?: RegistryV1Endpoint;
-    local_endpoint?: RegistryV1Endpoint;
-    state?: string;
-    verified_at?: number;
-    ttl_ms?: number;
-    priority?: number;
-    quota_meta?: RegistryV1QuotaMeta;
-    last_error?: {
-        code?: string;
-        message?: string;
-        at?: number;
-        details?: Record<string, unknown>;
-    };
-    port?: number;
-    ip?: string;
-    pid?: number;
-    lastActive?: number;
-    ls?: RegistryLsEndpoint;
-    quota?: RegistryQuotaSnapshot;
-    quotaError?: string;
-    cdp?: RegistryCdpState;
-}
-
-export interface RegistryCdpCandidate {
-    host?: string;
-    port?: number;
-}
-
-export interface RegistryCdpProbeItem {
-    host?: string;
-    port?: number;
-    stage?: string;
-    ok?: boolean;
-    source?: string;
-    error?: string;
-}
-
-export interface RegistryCdpActiveEndpoint {
-    host?: string;
-    port?: number;
-    source?: string;
-    verifiedAt?: number;
-}
-
-export interface RegistryCdpState {
-    generation?: number;
-    state?: "idle" | "probing" | "ready" | "error" | string;
-    updatedAt?: number;
-    verifiedAt?: number;
-    active?: RegistryCdpActiveEndpoint;
-    candidates?: RegistryCdpCandidate[];
-    probeSummary?: RegistryCdpProbeItem[];
-    lastError?: string;
-}
-
-export interface DiscoveredCDP {
-    port: number;
-    ip: string;
-    target: CDPTarget;
-    registry?: RegistryEntry;
-    matchMode: "exact" | "auto_fallback";
-    workspaceKey: string;
-}
-
-export type DiscoverErrorCode =
-    | "registry_missing"
-    | "no_workspace_ever_opened"
-    | "workspace_not_found"
-    | "schema_mismatch"
-    | "entry_not_ready"
-    | "entry_stale"
-    | "endpoint_missing"
-    | "endpoint_unreachable"
-    | "cdp_target_not_found"
-    | "invalid_env_port";
-
-export interface DiscoverCDPError {
-    code: DiscoverErrorCode;
-    message: string;
-    workspaceId?: string;
-    state?: string;
-    details?: Record<string, unknown>;
-}
-
-export interface DiscoverCDPResult {
-    ok: boolean;
-    discovered?: DiscoveredCDP;
-    error?: DiscoverCDPError;
-}
-
-export interface DiscoverCDPOptions {
-    exactWorkspaceOnly?: boolean;
-}
 
 function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
     if (typeof value !== "number" || !Number.isFinite(value)) return false;
@@ -320,20 +189,7 @@ function rankRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
     });
 }
 
-function entrySupportsSchema(entry: RegistryEntry): boolean {
-    const declared = new Set<number>();
-    if (Number.isFinite(Number(entry.schema_version))) {
-        declared.add(Number(entry.schema_version));
-    }
-    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
-        for (const raw of entry.protocol.compatible_schema_versions) {
-            const version = Number(raw);
-            if (Number.isFinite(version)) declared.add(version);
-        }
-    }
-    if (declared.size === 0) return false;
-    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
-}
+const entrySupportsSchema = entrySupportsCurrentSchema;
 
 async function resolveTargetFromEndpoint(ip: string, port: number): Promise<CDPTarget | null> {
     const response = await fetch(`http://${ip}:${port}/json/list`);
@@ -666,7 +522,10 @@ export async function evaluateInAllContexts(
                 returnByValue: true,
                 awaitPromise,
                 contextId: ctx.id,
-            });
+            }) as {
+                exceptionDetails?: unknown;
+                result?: { value?: any };
+            };
 
             if (result.exceptionDetails) continue;
 

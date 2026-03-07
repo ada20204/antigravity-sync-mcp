@@ -12,9 +12,7 @@
  * - auto-accept-agent (Auto-click confirmation dialogs)
  */
 
-import fs from "fs";
 import path from "path";
-import os from "os";
 import { pathToFileURL } from "url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -26,6 +24,11 @@ import {
     type Tool,
     type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+    readRegistryObject as _readRegistryFromCore,
+    getRegistryPath,
+    entrySupportsCurrentSchema,
+} from "@antigravity-mcp/core";
 
 import {
     computeWorkspaceId,
@@ -75,11 +78,10 @@ const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
+const REGISTRY_FILE = getRegistryPath();
 const VERSION = "0.1.2";
 const activeAskTasks = new Map<string, AskTask>();
 const activeWorkspaceRoutes = new Map<string, { wsUrl: string; workspaceKey: string }>();
-const REGISTRY_FILE = path.join(os.homedir(), ".config/antigravity-mcp/registry.json");
-const SUPPORTED_SCHEMA_VERSIONS = [2];
 const NO_WORKSPACE_GUIDANCE =
     "No Antigravity workspace is open yet. Open Antigravity, open your workspace folder, " +
     "complete first-time authorization, then retry ask-antigravity.";
@@ -155,30 +157,10 @@ function uniqueStrings(items: string[]): string[] {
     return out;
 }
 
-function entrySupportsSchema(entry: RegistryEntry): boolean {
-    const declared = new Set<number>();
-    if (Number.isFinite(Number(entry.schema_version))) {
-        declared.add(Number(entry.schema_version));
-    }
-    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
-        for (const raw of entry.protocol.compatible_schema_versions) {
-            const version = Number(raw);
-            if (Number.isFinite(version)) declared.add(version);
-        }
-    }
-    if (declared.size === 0) return false;
-    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
-}
+const entrySupportsSchema = entrySupportsCurrentSchema;
 
 function readRegistryObjectFromDisk(): Record<string, RegistryEntry> | null {
-    const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || REGISTRY_FILE;
-    try {
-        if (!fs.existsSync(registryFile)) return null;
-        const parsed = JSON.parse(fs.readFileSync(registryFile, "utf-8"));
-        return parsed && typeof parsed === "object" ? (parsed as Record<string, RegistryEntry>) : null;
-    } catch {
-        return null;
-    }
+    return _readRegistryFromCore() as Record<string, RegistryEntry> | null;
 }
 
 function summarizeQuotaForWorkspace(quota: RegistryQuotaSnapshot | undefined): string | undefined {
