@@ -16,7 +16,7 @@ Core objective:
 
 ## 2. Main Components
 
-### `antigravity-mcp-server`
+### `packages/server`
 
 Role:
 - MCP tool host (`ask-antigravity`, `antigravity-stop`, `ping`, `launch-antigravity`).
@@ -28,7 +28,7 @@ Hard constraints:
 - Server reads only local `~/.config/antigravity-mcp/registry.json` (or `ANTIGRAVITY_REGISTRY_FILE` override for testing).
 - Server does not perform broad network/port scanning as a primary path.
 
-### `antigravity-mcp-sidecar`
+### `packages/sidecar`
 
 Role:
 - Discovers and verifies CDP endpoint.
@@ -141,18 +141,18 @@ Retention:
 
 ### Server
 
-- Build: `npm --prefix antigravity-mcp-server run build`
-- Tests: `node --test antigravity-mcp-server/test/*.mjs`
-- Package: `npm pack` inside `antigravity-mcp-server/`
+- Build: `npm --prefix packages/server run build`
+- Tests: `node --test packages/server/test/*.mjs`
+- Package: `npm pack` inside `packages/server/`
 
 ### Sidecar
 
 - Syntax check:
-  - `node -c antigravity-mcp-sidecar/src/extension.js`
-  - `node -c antigravity-mcp-sidecar/src/structured-log.js`
-  - `node -c antigravity-mcp-sidecar/src/bridge-auth.js`
+  - `node -c packages/sidecar/src/extension.js`
+  - `node -c packages/sidecar/src/structured-log.js`
+  - `node -c packages/sidecar/src/bridge-auth.js`
 - VSIX verification script:
-  - `antigravity-mcp-sidecar/verify-vsix.sh`
+  - `packages/sidecar/verify-vsix.sh`
 
 ## 10. Current Known Operational Constraints
 

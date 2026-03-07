@@ -33,12 +33,12 @@ jobs:
           cache: npm
           cache-dependency-path: |
             packages/server/package-lock.json
-            antigravity-mcp-sidecar/package-lock.json
+            packages/sidecar/package-lock.json
 
       - name: Normalize lockfile registry URLs
         run: |
           perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/server/package-lock.json
-          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' antigravity-mcp-sidecar/package-lock.json
+          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/sidecar/package-lock.json
 
       - name: Install server dependencies
         run: npm --prefix packages/server ci
@@ -49,17 +49,17 @@ jobs:
       - name: Install sidecar dependencies
         # Sidecar lockfile may lag package.json during active development.
         # Use install in CI to avoid hard failure from lock drift.
-        run: npm --prefix antigravity-mcp-sidecar install --no-package-lock
+        run: npm --prefix packages/sidecar install --no-package-lock
 
       - name: Sync bundled server runtime
-        run: npm --prefix antigravity-mcp-sidecar run sync-server-runtime
+        run: npm --prefix packages/sidecar run sync-server-runtime
 
       - name: Package VSIX
         run: |
           mkdir -p build
-          cd antigravity-mcp-sidecar
+          cd packages/sidecar
           SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
-          npx -y @vscode/vsce@2.26.1 package --no-yarn --no-dependencies --allow-missing-repository --out ../build/antigravity-mcp-sidecar-${SHORT_SHA}-base.vsix
+          npx -y @vscode/vsce@2.26.1 package --no-yarn --no-dependencies --allow-missing-repository --out ../../build/antigravity-mcp-sidecar-${SHORT_SHA}-base.vsix
 
       - name: Inject runtime dependencies into VSIX
         run: |
@@ -68,16 +68,16 @@ jobs:
           rm -rf /tmp/ag-vsix-repack && mkdir -p /tmp/ag-vsix-repack
           unzip -q "$VSIX_BASE" -d /tmp/ag-vsix-repack
           # Prune dev dependencies before injecting into VSIX to reduce size.
-          (cd antigravity-mcp-sidecar && npm prune --omit=dev)
-          cp -a antigravity-mcp-sidecar/node_modules /tmp/ag-vsix-repack/extension/node_modules
+          (cd packages/sidecar && npm prune --omit=dev)
+          cp -a packages/sidecar/node_modules /tmp/ag-vsix-repack/extension/node_modules
           (cd /tmp/ag-vsix-repack && zip -qr /tmp/ag-vsix-packed.vsix .)
           mv /tmp/ag-vsix-packed.vsix "$OUT_VSIX"
           rm -f "$VSIX_BASE"
 
       - name: Verify VSIX contents
         run: |
-          cd antigravity-mcp-sidecar
-          bash ./verify-vsix.sh ../build/*.vsix
+          cd packages/sidecar
+          bash ./verify-vsix.sh ../../build/*.vsix
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4

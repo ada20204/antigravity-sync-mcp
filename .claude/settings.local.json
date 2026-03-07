@@ -33,7 +33,7 @@
       "Bash(npx:*)",
       "Bash(bash:*)",
       "Bash(mkdir:*)",
-      "Bash(\"D:/antigravity-sync/antigravity-mcp-sidecar/scripts/sync-server-runtime.mjs\":*)",
+      "Bash(\"D:/antigravity-sync/packages/sidecar/scripts/sync-server-runtime.mjs\":*)",
       "Bash(rm:*)",
       "Bash(wc:*)",
       "mcp__codex-cli__codex",

@@ -4,15 +4,15 @@
 
 ## 项目目标
 
-- 提供可用的 MCP Server（`antigravity-mcp-server`）
-- 提供 VS Code/Antigravity 侧 Sidecar（`antigravity-mcp-sidecar`）
+- 提供可用的 MCP Server（`packages/server`）
+- 提供 VS Code/Antigravity 侧 Sidecar（`packages/sidecar`）
 - 通过统一 registry（`~/.config/antigravity-mcp/registry.json`）解耦运行环境
 - 支持配额采集、模型选择、自动接受、安全控制、启动诊断
 
 ## 仓库结构
 
-- `antigravity-mcp-server/`：MCP Server（TypeScript）
-- `antigravity-mcp-sidecar/`：Sidecar 扩展（JavaScript）
+- `packages/server/`：MCP Server（TypeScript）
+- `packages/sidecar/`：Sidecar 扩展（JavaScript）
 - `references/`：参考实现（以 submodule 为主）
 - `docs/plans/`：设计与实现计划
 - `openspec/`：规格与变更管理
@@ -30,26 +30,26 @@
 ### 1) 构建 Server
 
 ```bash
-npm --prefix antigravity-mcp-server install
-npm --prefix antigravity-mcp-server run build
+npm --prefix packages/server install
+npm --prefix packages/server run build
 ```
 
 ### 2) 安装 Sidecar（推荐 VSIX）
 
-- 安装 `antigravity-mcp-sidecar` VSIX
+- 安装 `packages/sidecar` VSIX
 - 在 Antigravity 命令面板执行 `Install Bundled MCP Server Launcher`
 
 ### 3) 基础验证
 
 ```bash
-node --test antigravity-mcp-server/test/*.mjs
-node --test antigravity-mcp-sidecar/test/*.mjs
+node --test packages/server/test/*.mjs
+node --test packages/sidecar/test/*.mjs
 ```
 
 ## 文档入口
 
-- Server 使用说明：`antigravity-mcp-server/README.md`
-- Sidecar 使用说明：`antigravity-mcp-sidecar/README.md`
+- Server 使用说明：`packages/server/README.md`
+- Sidecar 使用说明：`packages/sidecar/README.md`
 - 设计与计划：`docs/plans/`
 - 项目上下文：`openspec/project.md`
 

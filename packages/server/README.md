@@ -6,13 +6,13 @@ MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a loca
 
 1. **Node.js 18+**
 2. **Antigravity** running with debug port enabled, or allow cold-start auto launch (see Configuration)
-3. **antigravity-mcp-sidecar** extension enabled in your active workspace (writes CDP/LS/quota registry)
+3. **packages/sidecar** extension enabled in your active workspace (writes CDP/LS/quota registry)
 
 ## Quick Start
 
 ```bash
 # Build
-cd antigravity-mcp-server
+cd packages/server
 npm install
 npm run build
 
@@ -22,7 +22,7 @@ node build/dist/index.js  # (runs as stdio MCP server)
 
 ## Single VSIX Option
 
-If you install `antigravity-mcp-sidecar` VSIX, you can bootstrap this server without separate npm install:
+If you install `packages/sidecar` VSIX, you can bootstrap this server without separate npm install:
 
 1. In Antigravity command palette run: `Install Bundled MCP Server Launcher`
 2. Use generated launcher:
