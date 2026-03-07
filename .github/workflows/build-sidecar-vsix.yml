@@ -32,6 +32,7 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: |
+            packages/core/package-lock.json
             packages/server/package-lock.json
             packages/sidecar/package-lock.json
 
@@ -39,6 +40,13 @@ jobs:
         run: |
           perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/server/package-lock.json
           perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/sidecar/package-lock.json
+          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/core/package-lock.json
+
+      - name: Install core dependencies
+        run: npm --prefix packages/core ci
+
+      - name: Build core package
+        run: npm --prefix packages/core run build
 
       - name: Install server dependencies
         run: npm --prefix packages/server ci
