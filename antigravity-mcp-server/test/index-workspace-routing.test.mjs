@@ -15,6 +15,10 @@ const {
   handleStop,
   handleListWorkspaces,
   NO_WORKSPACE_GUIDANCE,
+  isSshRemoteContext,
+  buildSshHint,
+  SSH_HINT_ERROR_CODES,
+  formatDiscoverError,
 } = __testExports;
 
 function writeRegistry(filePath, payload) {
@@ -113,4 +117,136 @@ test('no_workspace_ever_opened guidance message does not suggest auto-launch', (
   assert.match(NO_WORKSPACE_GUIDANCE, /authorization/i);
   assert.ok(!/auto-launch|launch antigravity/i.test(NO_WORKSPACE_GUIDANCE));
   assert.equal(shouldAttemptColdStartLaunch(false, 'no_workspace_ever_opened'), false);
+});
+
+// ── SSH hint tests ────────────────────────────────────────────────────────────
+
+function withSshEnv(vars, fn) {
+  const saved = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    process.env[k] = v;
+  }
+  try { return fn(); }
+  finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('SSH_HINT_ERROR_CODES covers expected failure classes', () => {
+  for (const code of ['registry_missing', 'workspace_not_found', 'endpoint_unreachable', 'entry_not_ready', 'entry_stale']) {
+    assert.ok(SSH_HINT_ERROR_CODES.has(code), `expected ${code} in SSH_HINT_ERROR_CODES`);
+  }
+  assert.ok(!SSH_HINT_ERROR_CODES.has('schema_mismatch'));
+  assert.ok(!SSH_HINT_ERROR_CODES.has('no_workspace_ever_opened'));
+});
+
+test('buildSshHint: returns null when no SSH context and no SSH error code', () => {
+  assert.equal(buildSshHint('schema_mismatch'), null);
+});
+
+test('buildSshHint: returns null for SSH error code but no SSH context', () => {
+  // No SSH env vars, no registry
+  const tmpFile = path.join(os.tmpdir(), `ag-hint-empty-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify({}));
+  process.env.ANTIGRAVITY_REGISTRY_FILE = tmpFile;
+  try {
+    const result = buildSshHint('workspace_not_found');
+    assert.equal(result, null);
+  } finally {
+    delete process.env.ANTIGRAVITY_REGISTRY_FILE;
+    fs.unlinkSync(tmpFile);
+  }
+});
+
+test('buildSshHint: returns hint when SSH_CLIENT set + relevant error code', () => {
+  withSshEnv({ SSH_CLIENT: '10.0.0.1 12345 22' }, () => {
+    const result = buildSshHint('workspace_not_found');
+    assert.ok(result !== null);
+    assert.equal(result.hint_code, 'ssh_host_antigravity_not_reachable_yet');
+    assert.match(result.hint_message, /Antigravity/);
+    assert.match(result.hint_message, /port forwarding/i);
+  });
+});
+
+test('buildSshHint: returns hint when SSH_TTY set + relevant error code', () => {
+  withSshEnv({ SSH_TTY: '/dev/pts/0' }, () => {
+    assert.ok(buildSshHint('endpoint_unreachable') !== null);
+  });
+});
+
+test('buildSshHint: returns null for SSH_CLIENT set but non-SSH error code', () => {
+  withSshEnv({ SSH_CLIENT: '10.0.0.1 12345 22' }, () => {
+    assert.equal(buildSshHint('schema_mismatch'), null);
+    assert.equal(buildSshHint('no_workspace_ever_opened'), null);
+    assert.equal(buildSshHint(undefined), null);
+  });
+});
+
+test('isSshRemoteContext: detects SSH_CLIENT env var', () => {
+  withSshEnv({ SSH_CLIENT: '10.0.0.1 12345 22' }, () => {
+    assert.equal(isSshRemoteContext(), true);
+  });
+});
+
+test('isSshRemoteContext: detects SSH_TTY env var', () => {
+  withSshEnv({ SSH_TTY: '/dev/pts/0' }, () => {
+    assert.equal(isSshRemoteContext(), true);
+  });
+});
+
+test('isSshRemoteContext: detects role=remote in registry', () => {
+  const tmpFile = path.join(os.tmpdir(), `ag-hint-remote-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify({
+    '/remote/workspace': { schema_version: 2, role: 'remote', state: 'ready' },
+  }));
+  process.env.ANTIGRAVITY_REGISTRY_FILE = tmpFile;
+  try {
+    assert.equal(isSshRemoteContext(), true);
+  } finally {
+    delete process.env.ANTIGRAVITY_REGISTRY_FILE;
+    fs.unlinkSync(tmpFile);
+  }
+});
+
+test('isSshRemoteContext: returns false for host-only registry', () => {
+  const tmpFile = path.join(os.tmpdir(), `ag-hint-host-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify({
+    '/local/workspace': { schema_version: 2, role: 'host', state: 'ready' },
+  }));
+  process.env.ANTIGRAVITY_REGISTRY_FILE = tmpFile;
+  try {
+    assert.equal(isSshRemoteContext(), false);
+  } finally {
+    delete process.env.ANTIGRAVITY_REGISTRY_FILE;
+    fs.unlinkSync(tmpFile);
+  }
+});
+
+test('formatDiscoverError: includes hint fields when SSH context active', () => {
+  withSshEnv({ SSH_CLIENT: '10.0.0.1 12345 22' }, () => {
+    const json = formatDiscoverError({ code: 'endpoint_unreachable', message: 'refused', workspaceId: 'ws-1', state: 'app_up_no_cdp', details: null });
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.error_code, 'endpoint_unreachable');
+    assert.equal(parsed.hint_code, 'ssh_host_antigravity_not_reachable_yet');
+    assert.ok(typeof parsed.hint_message === 'string' && parsed.hint_message.length > 0);
+  });
+});
+
+test('formatDiscoverError: no hint fields when not SSH context', () => {
+  const tmpFile = path.join(os.tmpdir(), `ag-hint-nosssh-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify({}));
+  process.env.ANTIGRAVITY_REGISTRY_FILE = tmpFile;
+  try {
+    const json = formatDiscoverError({ code: 'endpoint_unreachable', message: 'refused', workspaceId: null, state: null, details: null });
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.hint_code, undefined);
+    assert.equal(parsed.hint_message, undefined);
+  } finally {
+    delete process.env.ANTIGRAVITY_REGISTRY_FILE;
+    fs.unlinkSync(tmpFile);
+  }
 });

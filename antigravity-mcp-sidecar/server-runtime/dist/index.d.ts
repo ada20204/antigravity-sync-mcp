@@ -12,8 +12,14 @@
  */
 import { type DiscoverCDPError } from "./cdp.js";
 import { type AskTask } from "./task-runtime.js";
+declare function isSshRemoteContext(): boolean;
+declare function buildSshHint(errorCode: string | undefined): {
+    hint_code: string;
+    hint_message: string;
+} | null;
 declare function claimWorkspaceTask(workspaceKey: string, task: AskTask): void;
 declare function shouldAttemptColdStartLaunch(launchAttempted: boolean, errorCode: DiscoverCDPError["code"] | undefined): boolean;
+declare function formatDiscoverError(error: DiscoverCDPError | undefined): string;
 declare function handleStop(targetDir?: string): Promise<string>;
 declare function handleListWorkspaces(): Promise<string>;
 export declare const __testExports: {
@@ -27,6 +33,10 @@ export declare const __testExports: {
     handleStop: typeof handleStop;
     handleListWorkspaces: typeof handleListWorkspaces;
     NO_WORKSPACE_GUIDANCE: string;
+    isSshRemoteContext: typeof isSshRemoteContext;
+    buildSshHint: typeof buildSshHint;
+    SSH_HINT_ERROR_CODES: Set<string>;
+    formatDiscoverError: typeof formatDiscoverError;
 };
 export {};
 //# sourceMappingURL=index.d.ts.map

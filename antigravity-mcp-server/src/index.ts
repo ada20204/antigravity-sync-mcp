@@ -1096,6 +1096,10 @@ export const __testExports = {
     handleStop,
     handleListWorkspaces,
     NO_WORKSPACE_GUIDANCE,
+    isSshRemoteContext,
+    buildSshHint,
+    SSH_HINT_ERROR_CODES,
+    formatDiscoverError,
 };
 
 const isDirectRun = process.argv[1]
