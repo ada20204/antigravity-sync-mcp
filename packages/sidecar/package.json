@@ -20,6 +20,8 @@
         "src/**/*",
         "scripts/**/*",
         "server-runtime/**/*",
+        "vendor/ws/**/*",
+        "vendor/core/**/*",
         "package.json",
         "README.md",
         "AI_CONFIG_PROMPT.md",

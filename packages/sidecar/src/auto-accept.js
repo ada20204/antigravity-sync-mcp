@@ -1,6 +1,6 @@
 const vscode = require('vscode');
 const http = require('http');
-const WebSocket = require('ws');
+const WebSocket = require('../vendor/ws');
 
 // ─── VS Code Commands ─────────────────────────────────────────────────
 const ACCEPT_COMMANDS = [

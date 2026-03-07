@@ -130,11 +130,24 @@ export function psQuote(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic Windows launch via PowerShell
+// Windows launch via direct spawn + taskkill
 // ---------------------------------------------------------------------------
 
 function deriveProcessName(executablePath: string): string {
     return path.win32.basename(executablePath, path.win32.extname(executablePath));
+}
+
+async function killWindowsProcess(processName: string, log?: (msg: string) => void): Promise<void> {
+    const imageName = processName.endsWith(".exe") ? processName : `${processName}.exe`;
+    log?.(`Killing ${imageName} via taskkill...`);
+    return new Promise<void>((resolve) => {
+        const child = spawn("taskkill.exe", ["/im", imageName, "/f"], {
+            stdio: "ignore",
+        });
+        child.on("exit", () => resolve());
+        child.on("error", () => resolve());
+        setTimeout(() => resolve(), 8_000);
+    });
 }
 
 export async function atomicWindowsLaunch(
@@ -143,28 +156,15 @@ export async function atomicWindowsLaunch(
     killFirst: boolean,
     log?: (msg: string) => void,
 ): Promise<void> {
-    const exe = psQuote(executable);
-    const argList = args.map((item) => `'${psQuote(item)}'`).join(",");
-
-    let script: string;
     if (killFirst) {
         const processName = deriveProcessName(executable);
-        script =
-            `$ErrorActionPreference='SilentlyContinue'; ` +
-            `Get-Process '${psQuote(processName)}' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
-            `$deadline = (Get-Date).AddSeconds(8); ` +
-            `while ((Get-Date) -lt $deadline) { ` +
-            `  if (-not (Get-Process '${psQuote(processName)}' -ErrorAction SilentlyContinue)) { break }; ` +
-            `  Start-Sleep -Milliseconds 200 ` +
-            `}; ` +
-            `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
-    } else {
-        script = `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
+        await killWindowsProcess(processName, log);
+        // Brief pause to let OS release resources after kill
+        await new Promise((r) => setTimeout(r, 1_000));
     }
 
-    log?.(`PowerShell launch script: ${script}`);
-
-    const child = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+    log?.(`Spawning ${executable} with args: ${args.join(" ")}`);
+    const child = spawn(executable, args, {
         detached: true,
         stdio: "ignore",
     });

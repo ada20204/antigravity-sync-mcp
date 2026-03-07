@@ -5,9 +5,10 @@
  * Now reads the CDP port for a specific target directory
  * from the registry managed by antigravity-mcp-sidecar.
  */
+import { computeWorkspaceId } from "@antigravity-mcp/core";
+export { computeWorkspaceId };
 import type { CDPTarget, ExecutionContext, RegistryEntry, RegistryQuotaModel, RegistryQuotaSnapshot, RegistryLsEndpoint, RegistryV1Endpoint, RegistryV1QuotaMeta, CDPConnection, RegistryCdpCandidate, RegistryCdpProbeItem, RegistryCdpActiveEndpoint, RegistryCdpState, DiscoveredCDP, DiscoverErrorCode, DiscoverCDPError, DiscoverCDPResult, DiscoverCDPOptions } from "@antigravity-mcp/core";
 export type { CDPTarget, ExecutionContext, RegistryEntry, RegistryQuotaModel, RegistryQuotaSnapshot, RegistryLsEndpoint, RegistryV1Endpoint, RegistryV1QuotaMeta, CDPConnection, RegistryCdpCandidate, RegistryCdpProbeItem, RegistryCdpActiveEndpoint, RegistryCdpState, DiscoveredCDP, DiscoverErrorCode, DiscoverCDPError, DiscoverCDPResult, DiscoverCDPOptions, };
-export declare function computeWorkspaceId(rawPath: string): string;
 export declare function discoverCDPDetailed(targetDir?: string, options?: DiscoverCDPOptions): Promise<DiscoverCDPResult>;
 export declare function discoverCDP(targetDir?: string): Promise<{
     port: number;

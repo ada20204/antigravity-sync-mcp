@@ -7,41 +7,14 @@
  */
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
 import WebSocket from "ws";
-import { readRegistryObject as _readRegistry, getRegistryFilePath as _getRegistryFilePath, COMPATIBLE_SCHEMA_VERSIONS, entrySupportsCurrentSchema, REGISTRY_CONTROL_KEY, CONTROL_NO_CDP_PROMPT_KEY, NO_CDP_PROMPT_COOLDOWN_MS, } from "@antigravity-mcp/core";
+import { readRegistryObject as _readRegistryObject, getRegistryFilePath, computeWorkspaceId, COMPATIBLE_SCHEMA_VERSIONS, entrySupportsCurrentSchema, REGISTRY_CONTROL_KEY, CONTROL_NO_CDP_PROMPT_KEY, NO_CDP_PROMPT_COOLDOWN_MS, } from "@antigravity-mcp/core";
+export { computeWorkspaceId };
 const READY_STATE = "ready";
 function isFreshTimestamp(value, maxAgeMs) {
     if (typeof value !== "number" || !Number.isFinite(value))
         return false;
     return Date.now() - value <= maxAgeMs;
-}
-/** Normalize path the same way the sidecar does (for workspace_id hashing). */
-function normalizePathForId(rawPath) {
-    let p = rawPath.trim();
-    if (!p)
-        return "";
-    // Resolve relative paths and symlinks before normalizing.
-    try {
-        p = fs.realpathSync(p);
-    }
-    catch { /* path may not exist locally; fall back to resolve */ }
-    p = path.resolve(p);
-    p = p.replace(/\\/g, "/");
-    p = p.replace(/^([A-Z]):/, (_, d) => d.toLowerCase() + ":");
-    if (p.length > 1 && p.endsWith("/"))
-        p = p.slice(0, -1);
-    return p;
-}
-export function computeWorkspaceId(rawPath) {
-    const normalized = normalizePathForId(rawPath);
-    return crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
-}
-function readRegistryObject() {
-    return _readRegistry();
-}
-function getRegistryFilePath() {
-    return _getRegistryFilePath();
 }
 function writeRegistryObject(registryFile, payload) {
     try {
@@ -50,6 +23,9 @@ function writeRegistryObject(registryFile, payload) {
     catch (e) {
         console.error(`[CDP] Failed to write registry '${registryFile}': ${e.message}`);
     }
+}
+function readRegistryObject() {
+    return _readRegistryObject();
 }
 function upsertNoCdpPromptRequest(params) {
     const { registry, registryFile, workspaceId, state, reasonCode, reasonMessage } = params;
@@ -63,6 +39,14 @@ function upsertNoCdpPromptRequest(params) {
     const requests = rawRequests && typeof rawRequests === "object" ? { ...rawRequests } : {};
     const existing = requests[requestId];
     if (existing && typeof existing === "object") {
+        const existingStatus = String(existing.status || "");
+        const existingState = String(existing.state || "");
+        const existingReasonCode = String(existing.reason_code || "");
+        if ((existingStatus === "shown" || existingStatus === "resolved") &&
+            existingState === String(state || "unknown") &&
+            existingReasonCode === String(reasonCode || "")) {
+            return;
+        }
         const updatedAt = Number(existing.updated_at || existing.created_at || 0);
         if (Number.isFinite(updatedAt) && now - updatedAt < NO_CDP_PROMPT_COOLDOWN_MS) {
             return;
@@ -216,14 +200,19 @@ export async function discoverCDPDetailed(targetDir, options = {}) {
         });
     }
     if (matched.state !== READY_STATE) {
-        upsertNoCdpPromptRequest({
-            registry,
-            registryFile,
-            workspaceId: matched.workspace_id ?? targetId,
-            state: matched.state,
-            reasonCode: "entry_not_ready",
-            reasonMessage: `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
-        });
+        // Only prompt when the app is confirmed up but CDP is unavailable.
+        // Skip transient states like 'launching' to avoid spurious dialogs during cold-start.
+        const shouldPrompt = matched.state === "app_up_no_cdp" || matched.state === "app_up_cdp_not_ready";
+        if (shouldPrompt) {
+            upsertNoCdpPromptRequest({
+                registry,
+                registryFile,
+                workspaceId: matched.workspace_id ?? targetId,
+                state: matched.state,
+                reasonCode: "entry_not_ready",
+                reasonMessage: `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
+            });
+        }
         return discoverError("entry_not_ready", `Registry entry is not ready (state=${matched.state ?? "unknown"})`, {
             workspaceId: matched.workspace_id ?? targetId,
             state: matched.state,

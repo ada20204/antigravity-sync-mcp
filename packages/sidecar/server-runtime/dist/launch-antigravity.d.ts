@@ -1,5 +1,4 @@
 export declare function resolveLaunchPort(): number;
-export declare function resolveAntigravityExecutable(): string | undefined;
 export declare function buildLaunchArgs(params: {
     targetDir: string;
     port: number;

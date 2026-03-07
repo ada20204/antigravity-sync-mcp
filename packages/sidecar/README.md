@@ -1,6 +1,6 @@
 # Antigravity MCP Sidecar
 
-All-in-one companion extension for Antigravity (Cursor fork).
+All-in-one companion extension for Antigravity.
 
 ## Features
 

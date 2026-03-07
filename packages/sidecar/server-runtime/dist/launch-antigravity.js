@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
-import fs from "fs";
 import path from "path";
 import net from "net";
+import { resolveAntigravityExecutable } from "@antigravity-mcp/core";
 import { readRegistryObject } from "./registry-io.js";
 const DEFAULT_PORT = 9000;
 const CDP_PORT_RANGE_MIN = 9000;
@@ -23,48 +23,10 @@ function parsePort(value) {
         return undefined;
     return parsed;
 }
-function fileExists(filePath) {
-    try {
-        return fs.existsSync(filePath);
-    }
-    catch {
-        return false;
-    }
-}
 export function resolveLaunchPort() {
     return (parsePort(process.env.ANTIGRAVITY_LAUNCH_PORT) ??
         parsePort(process.env.ANTIGRAVITY_CDP_PORT) ??
         DEFAULT_PORT);
-}
-export function resolveAntigravityExecutable() {
-    const explicit = process.env.ANTIGRAVITY_EXECUTABLE?.trim();
-    if (explicit)
-        return explicit;
-    if (process.platform === "win32") {
-        const username = process.env.USERNAME || process.env.USER || "";
-        const localAppData = process.env.LOCALAPPDATA || `C:\\Users\\${username}\\AppData\\Local`;
-        const candidates = [
-            path.win32.join(localAppData, "Programs", "Antigravity", "Antigravity.exe"),
-            path.win32.join(localAppData, "Programs", "Cursor", "Cursor.exe"),
-        ];
-        return candidates.find((item) => fileExists(item));
-    }
-    if (process.platform === "darwin") {
-        const candidates = [
-            "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
-            "/Applications/Antigravity.app/Contents/MacOS/Electron",
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-            "/Applications/Cursor.app/Contents/MacOS/Cursor",
-        ];
-        return candidates.find((item) => fileExists(item));
-    }
-    const linuxCandidates = [
-        "/usr/bin/antigravity",
-        "/usr/local/bin/antigravity",
-        "/usr/bin/cursor",
-        "/usr/local/bin/cursor",
-    ];
-    return linuxCandidates.find((item) => fileExists(item));
 }
 export function buildLaunchArgs(params) {
     const bindAddress = resolveCdpBindAddress();
@@ -156,32 +118,32 @@ export function psQuote(value) {
     return String(value || "").replace(/'/g, "''");
 }
 // ---------------------------------------------------------------------------
-// Atomic Windows launch via PowerShell
+// Windows launch via direct spawn + taskkill
 // ---------------------------------------------------------------------------
 function deriveProcessName(executablePath) {
     return path.win32.basename(executablePath, path.win32.extname(executablePath));
 }
+async function killWindowsProcess(processName, log) {
+    const imageName = processName.endsWith(".exe") ? processName : `${processName}.exe`;
+    log?.(`Killing ${imageName} via taskkill...`);
+    return new Promise((resolve) => {
+        const child = spawn("taskkill.exe", ["/im", imageName, "/f"], {
+            stdio: "ignore",
+        });
+        child.on("exit", () => resolve());
+        child.on("error", () => resolve());
+        setTimeout(() => resolve(), 8_000);
+    });
+}
 export async function atomicWindowsLaunch(executable, args, killFirst, log) {
-    const exe = psQuote(executable);
-    const argList = args.map((item) => `'${psQuote(item)}'`).join(",");
-    let script;
     if (killFirst) {
         const processName = deriveProcessName(executable);
-        script =
-            `$ErrorActionPreference='SilentlyContinue'; ` +
-                `Get-Process '${psQuote(processName)}' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
-                `$deadline = (Get-Date).AddSeconds(8); ` +
-                `while ((Get-Date) -lt $deadline) { ` +
-                `  if (-not (Get-Process '${psQuote(processName)}' -ErrorAction SilentlyContinue)) { break }; ` +
-                `  Start-Sleep -Milliseconds 200 ` +
-                `}; ` +
-                `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
+        await killWindowsProcess(processName, log);
+        // Brief pause to let OS release resources after kill
+        await new Promise((r) => setTimeout(r, 1_000));
     }
-    else {
-        script = `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
-    }
-    log?.(`PowerShell launch script: ${script}`);
-    const child = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+    log?.(`Spawning ${executable} with args: ${args.join(" ")}`);
+    const child = spawn(executable, args, {
         detached: true,
         stdio: "ignore",
     });

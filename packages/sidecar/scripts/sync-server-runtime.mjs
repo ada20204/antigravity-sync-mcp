@@ -23,6 +23,9 @@ const coreRoot = join(workspaceRoot, 'packages', 'core');
 const serverRuntimeDir = join(sidecarRoot, 'server-runtime');
 const targetDistDir = join(serverRuntimeDir, 'dist');
 const targetNodeModules = join(serverRuntimeDir, 'node_modules');
+const extensionVendorDir = join(sidecarRoot, 'vendor');
+const extensionVendorWsDir = join(extensionVendorDir, 'ws');
+const extensionVendorCoreDir = join(extensionVendorDir, 'core');
 const hoistedNodeModules = join(workspaceRoot, 'node_modules');
 
 const RUNTIME_DEPS = ['ws'];
@@ -32,6 +35,10 @@ const SERVER_RUNTIME_PACKAGE_JSON = {
     dependencies: {
         '@antigravity-mcp/core': '*',
     },
+};
+const EXTENSION_VENDOR_CORE_PACKAGE_JSON = {
+    type: 'commonjs',
+    main: './index.js',
 };
 const SOURCE_TO_TARGET_COPIES = [
     {
@@ -66,6 +73,10 @@ function copyPath(label, source, target) {
 
 function copyRuntimeDependency(dep) {
     copyPath(`${dep} runtime dependency`, join(hoistedNodeModules, dep), join(targetNodeModules, dep));
+}
+
+function copyExtensionHostDependency(dep) {
+    copyPath(`${dep} extension-host dependency`, join(hoistedNodeModules, dep), extensionVendorWsDir);
 }
 
 function copySdkRuntimeDependencies(packageDir, visited = new Set()) {
@@ -103,15 +114,36 @@ if (existsSync(targetNodeModules)) {
     rmSync(targetNodeModules, { recursive: true, force: true });
 }
 
+for (const dep of RUNTIME_DEPS) {
+    if (existsSync(extensionVendorWsDir)) {
+        console.log('  Cleaning existing extension vendor/ws/');
+        rmSync(extensionVendorWsDir, { recursive: true, force: true });
+    }
+}
+
+if (existsSync(extensionVendorCoreDir)) {
+    console.log('  Cleaning existing extension vendor/core/');
+    rmSync(extensionVendorCoreDir, { recursive: true, force: true });
+}
+
 mkdirSync(serverRuntimeDir, { recursive: true });
 mkdirSync(targetNodeModules, { recursive: true });
+mkdirSync(extensionVendorDir, { recursive: true });
 
 for (const entry of SOURCE_TO_TARGET_COPIES) {
     copyPath(entry.label, entry.source, entry.target);
 }
 
+copyPath('core cjs build output', join(coreRoot, 'dist', 'cjs'), extensionVendorCoreDir);
+writeFileSync(
+    join(extensionVendorCoreDir, 'package.json'),
+    `${JSON.stringify(EXTENSION_VENDOR_CORE_PACKAGE_JSON, null, 2)}\n`,
+    'utf8'
+);
+
 for (const dep of RUNTIME_DEPS) {
     copyRuntimeDependency(dep);
+    copyExtensionHostDependency(dep);
 }
 
 copyRuntimeDependency(SDK_RUNTIME_PACKAGE);
