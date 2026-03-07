@@ -144,15 +144,37 @@ function launchAntigravityDetached(params) {
         return;
     }
 
+    // macOS/Linux: Use bash -c to properly pass arguments through shell script wrapper.
+    //
+    // On macOS/Linux, the antigravity executable is a bash script that wraps Electron.
+    // Using spawn(executable, args, { shell: false }) fails to pass arguments correctly
+    // through the script to the underlying Electron process, causing CDP parameters like
+    // --remote-debugging-port to be lost.
+    //
+    // Solution: Execute the full command via bash -c, which properly handles the script
+    // wrapper and ensures all arguments reach Electron. This matches the behavior of
+    // manually running the command in a terminal.
+    //
+    // Note: macOS and Linux share this logic as both use bash script wrappers with
+    // identical structure (VS Code upstream pattern). If Linux behavior differs in
+    // practice, this can be adjusted in a follow-up.
     if (restart) {
         try {
             spawn('pkill', ['-f', 'Antigravity'], { stdio: 'ignore' });
         } catch { }
     }
-    const child = spawn(executable, args, {
+
+    // Escape arguments for safe shell execution
+    const escapedArgs = args.map(arg => {
+        // Escape backslashes and single quotes to prevent shell injection
+        const escaped = String(arg).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        return `'${escaped}'`;
+    });
+    const cmd = `exec "${executable}" ${escapedArgs.join(' ')}`;
+
+    const child = spawn('bash', ['-c', cmd], {
         detached: true,
         stdio: 'ignore',
-        shell: false,
     });
     child.unref();
 }
