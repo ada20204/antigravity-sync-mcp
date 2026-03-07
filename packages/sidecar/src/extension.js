@@ -776,6 +776,37 @@ async function activate(context) {
                     }
                     continue;
                 }
+
+                // Check current real-time CDP status before showing prompt.
+                // If CDP is now ready, the issue has been auto-resolved (e.g., launch completed
+                // after initial probe failure). Skip the prompt and mark request as resolved.
+                // This prevents showing stale/misleading error prompts when CDP is working.
+                if (cdpState === 'ready' && cdpTarget) {
+                    log('Skipping stale CDP prompt: CDP is now ready', {
+                        plane: 'ctrl',
+                        state: 'skip_prompt',
+                        extra: {
+                            request_id: request.id,
+                            request_state: request.state,
+                            current_state: cdpState,
+                            reason_code: request.reason_code,
+                        },
+                    });
+                    const current = control[CONTROL_NO_CDP_PROMPT_KEY][request.id];
+                    if (current) {
+                        control[CONTROL_NO_CDP_PROMPT_KEY][request.id] = {
+                            ...current,
+                            status: 'resolved',
+                            resolved_reason: 'cdp_now_ready',
+                            resolved_at: Date.now(),
+                            resolved_by: nodeId,
+                            updated_at: Date.now(),
+                        };
+                        changed = true;
+                    }
+                    continue;
+                }
+
                 const selectedAction = await showNoCdpPromptFromServer(request);
                 const current = control[CONTROL_NO_CDP_PROMPT_KEY][request.id];
                 if (current) {
