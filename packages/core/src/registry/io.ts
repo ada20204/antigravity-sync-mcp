@@ -7,19 +7,14 @@
  */
 
 import fs from "fs";
-import path from "path";
-import os from "os";
-
-const REGISTRY_DIR = ".config/antigravity-mcp";
-const REGISTRY_FILE_NAME = "registry.json";
-const LOCAL_REGISTRY_FILE = path.join(os.homedir(), REGISTRY_DIR, REGISTRY_FILE_NAME);
+import { getRegistryPath } from "../platform/paths.js";
 
 /**
  * Returns the path to the registry JSON file.
  * Respects the ANTIGRAVITY_REGISTRY_FILE environment variable override.
  */
 export function getRegistryFilePath(): string {
-    return process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || LOCAL_REGISTRY_FILE;
+    return process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || getRegistryPath();
 }
 
 /**
