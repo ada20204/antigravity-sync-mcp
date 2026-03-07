@@ -63,9 +63,9 @@ jobs:
           OUT_VSIX="${VSIX_BASE%-base.vsix}.vsix"
           rm -rf /tmp/ag-vsix-repack && mkdir -p /tmp/ag-vsix-repack
           unzip -q "$VSIX_BASE" -d /tmp/ag-vsix-repack
-          # Prune dev dependencies before injecting into VSIX to reduce size.
-          (cd packages/sidecar && npm prune --omit=dev)
-          cp -a packages/sidecar/node_modules /tmp/ag-vsix-repack/extension/node_modules
+          # In workspace mode, dependencies are hoisted to root node_modules.
+          # Copy from root instead of packages/sidecar/node_modules.
+          cp -a node_modules /tmp/ag-vsix-repack/extension/node_modules
           (cd /tmp/ag-vsix-repack && zip -qr /tmp/ag-vsix-packed.vsix .)
           mv /tmp/ag-vsix-packed.vsix "$OUT_VSIX"
           rm -f "$VSIX_BASE"
