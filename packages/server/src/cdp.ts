@@ -8,17 +8,19 @@
 
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
 import WebSocket from "ws";
 import {
-    readRegistryObject as _readRegistry,
-    getRegistryFilePath as _getRegistryFilePath,
+    readRegistryObject as _readRegistryObject,
+    getRegistryFilePath,
+    computeWorkspaceId,
     COMPATIBLE_SCHEMA_VERSIONS,
     entrySupportsCurrentSchema,
     REGISTRY_CONTROL_KEY,
     CONTROL_NO_CDP_PROMPT_KEY,
     NO_CDP_PROMPT_COOLDOWN_MS,
 } from "@antigravity-mcp/core";
+
+export { computeWorkspaceId };
 import type {
     CDPTarget,
     ExecutionContext,
@@ -69,38 +71,16 @@ function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
     return Date.now() - value <= maxAgeMs;
 }
 
-/** Normalize path the same way the sidecar does (for workspace_id hashing). */
-function normalizePathForId(rawPath: string): string {
-    let p = rawPath.trim();
-    if (!p) return "";
-    // Resolve relative paths and symlinks before normalizing.
-    try { p = fs.realpathSync(p); } catch { /* path may not exist locally; fall back to resolve */ }
-    p = path.resolve(p);
-    p = p.replace(/\\/g, "/");
-    p = p.replace(/^([A-Z]):/, (_, d: string) => d.toLowerCase() + ":");
-    if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
-    return p;
-}
-
-export function computeWorkspaceId(rawPath: string): string {
-    const normalized = normalizePathForId(rawPath);
-    return crypto.createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16);
-}
-
-function readRegistryObject(): Record<string, RegistryEntry> | null {
-    return _readRegistry() as Record<string, RegistryEntry> | null;
-}
-
-function getRegistryFilePath(): string {
-    return _getRegistryFilePath();
-}
-
 function writeRegistryObject(registryFile: string, payload: Record<string, unknown>): void {
     try {
         fs.writeFileSync(registryFile, JSON.stringify(payload, null, 2), "utf-8");
     } catch (e) {
         console.error(`[CDP] Failed to write registry '${registryFile}': ${(e as Error).message}`);
     }
+}
+
+function readRegistryObject(): Record<string, RegistryEntry> | null {
+    return _readRegistryObject() as Record<string, RegistryEntry> | null;
 }
 
 function upsertNoCdpPromptRequest(params: {

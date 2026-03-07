@@ -31,6 +31,7 @@ const {
     CONTROL_NO_CDP_PROMPT_KEY,
     getConfigDir,
     getRegistryFilePath,
+    computeWorkspaceId,
 } = require('@antigravity-mcp/core');
 
 const REGISTRY_DIR = getConfigDir();
@@ -154,24 +155,6 @@ function buildAiConfigPrompt(params) {
         '- Pass `mode` as `fast` for quick loop and `plan` for deep tasks.',
         '- If response indicates `registry_not_ready`, ask user to open/restart Antigravity with sidecar enabled.',
     ].join('\n');
-}
-
-// ── Schema helpers ────────────────────────────────────────────────────────
-function normalizePath(rawPath) {
-    let p = String(rawPath || '').trim();
-    if (!p) return '';
-    // Resolve symlinks and relative segments — must match server-side normalizePathForId.
-    try { p = fs.realpathSync(p); } catch { /* path may not exist locally; fall back to resolve */ }
-    p = path.resolve(p);
-    p = p.replace(/\\/g, '/');
-    p = p.replace(/^([A-Z]):/, (_, d) => d.toLowerCase() + ':');
-    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
-    return p;
-}
-
-function computeWorkspaceId(rawPath) {
-    const normalized = normalizePath(rawPath);
-    return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 16);
 }
 
 function mapCdpStateToRegistryState(state) {

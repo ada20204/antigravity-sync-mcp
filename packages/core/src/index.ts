@@ -5,3 +5,4 @@ export * from './registry/io.js';
 export * from './control/constants.js';
 export * from './platform/detection.js';
 export * from './platform/paths.js';
+export * from './platform/workspace.js';
