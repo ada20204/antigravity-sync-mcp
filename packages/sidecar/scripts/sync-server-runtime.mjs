@@ -19,6 +19,10 @@ const rootDir = join(__dirname, '..');
 const serverRuntimeDir = join(rootDir, 'server-runtime');
 const targetNodeModules = join(serverRuntimeDir, 'node_modules');
 
+// In a workspace, dependencies are hoisted to workspace root
+const workspaceRoot = join(rootDir, '../..');
+const sourceNodeModules = join(workspaceRoot, 'node_modules');
+
 const DEPS_TO_COPY = ['ws', '@modelcontextprotocol'];
 
 console.log('🔄 Syncing server runtime dependencies...');
@@ -33,7 +37,7 @@ mkdirSync(targetNodeModules, { recursive: true });
 
 // Copy each dependency
 for (const dep of DEPS_TO_COPY) {
-    const sourcePath = join(rootDir, 'node_modules', dep);
+    const sourcePath = join(sourceNodeModules, dep);
     const targetPath = join(targetNodeModules, dep);
 
     if (!existsSync(sourcePath)) {
