@@ -32,19 +32,19 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: |
-            antigravity-mcp-server/package-lock.json
+            packages/server/package-lock.json
             antigravity-mcp-sidecar/package-lock.json
 
       - name: Normalize lockfile registry URLs
         run: |
-          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' antigravity-mcp-server/package-lock.json
+          perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' packages/server/package-lock.json
           perl -pi -e 's#https://registry\.npmmirror\.com/#https://registry.npmjs.org/#g' antigravity-mcp-sidecar/package-lock.json
 
       - name: Install server dependencies
-        run: npm --prefix antigravity-mcp-server ci
+        run: npm --prefix packages/server ci
 
       - name: Build server runtime
-        run: npm --prefix antigravity-mcp-server run build
+        run: npm --prefix packages/server run build
 
       - name: Install sidecar dependencies
         # Sidecar lockfile may lag package.json during active development.

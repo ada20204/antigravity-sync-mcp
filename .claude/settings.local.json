@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(packages/server/node_modules/.bin/tsc:*)",
+      "Bash(cat:*)",
+      "Bash(where vsce:*)",
+      "WebSearch",
+      "WebFetch(domain:code.visualstudio.com)",
+      "WebFetch(domain:github.com)",
+      "mcp__deepwiki__ask_question",
+      "Bash(ls:*)",
+      "mcp__antigravity-mcp__ping",
+      "mcp__antigravity-mcp__launch-antigravity",
+      "mcp__antigravity-mcp__list-workspaces",
+      "Bash(where antigravity)",
+      "Read(//c/Users/29535/AppData/Local/Programs/Antigravity/**)",
+      "Bash(antigravity:*)",
+      "Bash(netstat:*)",
+      "Bash(tasklist:*)",
+      "Bash(curl:*)",
+      "Bash(powershell:*)",
+      "Bash(python3 -c \"import json,sys; r=json.load\\(sys.stdin\\); [print\\(k[:20], v.get\\(''state''\\), v.get\\(''local_endpoint'',{}\\).get\\(''port''\\)\\) for k,v in r.items\\(\\) if not k.startswith\\(''__''\\)]\")",
+      "Bash(xargs grep -l \"antigravity-mcp\")",
+      "Bash(python3:*)",
+      "mcp__antigravity-mcp__ask-antigravity",
+      "Bash(powershell.exe:*)",
+      "Bash(wmic process:*)",
+      "Bash(cp:*)",
+      "Bash(grep:*)",
+      "Bash(npx vsce:*)",
+      "Bash(npx:*)",
+      "Bash(bash:*)",
+      "Bash(mkdir:*)",
+      "Bash(\"D:/antigravity-sync/antigravity-mcp-sidecar/scripts/sync-server-runtime.mjs\":*)",
+      "Bash(rm:*)",
+      "Bash(wc:*)",
+      "mcp__codex-cli__codex",
+      "Bash(test:*)"
+    ]
+  }
+}
