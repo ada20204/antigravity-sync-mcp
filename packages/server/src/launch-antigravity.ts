@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
-import fs from "fs";
 import path from "path";
 import net from "net";
+import { resolveAntigravityExecutable } from "@antigravity-mcp/core";
 import { readRegistryObject } from "./registry-io.js";
 
 const DEFAULT_PORT = 9000;
@@ -25,53 +25,12 @@ function parsePort(value?: string): number | undefined {
     return parsed;
 }
 
-function fileExists(filePath: string): boolean {
-    try {
-        return fs.existsSync(filePath);
-    } catch {
-        return false;
-    }
-}
-
 export function resolveLaunchPort(): number {
     return (
         parsePort(process.env.ANTIGRAVITY_LAUNCH_PORT) ??
         parsePort(process.env.ANTIGRAVITY_CDP_PORT) ??
         DEFAULT_PORT
     );
-}
-
-export function resolveAntigravityExecutable(): string | undefined {
-    const explicit = process.env.ANTIGRAVITY_EXECUTABLE?.trim();
-    if (explicit) return explicit;
-
-    if (process.platform === "win32") {
-        const username = process.env.USERNAME || process.env.USER || "";
-        const localAppData = process.env.LOCALAPPDATA || `C:\\Users\\${username}\\AppData\\Local`;
-        const candidates = [
-            path.win32.join(localAppData, "Programs", "Antigravity", "Antigravity.exe"),
-            path.win32.join(localAppData, "Programs", "Cursor", "Cursor.exe"),
-        ];
-        return candidates.find((item) => fileExists(item));
-    }
-
-    if (process.platform === "darwin") {
-        const candidates = [
-            "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
-            "/Applications/Antigravity.app/Contents/MacOS/Electron",
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-            "/Applications/Cursor.app/Contents/MacOS/Cursor",
-        ];
-        return candidates.find((item) => fileExists(item));
-    }
-
-    const linuxCandidates = [
-        "/usr/bin/antigravity",
-        "/usr/local/bin/antigravity",
-        "/usr/bin/cursor",
-        "/usr/local/bin/cursor",
-    ];
-    return linuxCandidates.find((item) => fileExists(item));
 }
 
 export function buildLaunchArgs(params: { targetDir: string; port: number }): string[] {
