@@ -24,14 +24,17 @@ const {
     verifyBridgeHttpRequest,
 } = require('./bridge-auth');
 
-const REGISTRY_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
-const REGISTRY_FILE = path.join(REGISTRY_DIR, 'registry.json');
-const MCP_BIN_DIR = path.join(REGISTRY_DIR, 'bin');
-const MCP_METADATA_FILE = path.join(REGISTRY_DIR, 'server-runtime.json');
-const REGISTRY_SCHEMA_VERSION = 2;
-const REGISTRY_COMPAT_SCHEMA_VERSIONS = [2];
-const REGISTRY_CONTROL_KEY = '__control__';
-const CONTROL_NO_CDP_PROMPT_KEY = 'cdp_prompt_requests';
+const {
+    SCHEMA_VERSION,
+    COMPATIBLE_SCHEMA_VERSIONS,
+    REGISTRY_CONTROL_KEY,
+    CONTROL_NO_CDP_PROMPT_KEY,
+    getConfigDir,
+    getRegistryFilePath,
+} = require('@antigravity-mcp/core');
+
+const REGISTRY_DIR = getConfigDir();
+const REGISTRY_FILE = getRegistryFilePath();
 const HOST_CONTROL_POLL_INTERVAL_MS = 2_500;
 const QUOTA_POLL_INTERVAL_MS = 60_000;
 const CDP_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -1201,7 +1204,7 @@ function createHostBridgeServer({ getSnapshot, bridgeToken, nonceCache, nodeId, 
 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
-                    schema_version: REGISTRY_SCHEMA_VERSION,
+                    schema_version: SCHEMA_VERSION,
                     entry: snapshot,
                     server_time: Date.now(),
                     ttl_ms: 30_000,
@@ -2122,10 +2125,10 @@ async function activate(context) {
 
         registry[workspacePath] = {
             ...previous,
-            schema_version: REGISTRY_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             protocol: {
-                schema_version: REGISTRY_SCHEMA_VERSION,
-                compatible_schema_versions: REGISTRY_COMPAT_SCHEMA_VERSIONS,
+                schema_version: SCHEMA_VERSION,
+                compatible_schema_versions: COMPATIBLE_SCHEMA_VERSIONS,
                 writer_role: runtimeRole,
                 writer_node_id: nodeId,
                 updated_at: now,
@@ -2239,10 +2242,10 @@ async function activate(context) {
                 : {};
             registry[workspacePath] = {
                 ...previous,
-                schema_version: REGISTRY_SCHEMA_VERSION,
+                schema_version: SCHEMA_VERSION,
                 protocol: {
-                    schema_version: REGISTRY_SCHEMA_VERSION,
-                    compatible_schema_versions: REGISTRY_COMPAT_SCHEMA_VERSIONS,
+                    schema_version: SCHEMA_VERSION,
+                    compatible_schema_versions: COMPATIBLE_SCHEMA_VERSIONS,
                     writer_role: 'remote',
                     writer_node_id: nodeId,
                     updated_at: now,

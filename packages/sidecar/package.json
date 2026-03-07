@@ -166,6 +166,7 @@
         "test": "node -c src/extension.js && node -c src/structured-log.js && node -c src/bridge-auth.js && echo 'Sidecar syntax check passed'"
     },
     "dependencies": {
+        "@antigravity-mcp/core": "*",
         "@modelcontextprotocol/sdk": "^1.27.1",
         "ws": "^8.19.0"
     },

@@ -9,11 +9,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import WebSocket from "ws";
-import { readRegistryObject as _readRegistry, getRegistryFilePath as _getRegistryFilePath } from "./registry-io.js";
-const REGISTRY_CONTROL_KEY = "__control__";
-const CONTROL_NO_CDP_PROMPT_KEY = "cdp_prompt_requests";
-const NO_CDP_PROMPT_COOLDOWN_MS = 15_000;
-const SUPPORTED_SCHEMA_VERSIONS = [2];
+import { readRegistryObject as _readRegistry, getRegistryFilePath as _getRegistryFilePath, COMPATIBLE_SCHEMA_VERSIONS, entrySupportsCurrentSchema, REGISTRY_CONTROL_KEY, CONTROL_NO_CDP_PROMPT_KEY, NO_CDP_PROMPT_COOLDOWN_MS, } from "@antigravity-mcp/core";
 const READY_STATE = "ready";
 function isFreshTimestamp(value, maxAgeMs) {
     if (typeof value !== "number" || !Number.isFinite(value))
@@ -125,22 +121,6 @@ function rankRegistryEntries(entries) {
         return (b.priority ?? 0) - (a.priority ?? 0);
     });
 }
-function entrySupportsSchema(entry) {
-    const declared = new Set();
-    if (Number.isFinite(Number(entry.schema_version))) {
-        declared.add(Number(entry.schema_version));
-    }
-    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
-        for (const raw of entry.protocol.compatible_schema_versions) {
-            const version = Number(raw);
-            if (Number.isFinite(version))
-                declared.add(version);
-        }
-    }
-    if (declared.size === 0)
-        return false;
-    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
-}
 async function resolveTargetFromEndpoint(ip, port) {
     const response = await fetch(`http://${ip}:${port}/json/list`);
     const list = await response.json();
@@ -205,10 +185,10 @@ export async function discoverCDPDetailed(targetDir, options = {}) {
             workspaceId: targetId,
         });
     }
-    const withSupportedSchema = entries.filter((entry) => entrySupportsSchema(entry));
+    const withSupportedSchema = entries.filter((entry) => entrySupportsCurrentSchema(entry));
     if (withSupportedSchema.length === 0) {
         const seenSchemas = [...new Set(entries.map((entry) => Number(entry.schema_version)))].filter((n) => Number.isFinite(n));
-        return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${SUPPORTED_SCHEMA_VERSIONS.join(",")})`, {
+        return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${COMPATIBLE_SCHEMA_VERSIONS.join(",")})`, {
             workspaceId: targetId,
             details: { seen_schema_versions: seenSchemas },
         });

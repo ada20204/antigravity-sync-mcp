@@ -1,6 +1,8 @@
 # @antigravity-mcp/core
 
-Shared types and utilities for Antigravity MCP project.
+Shared types and utilities for the Antigravity MCP monorepo.
+
+This package centralizes code that is shared by both `packages/server` and `packages/sidecar`, so registry schema, control-plane constants, and platform helpers stay in sync after the core extraction.
 
 ## Contents
 

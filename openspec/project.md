@@ -16,6 +16,12 @@ Core objective:
 
 ## 2. Main Components
 
+### `packages/core`
+
+Role:
+- Shared package for registry types/schema, control constants, and platform/path helpers.
+- Provides common primitives consumed by both server and sidecar.
+
 ### `packages/server`
 
 Role:
@@ -139,11 +145,15 @@ Retention:
 
 ## 9. Build, Test, and Packaging
 
+### Core
+
+- Tests: `node --test packages/core/test/*.mjs`
+
 ### Server
 
-- Build: `npm --prefix packages/server run build`
+- Build: `npm --workspace packages/server run build`
 - Tests: `node --test packages/server/test/*.mjs`
-- Package: `npm pack` inside `packages/server/`
+- Package: `npm pack --workspace packages/server`
 
 ### Sidecar
 

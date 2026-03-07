@@ -6,7 +6,7 @@ All-in-one companion extension for Antigravity (Cursor fork).
 
 - **Auto-Accept**: Automatically clicks Run, Accept, Always Allow buttons in the agent panel
 - **CDP Negotiation Registry**: Publishes negotiated CDP endpoint/state for external MCP server routing
-- **Bundled MCP Server Runtime**: VSIX ships with `antigravity-mcp-server` runtime (`server-runtime/dist`) so one VSIX can bootstrap server usage
+- **Bundled MCP Server Runtime**: VSIX ships with the server runtime in `packages/sidecar/server-runtime/dist` so one VSIX can bootstrap server usage
 - **Manual Launch Controls**: Commands to launch/restart Antigravity (restart requires confirmation)
 - **Cross-End Restart Control**: Remote sidecar can submit signed host restart requests; host side confirms via modal before restart
 - **Structured Logging**: Writes JSONL logs with role/node/trace metadata to `~/.config/antigravity-mcp/logs/`
@@ -70,7 +70,7 @@ After installing sidecar VSIX:
    - `~/.config/antigravity-mcp/bin/antigravity-mcp-server.cmd`
 3. Sidecar prints and copies AI configuration prompt to clipboard.
 
-This lets you configure MCP clients without separately installing `antigravity-mcp-server` package.
+This lets you configure MCP clients without separately installing the `packages/server` package.
 
 ## AI Config Prompt (Template)
 

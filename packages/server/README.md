@@ -11,13 +11,14 @@ MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a loca
 ## Quick Start
 
 ```bash
-# Build
-cd packages/server
+# Install workspace dependencies
 npm install
-npm run build
+
+# Build server package
+npm --workspace packages/server run build
 
 # Test connectivity
-node build/dist/index.js  # (runs as stdio MCP server)
+node packages/server/build/dist/index.js  # (runs as stdio MCP server)
 ```
 
 ## Single VSIX Option
@@ -34,7 +35,7 @@ If you install `packages/sidecar` VSIX, you can bootstrap this server without se
 
 ### Claude Code
 ```bash
-claude mcp add antigravity-mcp -- node /path/to/antigravity-mcp-server/build/dist/index.js
+claude mcp add antigravity-mcp -- node /path/to/repo/packages/server/build/dist/index.js
 ```
 
 ### Claude Desktop / Cursor
@@ -44,7 +45,7 @@ Add to your MCP config:
   "mcpServers": {
     "antigravity-mcp": {
       "command": "node",
-      "args": ["/path/to/antigravity-mcp-server/build/dist/index.js"]
+      "args": ["/path/to/repo/packages/server/build/dist/index.js"]
     }
   }
 }

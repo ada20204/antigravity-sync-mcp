@@ -11,6 +11,7 @@
 
 ## 仓库结构
 
+- `packages/core/`：共享类型、schema 与平台工具
 - `packages/server/`：MCP Server（TypeScript）
 - `packages/sidecar/`：Sidecar 扩展（JavaScript）
 - `references/`：参考实现（以 submodule 为主）
@@ -30,8 +31,8 @@
 ### 1) 构建 Server
 
 ```bash
-npm --prefix packages/server install
-npm --prefix packages/server run build
+npm install
+npm --workspace packages/server run build
 ```
 
 ### 2) 安装 Sidecar（推荐 VSIX）
@@ -42,12 +43,14 @@ npm --prefix packages/server run build
 ### 3) 基础验证
 
 ```bash
+node --test packages/core/test/*.mjs
 node --test packages/server/test/*.mjs
 node --test packages/sidecar/test/*.mjs
 ```
 
 ## 文档入口
 
+- Core 包说明：`packages/core/README.md`
 - Server 使用说明：`packages/server/README.md`
 - Sidecar 使用说明：`packages/sidecar/README.md`
 - 设计与计划：`docs/plans/`

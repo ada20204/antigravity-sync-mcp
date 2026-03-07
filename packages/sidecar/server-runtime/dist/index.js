@@ -10,13 +10,12 @@
  * - OmniAntigravityRemoteChat (CDP Discovery + DOM Injection)
  * - auto-accept-agent (Auto-click confirmation dialogs)
  */
-import fs from "fs";
 import path from "path";
-import os from "os";
 import { pathToFileURL } from "url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import { readRegistryObject as _readRegistryFromCore, getRegistryFilePath, entrySupportsCurrentSchema, } from "@antigravity-mcp/core";
 import { computeWorkspaceId, discoverCDP, discoverCDPDetailed, connectCDP, } from "./cdp.js";
 import { applyModeAndModelSelection, injectMessage, pollCompletionStatus, extractLatestResponse, stopGeneration, } from "./scripts.js";
 import { createAskTask, incrementTaskAttempt, isTaskTerminal, RetryableError, transitionAskTask, withRetry, withTimeout, } from "./task-runtime.js";
@@ -35,11 +34,10 @@ const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
+const REGISTRY_FILE = getRegistryFilePath();
 const VERSION = "0.1.2";
 const activeAskTasks = new Map();
 const activeWorkspaceRoutes = new Map();
-const REGISTRY_FILE = path.join(os.homedir(), ".config/antigravity-mcp/registry.json");
-const SUPPORTED_SCHEMA_VERSIONS = [2];
 const NO_WORKSPACE_GUIDANCE = "No Antigravity workspace is open yet. Open Antigravity, open your workspace folder, " +
     "complete first-time authorization, then retry ask-antigravity.";
 // --- Logging ---
@@ -107,33 +105,8 @@ function uniqueStrings(items) {
     }
     return out;
 }
-function entrySupportsSchema(entry) {
-    const declared = new Set();
-    if (Number.isFinite(Number(entry.schema_version))) {
-        declared.add(Number(entry.schema_version));
-    }
-    if (Array.isArray(entry.protocol?.compatible_schema_versions)) {
-        for (const raw of entry.protocol.compatible_schema_versions) {
-            const version = Number(raw);
-            if (Number.isFinite(version))
-                declared.add(version);
-        }
-    }
-    if (declared.size === 0)
-        return false;
-    return [...declared].some((version) => SUPPORTED_SCHEMA_VERSIONS.includes(version));
-}
 function readRegistryObjectFromDisk() {
-    const registryFile = process.env.ANTIGRAVITY_REGISTRY_FILE?.trim() || REGISTRY_FILE;
-    try {
-        if (!fs.existsSync(registryFile))
-            return null;
-        const parsed = JSON.parse(fs.readFileSync(registryFile, "utf-8"));
-        return parsed && typeof parsed === "object" ? parsed : null;
-    }
-    catch {
-        return null;
-    }
+    return _readRegistryFromCore();
 }
 function summarizeQuotaForWorkspace(quota) {
     if (!quota)
@@ -640,7 +613,7 @@ async function handleListWorkspaces() {
     }
     const workspaces = Object.entries(registry)
         .filter(([key, value]) => !key.startsWith("__") && !!value && typeof value === "object")
-        .filter(([, entry]) => entrySupportsSchema(entry))
+        .filter(([, entry]) => entrySupportsCurrentSchema(entry))
         .map(([registryKey, entry]) => ({
         workspacePath: entry.workspace_paths?.raw ??
             entry.workspace_paths?.normalized ??
