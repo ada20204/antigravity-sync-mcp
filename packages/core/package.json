@@ -1,0 +1,27 @@
+{
+  "name": "@antigravity-mcp/core",
+  "version": "0.1.0",
+  "description": "Shared types and utilities for Antigravity MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/**/*.test.mjs",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["mcp", "antigravity", "types"],
+  "license": "MIT",
+  "engines": { "node": ">=18.0.0" },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "@types/ws": "^8.5.4",
+    "typescript": "^5.9.3"
+  }
+}
