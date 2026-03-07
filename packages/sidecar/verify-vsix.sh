@@ -50,8 +50,28 @@ require_path() {
 require_path "server-runtime/dist/index.js" "bundled server runtime entry"
 require_path "server-runtime/node_modules/ws" "ws module"
 require_path "server-runtime/node_modules/@modelcontextprotocol/sdk" "@modelcontextprotocol/sdk module"
+require_path "server-runtime/node_modules/zod" "zod module"
+require_path "server-runtime/node_modules/zod-to-json-schema" "zod-to-json-schema module"
+require_path "server-runtime/node_modules/ajv" "ajv module"
 require_path "server-runtime/node_modules/@antigravity-mcp/core/package.json" "@antigravity-mcp/core package metadata"
 require_path "server-runtime/node_modules/@antigravity-mcp/core/dist/index.js" "@antigravity-mcp/core build output"
 
-echo "PASS: bundled server runtime, runtime deps, and core package present in $(basename "$VSIX_PATH")"
+RUNTIME_DIR="$WORK_DIR/extension/server-runtime"
+
+echo "Running runtime smoke test..."
+(
+  cd "$RUNTIME_DIR"
+  node --input-type=module <<'EOF'
+import { pathToFileURL } from 'url';
+
+const entryUrl = pathToFileURL(`${process.cwd()}/dist/index.js`).href;
+const runtimeModule = await import(entryUrl);
+
+if (!runtimeModule || !runtimeModule.__testExports) {
+  throw new Error('Runtime entry did not load expected exports');
+}
+EOF
+)
+
+echo "PASS: bundled server runtime, runtime deps, core package, and runtime smoke test succeeded in $(basename "$VSIX_PATH")"
 exit 0

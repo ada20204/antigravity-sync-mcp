@@ -11,7 +11,7 @@
  * This keeps the extension package self-contained without changing extension.js.
  */
 
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -25,7 +25,8 @@ const targetDistDir = join(serverRuntimeDir, 'dist');
 const targetNodeModules = join(serverRuntimeDir, 'node_modules');
 const hoistedNodeModules = join(workspaceRoot, 'node_modules');
 
-const RUNTIME_DEPS = ['ws', '@modelcontextprotocol'];
+const RUNTIME_DEPS = ['ws'];
+const SDK_RUNTIME_PACKAGE = '@modelcontextprotocol/sdk';
 const SERVER_RUNTIME_PACKAGE_JSON = {
     type: 'module',
     dependencies: {
@@ -63,6 +64,33 @@ function copyPath(label, source, target) {
     cpSync(source, target, { recursive: true });
 }
 
+function copyRuntimeDependency(dep) {
+    copyPath(`${dep} runtime dependency`, join(hoistedNodeModules, dep), join(targetNodeModules, dep));
+}
+
+function copySdkRuntimeDependencies(packageDir, visited = new Set()) {
+    if (visited.has(packageDir)) {
+        return;
+    }
+    visited.add(packageDir);
+
+    const packageJsonPath = join(packageDir, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    const dependencies = Object.keys(packageJson.dependencies ?? {});
+
+    for (const dep of dependencies) {
+        const source = join(hoistedNodeModules, dep);
+        const target = join(targetNodeModules, dep);
+
+        if (existsSync(target)) {
+            continue;
+        }
+
+        copyPath(`${dep} transitive runtime dependency`, source, target);
+        copySdkRuntimeDependencies(source, visited);
+    }
+}
+
 console.log('Syncing sidecar server runtime payload...');
 
 if (existsSync(targetDistDir)) {
@@ -83,8 +111,11 @@ for (const entry of SOURCE_TO_TARGET_COPIES) {
 }
 
 for (const dep of RUNTIME_DEPS) {
-    copyPath(`${dep} runtime dependency`, join(hoistedNodeModules, dep), join(targetNodeModules, dep));
+    copyRuntimeDependency(dep);
 }
+
+copyRuntimeDependency(SDK_RUNTIME_PACKAGE);
+copySdkRuntimeDependencies(join(hoistedNodeModules, SDK_RUNTIME_PACKAGE));
 
 writeFileSync(
     join(targetDistDir, 'package.json'),
