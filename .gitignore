@@ -2,6 +2,8 @@
 .codex
 .gemini
 node_modules/
+!antigravity-mcp-sidecar/server-runtime/node_modules/
+!antigravity-mcp-sidecar/server-runtime/node_modules/**
 build/
 *.vsix
 *.tgz

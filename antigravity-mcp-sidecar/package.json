@@ -19,7 +19,8 @@
     "files": [
         "src/**/*",
         "server-runtime/**/*",
-        "node_modules/**/*",
+        "node_modules/ws/**/*",
+        "node_modules/@modelcontextprotocol/sdk/**/*",
         "package.json",
         "README.md",
         "AI_CONFIG_PROMPT.md",

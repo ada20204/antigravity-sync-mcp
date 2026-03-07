@@ -41,12 +41,12 @@ if [[ ! -f "$WORK_DIR/extension/server-runtime/dist/index.js" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$WORK_DIR/extension/node_modules/ws" ]]; then
+if [[ ! -d "$WORK_DIR/extension/server-runtime/node_modules/ws" ]]; then
   echo "FAIL: ws module missing in $(basename "$VSIX_PATH")"
   exit 1
 fi
 
-if [[ ! -d "$WORK_DIR/extension/node_modules/@modelcontextprotocol/sdk" ]]; then
+if [[ ! -d "$WORK_DIR/extension/server-runtime/node_modules/@modelcontextprotocol/sdk" ]]; then
   echo "FAIL: @modelcontextprotocol/sdk missing in $(basename "$VSIX_PATH")"
   exit 1
 fi
