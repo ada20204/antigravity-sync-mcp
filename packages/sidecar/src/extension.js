@@ -1,13 +1,59 @@
 const vscode = require('vscode');
 const fs = require('fs');
-const path = require('path');
-const os = require('os');
 const http = require('http');
-const https = require('https');
-const { exec, spawn } = require('child_process');
+const { exec } = require('child_process');
 const net = require('net');
 const { createHash, randomBytes } = require('crypto');
 const { promisify } = require('util');
+const {
+    resolveRuntimeRole,
+    clampNumber,
+    formatAgeMs,
+    createErrorInfo,
+    mapCdpStateToRegistryState,
+} = require('./common/runtime');
+const {
+    getJson,
+    dedupeStrings,
+    parsePortCandidates,
+    isStrictCdpPortSpec,
+    buildPortCandidateOrder,
+    collectRegistryOccupiedPorts,
+    trimProbeSummary,
+    buildCandidateMatrix,
+    previewTokens,
+    summarizeProbePlan,
+} = require('./common/port-utils');
+const {
+    MCP_HOME_DIR,
+    MCP_BIN_DIR,
+    MCP_METADATA_FILE,
+    getBundledServerEntryPath,
+    getLauncherPaths,
+    ensureMcpLauncher,
+    splitArgs,
+    resolveDefaultExecutablePath,
+    resolveCdpBindAddress,
+    buildLaunchArgsForWorkspace,
+    launchAntigravityDetached,
+} = require('./services/launcher');
+const { buildAiConfigPrompt } = require('./core/ai-config');
+const {
+    extractActiveModelId,
+    normalizeQuotaSnapshot,
+    summarizeQuota,
+} = require('./core/quota');
+const { fetchQuotaSnapshot } = require('./services/quota-service');
+const { createRegistryService } = require('./services/registry-service');
+const { createHostBridgeServer, createRemoteBridgeClient } = require('./services/bridge-service');
+const { updateStatusBar: renderStatusBar } = require('./ui/status-bar');
+const {
+    getQuotaLevel,
+    updateQuotaStatusBar: renderQuotaStatusBar,
+    formatQuotaTooltip,
+    formatQuotaReport,
+} = require('./ui/quota-view');
+const { registerCommands } = require('./commands/register-commands');
 const { startAutoAccept, stopAutoAccept } = require('./auto-accept');
 const {
     createNodeId,
@@ -20,13 +66,8 @@ const {
     ensureBridgeToken,
     verifyControlRequest,
     DEFAULT_MAX_SKEW_MS,
-    signBridgeHttpRequest,
-    verifyBridgeHttpRequest,
 } = require('./bridge-auth');
 
-const { createRequire } = require('module');
-
-const requireCore = createRequire(__filename);
 const {
     SCHEMA_VERSION,
     COMPATIBLE_SCHEMA_VERSIONS,
@@ -35,7 +76,8 @@ const {
     getConfigDir,
     getRegistryFilePath,
     computeWorkspaceId,
-} = requireCore('@antigravity-mcp/core');
+    normalizeWorkspacePath,
+} = require('../vendor/core');
 
 const REGISTRY_DIR = getConfigDir();
 const REGISTRY_FILE = getRegistryFilePath();
@@ -58,156 +100,14 @@ const CDP_HEARTBEAT_REPEAT_LOG_COOLDOWN_MS = 5 * 60 * 1000;
 const NO_CDP_PROMPT_REQUEST_TTL_MS = 5 * 60 * 1000;
 const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
-
-function getBundledServerEntryPath(context) {
-    return path.join(context.extensionPath, 'server-runtime', 'dist', 'index.js');
-}
-
-function getLauncherPaths() {
-    const unixLauncher = path.join(MCP_BIN_DIR, 'antigravity-mcp-server');
-    const windowsLauncher = path.join(MCP_BIN_DIR, 'antigravity-mcp-server.cmd');
-    return { unixLauncher, windowsLauncher };
-}
-
-function ensureMcpLauncher(context) {
-    const entryPath = getBundledServerEntryPath(context);
-    if (!fs.existsSync(entryPath)) {
-        return { ok: false, error: `Bundled server entry missing: ${entryPath}` };
-    }
-    if (!fs.existsSync(MCP_BIN_DIR)) {
-        fs.mkdirSync(MCP_BIN_DIR, { recursive: true });
-    }
-
-    const { unixLauncher, windowsLauncher } = getLauncherPaths();
-    const entryForShell = entryPath.replace(/"/g, '\\"');
-    const unixScript = [
-        '#!/usr/bin/env bash',
-        'set -euo pipefail',
-        `exec node "${entryForShell}" "$@"`,
-        '',
-    ].join('\n');
-    fs.writeFileSync(unixLauncher, unixScript, { encoding: 'utf-8', mode: 0o755 });
-    try {
-        fs.chmodSync(unixLauncher, 0o755);
-    } catch { }
-
-    const entryForCmd = entryPath.replace(/"/g, '""');
-    const cmdScript = [
-        '@echo off',
-        `node "${entryForCmd}" %*`,
-        '',
-    ].join('\r\n');
-    fs.writeFileSync(windowsLauncher, cmdScript, 'utf-8');
-
-    const metadata = {
-        version: context.extension.packageJSON && context.extension.packageJSON.version
-            ? String(context.extension.packageJSON.version)
-            : 'unknown',
-        extensionPath: context.extensionPath,
-        bundledServer: entryPath,
-        updatedAt: new Date().toISOString(),
-    };
-    fs.writeFileSync(MCP_METADATA_FILE, JSON.stringify(metadata, null, 2), 'utf-8');
-    try {
-        fs.chmodSync(MCP_METADATA_FILE, 0o600);
-    } catch { }
-
-    return {
-        ok: true,
-        entryPath,
-        unixLauncher,
-        windowsLauncher,
-    };
-}
-
-function buildAiConfigPrompt(params) {
-    const { launcherPath, entryPath, workspacePath } = params;
-    const workspaceHint = workspacePath || '${workspaceFolder}';
-    const isWindows = process.platform === 'win32';
-    const command = isWindows ? 'node' : launcherPath;
-    const args = isWindows
-        ? [entryPath, '--target-dir', workspaceHint]
-        : ['--target-dir', workspaceHint];
-    const configJson = JSON.stringify(
-        {
-            mcpServers: {
-                'antigravity-mcp': {
-                    command: String(command || ''),
-                    args: args.map((item) => String(item || '')),
-                },
-            },
-        },
-        null,
-        2
-    );
-    return [
-        '# Antigravity MCP Setup Prompt (for AI clients)',
-        '',
-        'Use the following MCP server config:',
-        '',
-        '```json',
-        configJson,
-        '```',
-        '',
-        isWindows
-            ? 'Windows note: use `node + server-runtime/dist/index.js` to avoid extra cmd window popups.'
-            : 'Unix note: use the generated launcher path under ~/.config/antigravity-mcp/bin.',
-        '',
-        'Recommended instruction to AI:',
-        '- Prefer tool `ask-antigravity` for delegated coding tasks.',
-        '- Pass `mode` as `fast` for quick loop and `plan` for deep tasks.',
-        '- If response indicates `registry_not_ready`, ask user to open/restart Antigravity with sidecar enabled.',
-    ].join('\n');
-}
-
-function mapCdpStateToRegistryState(state) {
-    switch (state) {
-        case 'idle': return 'app_down';
-        case 'launching': return 'launching';
-        case 'probing': return 'app_up_cdp_not_ready';
-        case 'app_up_no_cdp': return 'app_up_no_cdp';
-        case 'app_down': return 'app_down';
-        case 'ready': return 'ready';
-        case 'error': return 'error';
-        default: return 'app_down';
-    }
-}
-// ──────────────────────────────────────────────────────────────────────────
-
-function resolveRuntimeRole(remoteName) {
-    // Explicit env override always wins.
-    const forced = String(process.env.ANTIGRAVITY_SIDECAR_ROLE || '').trim().toLowerCase();
-    if (forced === 'host' || forced === 'remote') return forced;
-    // When VS Code is connected to a remote (SSH, WSL, Dev Container, etc.),
-    // vscode.env.remoteName is non-empty. Treat that as the remote sidecar.
-    if (remoteName) return 'remote';
-    return 'host';
-}
-
-let outputChannel;
-let structuredLogger;
-
-function clampNumber(value, min, max) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return min;
-    return Math.min(max, Math.max(min, n));
-}
-
-function formatAgeMs(ms) {
-    if (!Number.isFinite(ms) || ms < 0) return 'unknown';
-    if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-    if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
-    return `${Math.round(ms / 3_600_000)}h`;
-}
-
-function createErrorInfo(code, message, details) {
-    return {
-        code: String(code || 'unknown_error'),
-        message: String(message || 'unknown error'),
-        at: Date.now(),
-        details: details && typeof details === 'object' ? details : undefined,
-    };
-}
+const registryService = createRegistryService({
+    fs,
+    registryDir: REGISTRY_DIR,
+    registryFile: REGISTRY_FILE,
+    registryControlKey: REGISTRY_CONTROL_KEY,
+    controlNoCdpPromptKey: CONTROL_NO_CDP_PROMPT_KEY,
+});
+const { getControlRecord, readRegistryObject, writeRegistryObject } = registryService;
 
 function log(msg, fields) {
     if (!structuredLogger) {
@@ -230,618 +130,9 @@ function errorLog(msg, fields) {
     structuredLogger.error(msg, fields);
 }
 
-function getControlRecord(registry) {
-    if (!registry || typeof registry !== 'object') return { restart_requests: {}, [CONTROL_NO_CDP_PROMPT_KEY]: {} };
-    const raw = registry[REGISTRY_CONTROL_KEY];
-    if (!raw || typeof raw !== 'object') return { restart_requests: {}, [CONTROL_NO_CDP_PROMPT_KEY]: {} };
-    const control = raw;
-    if (!control.restart_requests || typeof control.restart_requests !== 'object') {
-        control.restart_requests = {};
-    }
-    if (!control[CONTROL_NO_CDP_PROMPT_KEY] || typeof control[CONTROL_NO_CDP_PROMPT_KEY] !== 'object') {
-        control[CONTROL_NO_CDP_PROMPT_KEY] = {};
-    }
-    return control;
-}
-
-function getJson(url, timeoutMs = 1000) {
-    return new Promise((resolve, reject) => {
-        const req = http.get(url, { timeout: timeoutMs }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => (data += chunk));
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('timeout'));
-        });
-    });
-}
-
-function postJson(url, body, headers = {}, timeoutMs = 5000) {
-    return new Promise((resolve, reject) => {
-        const parsed = new URL(url);
-        const bodyBuf = Buffer.from(body, 'utf8');
-        const options = {
-            hostname: parsed.hostname,
-            port: parsed.port,
-            path: parsed.pathname + parsed.search,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': bodyBuf.length,
-                ...headers,
-            },
-            timeout: timeoutMs,
-        };
-        const req = http.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => (data += chunk));
-            res.on('end', () => {
-                try {
-                    const parsed = JSON.parse(data);
-                    if (res.statusCode >= 400) {
-                        const err = Object.assign(
-                            new Error(parsed.error || `HTTP ${res.statusCode}`),
-                            { statusCode: res.statusCode, body: parsed }
-                        );
-                        reject(err);
-                    } else {
-                        resolve(parsed);
-                    }
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-        req.write(bodyBuf);
-        req.end();
-    });
-}
-
-function dedupeStrings(values) {
-    const seen = new Set();
-    const out = [];
-    for (const value of values) {
-        const v = String(value || '').trim();
-        if (!v || seen.has(v)) continue;
-        seen.add(v);
-        out.push(v);
-    }
-    return out;
-}
-
-function parsePortCandidates(spec) {
-    const source = String(spec || '').trim();
-    if (!source) return [];
-    const out = [];
-    for (const tokenRaw of source.split(',')) {
-        const token = tokenRaw.trim();
-        if (!token) continue;
-        const range = token.match(/^(\d+)\s*-\s*(\d+)$/);
-        if (range) {
-            const start = Number(range[1]);
-            const end = Number(range[2]);
-            if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-            const lo = Math.max(1, Math.min(start, end));
-            const hi = Math.min(65535, Math.max(start, end));
-            for (let p = lo; p <= hi; p++) out.push(p);
-            continue;
-        }
-        const port = Number(token);
-        if (!Number.isFinite(port)) continue;
-        if (port >= 1 && port <= 65535) out.push(port);
-    }
-    return [...new Set(out)];
-}
-
-function isStrictCdpPortSpec(spec) {
-    const parsed = parsePortCandidates(spec);
-    if (parsed.length === 0) return false;
-    return parsed.every((port) => port >= CDP_PORT_RANGE_MIN && port <= CDP_PORT_RANGE_MAX);
-}
-
-function trimProbeSummary(summary) {
-    if (!Array.isArray(summary)) return [];
-    if (summary.length <= CDP_PROBE_SUMMARY_LIMIT) return summary;
-    // Keep first half + last half so early failures remain visible together
-    // with the tail of the probe sequence.
-    const half = Math.floor(CDP_PROBE_SUMMARY_LIMIT / 2);
-    return [...summary.slice(0, half), ...summary.slice(summary.length - half)];
-}
-
-function buildCandidateMatrix(hosts, ports, limit = CDP_PROBE_SUMMARY_LIMIT) {
-    const out = [];
-    for (const host of hosts || []) {
-        for (const port of ports || []) {
-            out.push({ host, port });
-            if (out.length >= limit) return out;
-        }
-    }
-    return out;
-}
-
-function previewTokens(values, limit = 3) {
-    const list = Array.isArray(values) ? values : [];
-    if (list.length === 0) return 'none';
-    if (list.length <= limit) return list.join(',');
-    return `${list.slice(0, limit).join(',')}...(+${list.length - limit})`;
-}
-
-function summarizeProbePlan(hosts, ports) {
-    const hostList = Array.isArray(hosts) ? hosts : [];
-    const portList = Array.isArray(ports) ? ports : [];
-    return `hosts=${hostList.length}[${previewTokens(hostList, 3)}] ports=${portList.length}[${previewTokens(portList, 5)}]`;
-}
-
 function shortError(error) {
     const message = error && error.message ? error.message : String(error || 'unknown');
     return message.slice(0, 180);
-}
-
-function readRegistryObject() {
-    try {
-        if (!fs.existsSync(REGISTRY_FILE)) return {};
-        const parsed = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf-8'));
-        if (parsed && typeof parsed === 'object') return parsed;
-    } catch { }
-    return {};
-}
-
-function writeRegistryObject(registry) {
-    if (!fs.existsSync(REGISTRY_DIR)) {
-        fs.mkdirSync(REGISTRY_DIR, { recursive: true });
-    }
-    registry[REGISTRY_CONTROL_KEY] = getControlRecord(registry);
-    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf-8');
-    try {
-        fs.chmodSync(REGISTRY_FILE, 0o600);
-    } catch { }
-}
-
-function extractArgValue(cmdline, name) {
-    const flag = String(name || '').trim().replace(/[-_]/g, '[-_]');
-    const re = new RegExp(`(?:--|-)${flag}(?:=|\\s+)(\"[^\"]+\"|'[^']+'|[^\\s]+)`, 'i');
-    const match = String(cmdline || '').match(re);
-    if (!match) return '';
-    return String(match[1] || '').replace(/^["']|["']$/g, '');
-}
-
-function parsePortsFromSsOutput(text, pid) {
-    const ports = new Set();
-    const ssRegex = new RegExp(`LISTEN\\s+\\d+\\s+\\d+\\s+(?:\\*|[\\d.]+|\\[[\\da-f:]*\\]):(\\d+).*?pid=${pid},`, 'gi');
-    let match;
-    while ((match = ssRegex.exec(text)) !== null) {
-        const port = Number(match[1]);
-        if (Number.isFinite(port)) ports.add(port);
-    }
-    return [...ports].sort((a, b) => a - b);
-}
-
-function parsePortsFromLsofOutput(text, pid) {
-    const ports = new Set();
-    const lsofRegex = new RegExp(`^\\S+\\s+${pid}\\s+.*?TCP\\s+(?:\\*|[\\d.]+|\\[[\\da-f:]+\\]):(\\d+)\\s+\\(LISTEN\\)`, 'gim');
-    let match;
-    while ((match = lsofRegex.exec(text)) !== null) {
-        const port = Number(match[1]);
-        if (Number.isFinite(port)) ports.add(port);
-    }
-    return [...ports].sort((a, b) => a - b);
-}
-
-async function probeLanguageServerEndpoint(host, port, csrfToken) {
-    // Method availability varies across LS versions; try a small set.
-    const probes = [
-        () => postLsJson(host, port, csrfToken, 'GetUnleashData', { wrapper_data: {} }, 1500),
-        () => postLsJson(host, port, csrfToken, 'GetUserStatus', {
-            metadata: {
-                ideName: 'antigravity',
-                extensionName: 'antigravity',
-                locale: 'en',
-            },
-        }, 2000),
-    ];
-    for (const runProbe of probes) {
-        try {
-            await runProbe();
-            return true;
-        } catch { }
-    }
-    return false;
-}
-
-async function postLsJson(host, port, csrfToken, method, body, timeoutMs = 3000) {
-    const payload = JSON.stringify(body);
-    return new Promise((resolve, reject) => {
-        const req = https.request({
-            hostname: host,
-            port,
-            path: `/exa.language_server_pb.LanguageServerService/${method}`,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload),
-                'Connect-Protocol-Version': '1',
-                'X-Codeium-Csrf-Token': csrfToken,
-            },
-            rejectUnauthorized: false,
-            timeout: timeoutMs,
-        }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => (data += chunk));
-            res.on('end', () => {
-                if (res.statusCode !== 200) {
-                    reject(new Error(`LS ${method} status=${res.statusCode}`));
-                    return;
-                }
-                try {
-                    resolve(JSON.parse(data));
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error(`LS ${method} timeout`));
-        });
-        req.write(payload);
-        req.end();
-    });
-}
-
-async function detectLanguageServer() {
-    try {
-        if (process.platform === 'win32') {
-            const processCmds = [
-                'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name=\'language_server_windows_x64.exe\'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"',
-                'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -match \\\"(?i)(language[_-]?server|exa[_-]?language[_-]?server)\\\") -and ($_.CommandLine -match \\\"csrf[_-]token\\\") } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"',
-            ];
-            let items = [];
-            for (const cmd of processCmds) {
-                try {
-                    const { stdout } = await execAsync(cmd);
-                    if (!stdout.trim()) continue;
-                    const parsed = JSON.parse(stdout.trim());
-                    const list = Array.isArray(parsed) ? parsed : [parsed];
-                    if (list.length > 0) {
-                        items = list;
-                        break;
-                    }
-                } catch { }
-            }
-            if (items.length === 0) return null;
-
-            const prioritized = [
-                ...items.filter((item) => {
-                    const line = String(item.CommandLine || '');
-                    return line && (/--app[_-]data[_-]dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line));
-                }),
-                ...items.filter((item) => {
-                    const line = String(item.CommandLine || '');
-                    return !(line && (/--app[_-]data[_-]dir\\s+(antigravity|cursor)/i.test(line) || /[\\\\/](antigravity|cursor)[\\\\/]/i.test(line)));
-                }),
-            ];
-
-            for (const proc of prioritized) {
-                const pid = Number(proc.ProcessId);
-                const commandLine = String(proc.CommandLine || '');
-                const csrfToken =
-                    extractArgValue(commandLine, 'csrf_token') ||
-                    extractArgValue(commandLine, 'extension_server_csrf_token');
-                if (!pid || !csrfToken) continue;
-
-                const extensionPort = Number(extractArgValue(commandLine, 'extension_server_port'));
-                const portsCmd = `powershell -NoProfile -Command "Get-NetTCPConnection -OwningProcess ${pid} -State Listen | Select-Object -ExpandProperty LocalPort | ConvertTo-Json -Compress"`;
-                let ports = [];
-                try {
-                    const { stdout: portsOut } = await execAsync(portsCmd);
-                    if (portsOut.trim()) {
-                        const parsed = JSON.parse(portsOut.trim());
-                        ports = (Array.isArray(parsed) ? parsed : [parsed])
-                            .map(Number)
-                            .filter((p) => Number.isFinite(p) && p > 0)
-                            .sort((a, b) => a - b);
-                    }
-                } catch { }
-
-                const candidatePorts = [...new Set([
-                    ...ports,
-                    ...(Number.isFinite(extensionPort) && extensionPort > 0 ? [extensionPort] : []),
-                ])];
-                for (const port of candidatePorts) {
-                    try {
-                        if (await probeLanguageServerEndpoint('127.0.0.1', port, csrfToken)) {
-                            return { pid, port, csrfToken };
-                        }
-                    } catch { }
-                }
-            }
-            return null;
-        }
-
-        const { stdout } = await execAsync(process.platform === 'darwin' ? 'pgrep -fl language_server' : 'pgrep -af language_server');
-        const lines = stdout.split(/\r?\n/).filter(Boolean);
-        const line = lines.find((l) => l.includes('--csrf_token') || l.includes('-csrf_token'));
-        if (!line) return null;
-        const parts = line.trim().split(/\s+/);
-        const pid = Number(parts[0]);
-        const commandLine = line.slice(parts[0].length).trim();
-        const csrfToken =
-            extractArgValue(commandLine, 'csrf_token') ||
-            extractArgValue(commandLine, 'extension_server_csrf_token');
-        if (!pid || !csrfToken) return null;
-
-        const portsCmd = process.platform === 'darwin'
-            ? `lsof -nP -a -iTCP -sTCP:LISTEN -p ${pid}`
-            : `ss -tlnp 2>/dev/null | grep "pid=${pid}" || lsof -nP -a -iTCP -sTCP:LISTEN -p ${pid} 2>/dev/null`;
-        const { stdout: portText } = await execAsync(portsCmd);
-        let ports = parsePortsFromSsOutput(portText, pid);
-        if (ports.length === 0) ports = parsePortsFromLsofOutput(portText, pid);
-        for (const port of ports) {
-            try {
-                if (await probeLanguageServerEndpoint('127.0.0.1', port, csrfToken)) {
-                    return { pid, port, csrfToken };
-                }
-            } catch { }
-        }
-    } catch {
-        // best effort only
-    }
-    return null;
-}
-
-function normalizeModelKey(value) {
-    return String(value || '').trim().toLowerCase().replace(/[\s_()-]+/g, '');
-}
-
-function modelIdMatches(a, b) {
-    const left = normalizeModelKey(a);
-    const right = normalizeModelKey(b);
-    if (!left || !right) return false;
-    return left === right || left.includes(right) || right.includes(left);
-}
-
-function collectStringByKeys(value, keysLowerSet) {
-    if (!value || typeof value !== 'object') return null;
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const found = collectStringByKeys(item, keysLowerSet);
-            if (found) return found;
-        }
-        return null;
-    }
-    const obj = value;
-    for (const [key, raw] of Object.entries(obj)) {
-        const keyLower = key.toLowerCase();
-        if (keysLowerSet.has(keyLower) && typeof raw === 'string' && raw.trim()) {
-            return raw.trim();
-        }
-        const nested = collectStringByKeys(raw, keysLowerSet);
-        if (nested) return nested;
-    }
-    return null;
-}
-
-function extractActiveModelId(conversation) {
-    const candidate = collectStringByKeys(conversation, new Set([
-        'model',
-        'modelid',
-        'selectedmodel',
-        'activemodel',
-        'modelalias',
-    ]));
-    return candidate || null;
-}
-
-function normalizeQuotaSnapshot(data, activeModelId) {
-    const userStatus = (data && data.userStatus) || {};
-    const planStatus = userStatus.planStatus || {};
-    const planInfo = planStatus.planInfo || {};
-    const availablePromptCredits = planStatus.availablePromptCredits;
-    let promptCredits;
-    if (typeof availablePromptCredits === 'number' && typeof planInfo.monthlyPromptCredits === 'number' && planInfo.monthlyPromptCredits > 0) {
-        const monthly = Number(planInfo.monthlyPromptCredits);
-        const available = Number(availablePromptCredits);
-        promptCredits = {
-            available,
-            monthly,
-            usedPercentage: ((monthly - available) / monthly) * 100,
-            remainingPercentage: (available / monthly) * 100,
-        };
-    }
-
-    const models = Array.isArray(userStatus.cascadeModelConfigData && userStatus.cascadeModelConfigData.clientModelConfigs)
-        ? userStatus.cascadeModelConfigData.clientModelConfigs
-        : [];
-
-    const now = Date.now();
-    return {
-        timestamp: now,
-        source: 'GetUserStatus',
-        promptCredits,
-        models: models
-            .filter((m) => m && m.quotaInfo)
-            .map((m) => {
-                const resetTime = String(m.quotaInfo.resetTime || '');
-                const resetMs = resetTime ? Date.parse(resetTime) : NaN;
-                const modelId = String((m.modelOrAlias && m.modelOrAlias.model) || m.model || '');
-                const label = String(m.label || '');
-                const selectedHint = m.isSelected === true || m.selected === true || m.current === true || m.isCurrent === true;
-                const selectedByActiveId = !!activeModelId && (modelIdMatches(modelId, activeModelId) || modelIdMatches(label, activeModelId));
-                return {
-                    label,
-                    modelId,
-                    remainingFraction: typeof m.quotaInfo.remainingFraction === 'number' ? m.quotaInfo.remainingFraction : undefined,
-                    remainingPercentage: typeof m.quotaInfo.remainingFraction === 'number' ? m.quotaInfo.remainingFraction * 100 : undefined,
-                    isExhausted: m.quotaInfo.remainingFraction === 0,
-                    isSelected: selectedHint || selectedByActiveId,
-                    resetTime,
-                    resetInMs: Number.isFinite(resetMs) ? resetMs - now : undefined,
-                };
-            }),
-        activeModelId: activeModelId || undefined,
-    };
-}
-
-async function fetchQuotaSnapshot() {
-    const ls = await detectLanguageServer();
-    if (!ls) return { ls: null, quota: null, error: 'ls_not_found' };
-    const data = await postLsJson('127.0.0.1', ls.port, ls.csrfToken, 'GetUserStatus', {
-        metadata: {
-            ideName: 'antigravity',
-            extensionName: 'antigravity',
-            locale: 'en',
-        },
-    }, 3000);
-    let activeModelId = null;
-    try {
-        const conversation = await postLsJson('127.0.0.1', ls.port, ls.csrfToken, 'GetBrowserOpenConversation', {}, 2000);
-        activeModelId = extractActiveModelId(conversation);
-    } catch {
-        // Best effort only.
-    }
-    return {
-        ls: {
-            port: ls.port,
-            csrfToken: ls.csrfToken,
-            lastDetectedAt: Date.now(),
-            sourceHost: '127.0.0.1',
-        },
-        quota: normalizeQuotaSnapshot(data, activeModelId),
-        error: null,
-    };
-}
-
-function summarizeQuota(quota) {
-    if (!quota || typeof quota !== 'object') return null;
-
-    const prompt = quota.promptCredits && typeof quota.promptCredits === 'object'
-        ? quota.promptCredits
-        : null;
-    const models = Array.isArray(quota.models) ? quota.models : [];
-
-    const modelPercents = models
-        .map((m) => (m && typeof m.remainingPercentage === 'number' ? m.remainingPercentage : null))
-        .filter((v) => typeof v === 'number');
-    const exhaustedCount = models.filter((m) => m && m.isExhausted === true).length;
-    const activeModel = models.find((m) => m && m.isSelected) || models.find((m) => modelIdMatches((m && m.modelId) || (m && m.label), quota.activeModelId));
-
-    const promptRemaining = prompt && typeof prompt.remainingPercentage === 'number'
-        ? prompt.remainingPercentage
-        : null;
-    const minModelRemaining = modelPercents.length > 0 ? Math.min(...modelPercents) : null;
-    const activeModelRemaining = activeModel && typeof activeModel.remainingPercentage === 'number'
-        ? activeModel.remainingPercentage
-        : null;
-    const activeModelName = activeModel
-        ? (activeModel.label || activeModel.modelId || quota.activeModelId || null)
-        : (quota.activeModelId || null);
-
-    const primaryPercent = activeModelRemaining !== null
-        ? activeModelRemaining
-        : (minModelRemaining !== null ? minModelRemaining : promptRemaining);
-    const primaryLabel = activeModelName
-        ? `model ${activeModelName}`
-        : (minModelRemaining !== null ? 'lowest model quota' : 'prompt credits');
-
-    return {
-        primaryPercent,
-        primaryLabel,
-        promptRemaining,
-        minModelRemaining,
-        activeModelName,
-        activeModelRemaining,
-        modelCount: models.length,
-        exhaustedCount,
-    };
-}
-
-function formatQuotaTooltip(quota, quotaError) {
-    const lines = ['Quota snapshot (click to view details)'];
-    if (quotaError) {
-        lines.push(`Last error: ${quotaError}`);
-    }
-    const summary = summarizeQuota(quota);
-    if (!summary) {
-        lines.push('No snapshot yet.');
-        return lines.join('\n');
-    }
-    if (quota && quota.timestamp) {
-        lines.push(`Snapshot age: ${formatAgeMs(Date.now() - Number(quota.timestamp))}`);
-    }
-    if (summary.promptRemaining !== null) {
-        lines.push(`Prompt credits remaining: ${summary.promptRemaining.toFixed(1)}%`);
-    }
-    if (summary.activeModelName) {
-        lines.push(`Active model: ${summary.activeModelName}`);
-    }
-    if (summary.activeModelRemaining !== null) {
-        lines.push(`Active model remaining: ${summary.activeModelRemaining.toFixed(1)}%`);
-    }
-    if (summary.minModelRemaining !== null) {
-        lines.push(`Lowest model remaining: ${summary.minModelRemaining.toFixed(1)}%`);
-    }
-    lines.push(`Models tracked: ${summary.modelCount}, exhausted: ${summary.exhaustedCount}`);
-    return lines.join('\n');
-}
-
-function formatQuotaReport(quota, quotaError) {
-    const lines = ['=== Antigravity Quota Snapshot ==='];
-    if (quotaError) lines.push(`lastError: ${quotaError}`);
-    if (!quota || typeof quota !== 'object') {
-        lines.push('No quota snapshot available yet.');
-        return lines.join('\n');
-    }
-
-    if (quota.timestamp) {
-        lines.push(`timestamp: ${new Date(quota.timestamp).toISOString()}`);
-        lines.push(`snapshotAge: ${formatAgeMs(Date.now() - Number(quota.timestamp))}`);
-    }
-    if (quota.source) {
-        lines.push(`source: ${quota.source}`);
-    }
-    if (quota.activeModelId) {
-        lines.push(`activeModelId: ${quota.activeModelId}`);
-    }
-    const prompt = quota.promptCredits;
-    if (prompt && typeof prompt === 'object') {
-        lines.push(
-            `promptCredits: available=${prompt.available ?? 'n/a'} ` +
-            `monthly=${prompt.monthly ?? 'n/a'} ` +
-            `remaining=${typeof prompt.remainingPercentage === 'number' ? prompt.remainingPercentage.toFixed(1) + '%' : 'n/a'}`
-        );
-    }
-
-    const models = Array.isArray(quota.models) ? quota.models : [];
-    if (models.length > 0) {
-        lines.push('models:');
-        const sorted = [...models].sort((a, b) =>
-            String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
-        );
-        for (const model of sorted) {
-            const id = model.modelId || model.label || 'unknown';
-            const remaining = typeof model.remainingPercentage === 'number'
-                ? `${model.remainingPercentage.toFixed(1)}%`
-                : 'n/a';
-            const selected = model.isSelected ? ', selected=yes' : '';
-            lines.push(`- ${id}: remaining=${remaining}, exhausted=${model.isExhausted ? 'yes' : 'no'}${selected}`);
-        }
-    } else {
-        lines.push('models: none');
-    }
-
-    return lines.join('\n');
 }
 
 function looksLikeAntigravityVersion(versionPayload) {
@@ -850,11 +141,15 @@ function looksLikeAntigravityVersion(versionPayload) {
     const ua = String(versionPayload['User-Agent'] || versionPayload.userAgent || '');
     const wsUrl = String(versionPayload.webSocketDebuggerUrl || '');
     const marker = `${browser} ${ua} ${wsUrl}`.toLowerCase();
-    return (
-        marker.includes('antigravity') ||
-        marker.includes('cursor') ||
-        marker.includes('codeium')
-    );
+    return marker.includes('antigravity');
+}
+
+function canFallbackToListProbe(versionPayload) {
+    if (!versionPayload || typeof versionPayload !== 'object') return true;
+    const browser = String(versionPayload.Browser || '').trim();
+    const ua = String(versionPayload['User-Agent'] || versionPayload.userAgent || '').trim();
+    const wsUrl = String(versionPayload.webSocketDebuggerUrl || '').trim();
+    return !browser && !ua && !wsUrl;
 }
 
 async function findCdpTarget(params) {
@@ -884,6 +179,13 @@ async function findCdpTarget(params) {
                     lastError: '',
                     lastErrorCode: 'ok',
                 };
+            }
+
+            if (!canFallbackToListProbe(version)) {
+                summary.push({ host: ip, port, stage: 'version', ok: false, error: 'non_antigravity_target' });
+                lastError = `${ip}:${port} version non_antigravity_target`;
+                lastErrorCode = 'cdp_version_non_antigravity';
+                continue;
             }
 
             // Fallback for variants where version marker is not explicit.
@@ -932,11 +234,11 @@ async function findCdpTarget(params) {
 async function isAntigravityProcessRunning() {
     try {
         if (process.platform === 'win32') {
-            const cmd = 'powershell -NoProfile -Command "(Get-Process Antigravity,Cursor -ErrorAction SilentlyContinue | Measure-Object).Count"';
+            const cmd = 'powershell -NoProfile -Command "(Get-Process Antigravity -ErrorAction SilentlyContinue | Measure-Object).Count"';
             const { stdout } = await execAsync(cmd);
             return Number(String(stdout || '').trim()) > 0;
         }
-        const { stdout } = await execAsync('pgrep -af "Antigravity|Cursor"');
+        const { stdout } = await execAsync('pgrep -af "Antigravity"');
         return String(stdout || '').trim().length > 0;
     } catch {
         return false;
@@ -998,35 +300,6 @@ function allocateFreeCdpPort(registry, portRange, options = {}) {
     return null;
 }
 
-function collectRegistryOccupiedPorts(registry) {
-    const occupied = new Set();
-    try {
-        for (const [key, entry] of Object.entries(registry || {})) {
-            if (key.startsWith('__')) continue;
-            const port = entry && entry.local_endpoint && Number(entry.local_endpoint.port);
-            if (Number.isFinite(port) && port > 0) occupied.add(port);
-        }
-    } catch (_) {
-        // Ignore malformed registry payloads.
-    }
-    return occupied;
-}
-
-function buildPortCandidateOrder(portRange, preferredPort) {
-    const lo = portRange ? Number(portRange[0]) : 9000;
-    const hi = portRange ? Number(portRange[1]) : 9014;
-    const ordered = [];
-    const preferred = Number(preferredPort);
-    if (Number.isFinite(preferred) && preferred >= lo && preferred <= hi) {
-        ordered.push(preferred);
-    }
-    for (let port = lo; port <= hi; port++) {
-        if (port === preferred) continue;
-        ordered.push(port);
-    }
-    return ordered;
-}
-
 async function isTcpPortAvailable(host, port, timeoutMs = 600) {
     return await new Promise((resolve) => {
         const server = net.createServer();
@@ -1047,228 +320,6 @@ async function isTcpPortAvailable(host, port, timeoutMs = 600) {
         server.on('error', () => finish(false));
         server.listen({ host, port, exclusive: true }, () => finish(true));
     });
-}
-
-function splitArgs(raw) {
-    const source = String(raw || '').trim();
-    if (!source) return [];
-    return source.split(/\s+/).filter(Boolean);
-}
-
-function resolveDefaultExecutablePath() {
-    if (process.platform === 'win32') {
-        const localAppData = process.env.LOCALAPPDATA || path.win32.join(os.homedir(), 'AppData', 'Local');
-        const candidates = [
-            path.win32.join(localAppData, 'Programs', 'Antigravity', 'Antigravity.exe'),
-            path.win32.join(localAppData, 'Programs', 'Cursor', 'Cursor.exe'),
-        ];
-        for (const candidate of candidates) {
-            if (fs.existsSync(candidate)) return candidate;
-        }
-        return '';
-    }
-
-    if (process.platform === 'darwin') {
-        const candidates = [
-            '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity',
-            '/Applications/Antigravity.app/Contents/MacOS/Electron',
-            '/Applications/Cursor.app/Contents/Resources/app/bin/cursor',
-            '/Applications/Cursor.app/Contents/MacOS/Cursor',
-        ];
-        for (const candidate of candidates) {
-            if (fs.existsSync(candidate)) return candidate;
-        }
-        return '';
-    }
-
-    const candidates = [
-        '/usr/bin/antigravity',
-        '/usr/local/bin/antigravity',
-        '/usr/bin/cursor',
-        '/usr/local/bin/cursor',
-    ];
-    for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) return candidate;
-    }
-    return '';
-}
-
-function psQuote(value) {
-    return String(value || '').replace(/'/g, "''");
-}
-
-function resolveCdpBindAddress() {
-    const override = String(process.env.ANTIGRAVITY_CDP_BIND_ADDRESS || '').trim();
-    return override || '127.0.0.1';
-}
-
-function buildLaunchArgsForWorkspace(workspacePath, port, extraArgs) {
-    return [
-        workspacePath,
-        '--new-window',
-        `--remote-debugging-port=${port}`,
-        `--remote-debugging-address=${resolveCdpBindAddress()}`,
-        ...extraArgs,
-    ];
-}
-
-function launchAntigravityDetached(params) {
-    const { executable, args, restart } = params;
-    if (process.platform === 'win32') {
-        const exe = psQuote(executable);
-        const argList = args.map((item) => `'${psQuote(item)}'`).join(',');
-        const script = restart
-            ? `$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity,Cursor | Stop-Process -Force; $deadline=(Get-Date).AddSeconds(8); while((Get-Date)-lt $deadline){if(-not(Get-Process Antigravity,Cursor -EA SilentlyContinue)){break};Start-Sleep -Milliseconds 200}; Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`
-            : `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
-
-        const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
-            detached: true,
-            stdio: 'ignore',
-        });
-        child.unref();
-        return;
-    }
-
-    if (restart) {
-        try {
-            spawn('pkill', ['-f', 'Antigravity|Cursor'], { stdio: 'ignore' });
-        } catch { }
-    }
-    const child = spawn(executable, args, {
-        detached: true,
-        stdio: 'ignore',
-        shell: false,
-    });
-    child.unref();
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// HostBridgeService — exposes host CDP snapshot over HTTP for remote sidecars
-// ──────────────────────────────────────────────────────────────────────────
-
-function createHostBridgeServer({ getSnapshot, bridgeToken, nonceCache, nodeId, log, warn }) {
-    const server = http.createServer((req, res) => {
-        const urlPath = req.url ? req.url.split('?')[0] : '/';
-
-        if (req.method === 'GET' && urlPath === '/v1/health') {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'ok', bridge_version: BRIDGE_VERSION, node_role: 'host' }));
-            return;
-        }
-
-        if (req.method === 'POST' && urlPath === '/v1/snapshot') {
-            let body = '';
-            req.on('data', (chunk) => { body += chunk; });
-            req.on('end', () => {
-                const ts = req.headers['x-ag-bridge-ts'];
-                const nonce = req.headers['x-ag-bridge-nonce'];
-                const signature = req.headers['x-ag-bridge-signature'];
-                const fromNodeId = req.headers['x-ag-bridge-node-id'];
-                const bodyHash = createHash('sha256').update(body || '').digest('hex');
-
-                const authResult = verifyBridgeHttpRequest(
-                    { method: 'POST', path: '/v1/snapshot', bodyHash, ts, nonce, nodeId: fromNodeId, signature },
-                    bridgeToken,
-                    { nonceCache }
-                );
-                if (!authResult.ok) {
-                    warn(`HostBridge auth rejected: ${authResult.code} from node=${fromNodeId}`);
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: authResult.code }));
-                    return;
-                }
-
-                let reqBody = {};
-                try { reqBody = JSON.parse(body || '{}'); } catch { }
-
-                const snapshot = getSnapshot(reqBody.workspace_id, reqBody.workspace_path);
-                if (!snapshot) {
-                    res.writeHead(404, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'workspace_not_found' }));
-                    return;
-                }
-
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    schema_version: SCHEMA_VERSION,
-                    entry: snapshot,
-                    server_time: Date.now(),
-                    ttl_ms: 30_000,
-                }));
-            });
-            return;
-        }
-
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'not_found' }));
-    });
-
-    server.on('error', (err) => {
-        warn(`HostBridgeService error: ${err.message}`, { plane: 'ctrl', error_code: 'bridge_server_error' });
-    });
-
-    server.listen(HOST_BRIDGE_PORT, HOST_BRIDGE_BIND_HOST, () => {
-        log(`HostBridgeService listening on ${HOST_BRIDGE_BIND_HOST}:${HOST_BRIDGE_PORT}`, {
-            plane: 'ctrl',
-            state: 'ready',
-        });
-    });
-
-    return { dispose: () => server.close() };
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// RemoteBridgeClient — polls host bridge and mirrors entry into remote registry
-// ──────────────────────────────────────────────────────────────────────────
-
-function createRemoteBridgeClient({ bridgeEndpoint, bridgeToken, nodeId, onSnapshot, log, warn }) {
-    const POLL_MS = 3_000;
-    const BACKOFF = [10_000, 30_000];
-    let stopped = false;
-    let failures = 0;
-    let handle = null;
-
-    async function poll() {
-        if (stopped) return;
-        try {
-            const ts = Date.now();
-            const nonce = randomBytes(16).toString('hex');
-            const body = JSON.stringify({});
-            const bodyHash = createHash('sha256').update(body).digest('hex');
-            const signature = signBridgeHttpRequest(
-                { method: 'POST', path: '/v1/snapshot', bodyHash, ts, nonce, nodeId },
-                bridgeToken
-            );
-            const result = await postJson(
-                `http://${bridgeEndpoint}/v1/snapshot`,
-                body,
-                {
-                    'x-ag-bridge-ts': String(ts),
-                    'x-ag-bridge-nonce': nonce,
-                    'x-ag-bridge-signature': signature,
-                    'x-ag-bridge-node-id': nodeId,
-                }
-            );
-            failures = 0;
-            onSnapshot(result);
-        } catch (err) {
-            failures++;
-            if (failures === 1 || failures % 10 === 0) {
-                warn(`RemoteBridgeClient poll failed (attempt ${failures}): ${err.message}`, {
-                    plane: 'ctrl',
-                    error_code: 'bridge_poll_error',
-                });
-            }
-        }
-        if (!stopped) {
-            const delay = failures === 0 ? POLL_MS : failures <= 3 ? BACKOFF[0] : BACKOFF[1];
-            handle = setTimeout(() => poll().catch(() => {}), delay);
-        }
-    }
-
-    poll().catch(() => {});
-
-    return { dispose: () => { stopped = true; if (handle) clearTimeout(handle); } };
 }
 
 async function activate(context) {
@@ -1435,83 +486,25 @@ async function activate(context) {
     }, 5 * 60 * 1000);
     context.subscriptions.push({ dispose: () => clearInterval(noncePruneTimer) });
 
-    function getQuotaLevel(summary) {
-        if (!summary) return { level: 'none', watchedPercent: null, target: 'quota' };
-
-        if (summary.activeModelRemaining !== null) {
-            const percent = summary.activeModelRemaining;
-            const target = summary.activeModelName ? `model ${summary.activeModelName}` : 'active model';
-            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
-            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
-            return { level: 'none', watchedPercent: percent, target };
-        }
-        if (summary.minModelRemaining !== null) {
-            const percent = summary.minModelRemaining;
-            const target = 'lowest model quota';
-            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
-            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
-            return { level: 'none', watchedPercent: percent, target };
-        }
-        if (summary.promptRemaining !== null) {
-            const percent = summary.promptRemaining;
-            const target = 'prompt credits';
-            if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
-            if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
-            return { level: 'none', watchedPercent: percent, target };
-        }
-        return { level: 'none', watchedPercent: null, target: 'quota' };
-    }
-
     function updateQuotaStatusBar() {
-        if (!cdpTarget) {
-            quotaStatusBarItem.hide();
-            return;
-        }
-
-        const summary = summarizeQuota(latestQuota);
-        const snapshotAgeMs = latestQuota && latestQuota.timestamp
-            ? Date.now() - Number(latestQuota.timestamp)
-            : Number.POSITIVE_INFINITY;
-        const isStale = !Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000;
-        const level = getQuotaLevel(summary).level;
-        if (summary && summary.activeModelName && summary.activeModelRemaining !== null) {
-            const modelShort = summary.activeModelName.replace(/^.*\//, '').slice(0, 16);
-            quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
-        } else if (summary && summary.primaryPercent !== null) {
-            quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} Quota ${Math.max(0, summary.primaryPercent).toFixed(0)}%`;
-        } else if (latestQuotaError) {
-            quotaStatusBarItem.text = '$(warning) Quota N/A';
-        } else {
-            quotaStatusBarItem.text = '$(sync~spin) Quota ...';
-        }
-        if (level === 'critical') {
-            quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-        } else if (level === 'warning') {
-            quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-        } else {
-            quotaStatusBarItem.backgroundColor = undefined;
-        }
-        quotaStatusBarItem.tooltip = formatQuotaTooltip(latestQuota, latestQuotaError);
-        quotaStatusBarItem.show();
+        renderQuotaStatusBar({
+            quotaStatusBarItem,
+            cdpTarget,
+            latestQuota,
+            latestQuotaError,
+            quotaStaleMinutes,
+            summarizeQuota,
+            quotaWarnThresholdPercent,
+            quotaCriticalThresholdPercent,
+        });
     }
 
     function updateStatusBar() {
-        if (!cdpTarget) {
-            statusBarItem.text = '$(warning) Sidecar: No CDP';
-            statusBarItem.backgroundColor = undefined;
-            statusBarItem.tooltip = 'CDP port not found — auto-accept unavailable';
-            statusBarItem.show();
-        } else if (isEnabled) {
-            statusBarItem.text = '$(zap) Sidecar: ON';
-            statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-            statusBarItem.tooltip = 'Auto-accept is ACTIVE — click to disable';
-            statusBarItem.show();
-        } else {
-            statusBarItem.text = '$(circle-slash) Sidecar: OFF';
-            statusBarItem.backgroundColor = undefined;
-            statusBarItem.tooltip = 'Auto-accept is OFF — click to enable';
-            statusBarItem.show();
-        }
+        renderStatusBar({
+            statusBarItem,
+            cdpTarget,
+            isEnabled,
+        });
         updateQuotaStatusBar();
     }
 
@@ -1524,7 +517,10 @@ async function activate(context) {
         if (!Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000) {
             return;
         }
-        const levelInfo = getQuotaLevel(summary);
+        const levelInfo = getQuotaLevel(summary, {
+            quotaWarnThresholdPercent,
+            quotaCriticalThresholdPercent,
+        });
         const level = levelInfo.level;
         const watchedPercent = levelInfo.watchedPercent;
 
@@ -1899,150 +895,29 @@ async function activate(context) {
         }
     }
 
-    // ─── Toggle Command (always registered) ───────────────────────────
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.toggle', async () => {
-        if (!cdpTarget) {
-            vscode.window.showWarningMessage('Sidecar: No CDP port found. Cannot toggle auto-accept.');
-            return;
-        }
-        isEnabled = !isEnabled;
-        await vscode.workspace.getConfiguration('antigravityMcpSidecar').update('enabled', isEnabled, vscode.ConfigurationTarget.Global);
-        syncState();
-        vscode.window.showInformationMessage(`Sidecar Auto-Accept: ${isEnabled ? 'ENABLED ⚡' : 'DISABLED 🔴'}`);
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.launchAntigravity', async () => {
-        if (runtimeRole === 'remote') {
-            vscode.window.showInformationMessage('Remote sidecar cannot cold-start host app. Please launch Antigravity on host.');
-            return;
-        }
-        await executeManualLaunch('launch');
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.installBundledServer', async () => {
-        const result = ensureMcpLauncher(context);
-        if (!result.ok) {
-            vscode.window.showErrorMessage(`Bundled server install failed: ${result.error}`);
-            return;
-        }
-        const launcher = process.platform === 'win32' ? result.windowsLauncher : result.unixLauncher;
-        const prompt = buildAiConfigPrompt({
-            launcherPath: launcher,
-            entryPath: result.entryPath,
-            workspacePath,
-        });
-        outputChannel.show(true);
-        outputChannel.appendLine('=== Antigravity MCP Bundled Server ===');
-        outputChannel.appendLine(`entry: ${result.entryPath}`);
-        outputChannel.appendLine(`launcher(unix): ${result.unixLauncher}`);
-        outputChannel.appendLine(`launcher(win): ${result.windowsLauncher}`);
-        outputChannel.appendLine('');
-        outputChannel.appendLine(prompt);
-        await vscode.env.clipboard.writeText(prompt);
-        vscode.window.showInformationMessage(`Bundled MCP server ready. AI config prompt copied to clipboard. Launcher: ${launcher}`);
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showAiConfigPrompt', async () => {
-        const { unixLauncher, windowsLauncher } = getLauncherPaths();
-        const launcher = process.platform === 'win32' ? windowsLauncher : unixLauncher;
-        const prompt = buildAiConfigPrompt({
-            launcherPath: launcher,
-            entryPath: getBundledServerEntryPath(context),
-            workspacePath,
-        });
-        outputChannel.show(true);
-        outputChannel.appendLine('=== Antigravity MCP AI Config Prompt ===');
-        outputChannel.appendLine(prompt);
-        await vscode.env.clipboard.writeText(prompt);
-        vscode.window.showInformationMessage('AI config prompt copied to clipboard and written to output.');
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.requestHostRestart', async () => {
-        const confirm = await vscode.window.showWarningMessage(
-            'Submit host restart request now? This requires a configured host-bridge transport.',
-            { modal: true },
-            'Submit'
-        );
-        if (confirm !== 'Submit') return;
-        await requestHostRestart({ reason: 'manual_command' });
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.restartAntigravity', async () => {
-        if (runtimeRole === 'remote') {
-            const confirm = await vscode.window.showWarningMessage(
-                'Request host restart now? This requires a configured host-bridge transport.',
-                { modal: true },
-                'Request Restart'
-            );
-            if (confirm !== 'Request Restart') return;
-            await requestHostRestart({ reason: 'restart_command' });
-            return;
-        }
-        const confirm = await vscode.window.showWarningMessage(
-            'Restart Antigravity now? This may interrupt your current window/session.',
-            { modal: true },
-            'Restart'
-        );
-        if (confirm !== 'Restart') return;
-        await executeManualLaunch('restart');
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuota', async () => {
-        const report = formatQuotaReport(latestQuota, latestQuotaError);
-        outputChannel.show(true);
-        for (const line of report.split('\n')) {
-            outputChannel.appendLine(line);
-        }
-        if (!latestQuota && latestQuotaError) {
-            log(`Quota snapshot unavailable: ${latestQuotaError}`);
-            return;
-        }
-        const summary = summarizeQuota(latestQuota);
-        if (summary && summary.primaryPercent !== null) {
-            log(`Quota: ${summary.primaryPercent.toFixed(1)}% remaining (${summary.primaryLabel})`);
-        } else {
-            log('Quota snapshot written to output channel.');
-        }
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuotaTable', async () => {
-        const models = Array.isArray(latestQuota && latestQuota.models) ? latestQuota.models : [];
-        outputChannel.show(true);
-        if (models.length === 0) {
-            outputChannel.appendLine('No model quota snapshot available yet.');
-            log('No model quota snapshot available yet.');
-            return;
-        }
-
-        const sorted = [...models].sort((a, b) =>
-            String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
-        );
-        outputChannel.appendLine('=== Antigravity Model Quota ===');
-        for (const model of sorted) {
-            const id = model.modelId || model.label || 'unknown';
-            const remaining = typeof model.remainingPercentage === 'number'
-                ? `${model.remainingPercentage.toFixed(1)}%`
-                : 'n/a';
-            const selectedMark = model.isSelected ? ' [active]' : '';
-            outputChannel.appendLine(`${id}${selectedMark}: remaining=${remaining} exhausted=${model.isExhausted ? 'yes' : 'no'}${model.resetTime ? ` reset=${model.resetTime}` : ''}`);
-        }
-        log(`Quota table written to output channel (${sorted.length} models).`);
-    }));
-
-    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.refreshQuota', async () => {
-        try {
-            await refreshQuota();
-            const summary = summarizeQuota(latestQuota);
-            if (summary && summary.primaryPercent !== null) {
-                log(`Quota refreshed: ${summary.primaryPercent.toFixed(1)}% (${summary.primaryLabel})`);
-            } else {
-                log('Quota refreshed.');
-            }
-        } catch (e) {
-            const message = e && e.message ? e.message : String(e);
-            log(`Quota refresh failed: ${message}`);
-        }
-    }));
+    registerCommands(context, {
+        runtimeRole,
+        outputChannel,
+        refreshQuota: async () => refreshQuota(),
+        requestHostRestart,
+        ensureMcpLauncher,
+        buildAiConfigPrompt,
+        executeManualLaunch,
+        getLauncherPaths,
+        getBundledServerEntryPath,
+        summarizeQuota,
+        formatQuotaReport,
+        getLatestQuota: () => latestQuota,
+        getLatestQuotaError: () => latestQuotaError,
+        getWorkspacePath: () => workspacePath,
+        getCdpTarget: () => cdpTarget,
+        getIsEnabled: () => isEnabled,
+        setIsEnabled: (value) => {
+            isEnabled = value;
+        },
+        syncState,
+        log,
+    });
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('antigravityMcpSidecar')) {
@@ -2121,7 +996,7 @@ async function activate(context) {
             },
             workspace_id: workspaceId || computeWorkspaceId(workspacePath),
             workspace_paths: {
-                normalized: normalizePath(workspacePath),
+                normalized: normalizeWorkspacePath(workspacePath),
                 raw: workspacePath,
             },
             node_id: nodeId,
@@ -2194,9 +1069,12 @@ async function activate(context) {
             getSnapshot,
             bridgeToken,
             nonceCache,
-            nodeId,
             log,
             warn,
+            schemaVersion: SCHEMA_VERSION,
+            bridgeVersion: BRIDGE_VERSION,
+            host: HOST_BRIDGE_BIND_HOST,
+            port: HOST_BRIDGE_PORT,
         });
         context.subscriptions.push(bridgeServer);
     }
@@ -2239,7 +1117,7 @@ async function activate(context) {
                 workspace_id: workspaceId,
                 original_workspace_id: entry.workspace_id,
                 workspace_paths: {
-                    normalized: normalizePath(workspacePath),
+                    normalized: normalizeWorkspacePath(workspacePath),
                     raw: workspacePath,
                 },
                 node_id: nodeId,
@@ -2331,6 +1209,22 @@ async function activate(context) {
             lastHeartbeatFailureSignature = '';
             lastHeartbeatFailureLogAt = 0;
             register();
+            // Clear any pending CDP prompt requests for this workspace now that CDP is ready.
+            try {
+                const regNow = readRegistryObject();
+                const ctrl = getControlRecord(regNow);
+                const prompts = ctrl[CONTROL_NO_CDP_PROMPT_KEY];
+                if (prompts && typeof prompts === 'object') {
+                    const requestId = `no_cdp_${workspaceId}`;
+                    const existing = prompts[requestId];
+                    if (existing && (existing.status === 'pending' || existing.status === 'shown')) {
+                        prompts[requestId] = { ...existing, status: 'resolved', updated_at: Date.now() };
+                        ctrl[CONTROL_NO_CDP_PROMPT_KEY] = prompts;
+                        regNow[REGISTRY_CONTROL_KEY] = ctrl;
+                        writeRegistryObject(regNow);
+                    }
+                }
+            } catch { }
             log(`Registered workspace ${workspacePath} with CDP target ${cdpTarget.ip}:${cdpTarget.port} (source=${cdpSource})`, {
                 plane: 'data',
                 state: 'ready',
@@ -2382,7 +1276,7 @@ async function activate(context) {
         return false;
     };
 
-    await processHostControlRequests();
+    processHostControlRequests().catch(() => {});
     const controlTimer = setInterval(() => {
         processHostControlRequests().catch((err) => {
             warn(`Control loop error: ${shortError(err)}`, {
@@ -2396,7 +1290,7 @@ async function activate(context) {
     // Heartbeat runs even when initial CDP probe fails so it can auto-recover.
     const heartbeatRetry = async () => {
         if (cdpHeartbeatRunning) return;
-        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready') return;
+        if (cdpState !== 'app_up_no_cdp' && cdpState !== 'app_up_cdp_not_ready' && cdpState !== 'app_down') return;
         cdpHeartbeatRunning = true;
         try {
             const recovered = await negotiateCdp({ phase: 'heartbeat-retry' });
@@ -2405,7 +1299,11 @@ async function activate(context) {
                 updateStatusBar();
                 updateQuotaStatusBar();
                 // One-time quota fetch since we missed normal init.
-                fetchQuotaSnapshot().then((result) => {
+                fetchQuotaSnapshot({
+                    execAsync,
+                    normalizeQuotaSnapshot,
+                    extractActiveModelId,
+                }).then((result) => {
                     latestLs = result.ls || latestLs;
                     latestQuota = result.quota || latestQuota;
                     latestQuotaError = result.error;
@@ -2431,7 +1329,11 @@ async function activate(context) {
 
     const refreshQuota = async () => {
         try {
-            const result = await fetchQuotaSnapshot();
+            const result = await fetchQuotaSnapshot({
+                execAsync,
+                normalizeQuotaSnapshot,
+                extractActiveModelId,
+            });
             latestLs = result.ls || latestLs;
             latestQuota = result.quota || latestQuota;
             latestQuotaError = result.error;
@@ -2547,7 +1449,7 @@ foreach ($dir in $paths) {
         $files = Get-ChildItem -Path $dir -Filter "*.lnk" -Recurse -ErrorAction SilentlyContinue
         foreach ($file in $files) {
             $shortcut = $WshShell.CreateShortcut($file.FullName)
-            if ($shortcut.TargetPath -like "*Antigravity*" -or $shortcut.TargetPath -like "*Cursor*") {
+            if ($shortcut.TargetPath -like "*Antigravity*") {
                 if ($shortcut.Arguments -notlike "*remote-debugging-port*") {
                     $shortcut.Arguments = ($shortcut.Arguments + " " + $flag).Trim()
                     $shortcut.Save()
@@ -2587,7 +1489,7 @@ if ($patched) { Write-Output "SUCCESS" } else { Write-Output "NOT_FOUND" }
             );
         } else {
             vscode.window.showWarningMessage(
-                'No Antigravity/Cursor shortcut found. Add --remote-debugging-port=9000 to your shortcut manually.'
+                'No Antigravity shortcut found. Add --remote-debugging-port=9000 to your shortcut manually.'
             );
         }
     });

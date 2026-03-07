@@ -102,6 +102,16 @@ function upsertNoCdpPromptRequest(params: {
     const requests = rawRequests && typeof rawRequests === "object" ? { ...rawRequests } : {};
     const existing = requests[requestId];
     if (existing && typeof existing === "object") {
+        const existingStatus = String(existing.status || "");
+        const existingState = String(existing.state || "");
+        const existingReasonCode = String(existing.reason_code || "");
+        if (
+            (existingStatus === "shown" || existingStatus === "resolved") &&
+            existingState === String(state || "unknown") &&
+            existingReasonCode === String(reasonCode || "")
+        ) {
+            return;
+        }
         const updatedAt = Number(existing.updated_at || existing.created_at || 0);
         if (Number.isFinite(updatedAt) && now - updatedAt < NO_CDP_PROMPT_COOLDOWN_MS) {
             return;
@@ -284,14 +294,19 @@ export async function discoverCDPDetailed(
     }
 
     if (matched.state !== READY_STATE) {
-        upsertNoCdpPromptRequest({
-            registry,
-            registryFile,
-            workspaceId: matched.workspace_id ?? targetId,
-            state: matched.state,
-            reasonCode: "entry_not_ready",
-            reasonMessage: `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
-        });
+        // Only prompt when the app is confirmed up but CDP is unavailable.
+        // Skip transient states like 'launching' to avoid spurious dialogs during cold-start.
+        const shouldPrompt = matched.state === "app_up_no_cdp" || matched.state === "app_up_cdp_not_ready";
+        if (shouldPrompt) {
+            upsertNoCdpPromptRequest({
+                registry,
+                registryFile,
+                workspaceId: matched.workspace_id ?? targetId,
+                state: matched.state,
+                reasonCode: "entry_not_ready",
+                reasonMessage: `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
+            });
+        }
         return discoverError(
             "entry_not_ready",
             `Registry entry is not ready (state=${matched.state ?? "unknown"})`,
