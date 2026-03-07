@@ -3,18 +3,20 @@
   "version": "0.1.0",
   "description": "Shared types and utilities for Antigravity MCP",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/cjs/index.cjs",
+  "types": "dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs",
+      "default": "./dist/esm/index.js"
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package-json.mjs && node scripts/create-esm-test-compat.mjs",
     "test": "node --test test/**/*.test.mjs",
-    "clean": "rm -rf dist"
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "keywords": ["mcp", "antigravity", "types"],
   "license": "MIT",

@@ -1,19 +1,8 @@
 {
+  "extends": "./tsconfig.esm.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "lib": ["ES2022"],
-    "moduleResolution": "node16",
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
     "composite": true,
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]

@@ -24,6 +24,9 @@ const {
     verifyBridgeHttpRequest,
 } = require('./bridge-auth');
 
+const { createRequire } = require('module');
+
+const requireCore = createRequire(__filename);
 const {
     SCHEMA_VERSION,
     COMPATIBLE_SCHEMA_VERSIONS,
@@ -32,7 +35,7 @@ const {
     getConfigDir,
     getRegistryFilePath,
     computeWorkspaceId,
-} = require('@antigravity-mcp/core');
+} = requireCore('@antigravity-mcp/core');
 
 const REGISTRY_DIR = getConfigDir();
 const REGISTRY_FILE = getRegistryFilePath();
