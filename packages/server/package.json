@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node build/dist/index.js",
-    "dev": "tsc && node build/dist/index.js"
+    "dev": "tsc && node build/dist/index.js",
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "mcp",

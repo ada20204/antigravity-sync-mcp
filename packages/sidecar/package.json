@@ -162,7 +162,8 @@
         "sync-server-runtime": "node scripts/sync-server-runtime.mjs",
         "prepackage": "npm run sync-server-runtime",
         "package": "vsce package",
-        "verify": "./verify-vsix.sh"
+        "verify": "./verify-vsix.sh",
+        "build": "echo 'Sidecar is plain JavaScript, no build needed'"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
