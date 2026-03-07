@@ -177,14 +177,14 @@ export async function atomicWindowsLaunch(
 
 async function waitForProcessGone(
     processPattern: string,
-    timeoutMs = 5000,
-    intervalMs = 200,
+    timeoutMs = 12000,
+    intervalMs = 500,
 ): Promise<boolean> {
     const { execSync } = await import("child_process");
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
         try {
-            execSync(`pgrep -i "${processPattern}"`, { stdio: "ignore" });
+            execSync(`pgrep -f "${processPattern}"`, { stdio: "ignore" });
             await new Promise((r) => setTimeout(r, intervalMs));
         } catch {
             return true;
@@ -269,14 +269,32 @@ export async function launchAntigravityForWorkspace(params: {
             if (killFirst) {
                 const { execSync } = await import("child_process");
                 const appName = executable.includes("Antigravity") ? "Antigravity" : "Cursor";
+
+                // Two-stage kill: try SIGTERM first, then SIGKILL if needed
                 try {
-                    execSync(`pkill -9 -i "${appName}"`, { stdio: "ignore" });
-                    log?.(`Sent SIGKILL to ${appName}`);
+                    execSync(`pkill -f "${appName}"`, { stdio: "ignore" });
+                    log?.(`Sent SIGTERM to ${appName}`);
                 } catch {
                     // No matching process
                 }
-                const gone = await waitForProcessGone(appName);
-                log?.(`Process ${appName} ${gone ? "confirmed gone" : "may still be running"}`);
+
+                // Wait up to 3s for graceful shutdown
+                const gone = await waitForProcessGone(appName, 3000, 500);
+
+                if (!gone) {
+                    // Force kill if still running
+                    try {
+                        execSync(`pkill -9 -f "${appName}"`, { stdio: "ignore" });
+                        log?.(`Sent SIGKILL to ${appName}`);
+                    } catch {
+                        // Ignore
+                    }
+                    // Wait a bit more for force kill
+                    const forceGone = await waitForProcessGone(appName, 2000, 200);
+                    log?.(`Process ${appName} ${forceGone ? "confirmed gone" : "may still be running"}`);
+                } else {
+                    log?.(`Process ${appName} exited gracefully`);
+                }
             }
 
             const appMatch = executable.match(/^(.+\.app)/);

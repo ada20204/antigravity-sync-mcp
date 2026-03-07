@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { buildAiConfigPrompt } = require('../core/ai-config');
 
 const MCP_HOME_DIR = path.join(os.homedir(), '.config', 'antigravity-mcp');
@@ -162,6 +162,49 @@ function launchAntigravityDetached(params) {
         try {
             spawn('pkill', ['-f', 'Antigravity'], { stdio: 'ignore' });
         } catch { }
+
+        // Wait for processes to exit. Use shorter timeout (3s) since we'll force kill anyway.
+        // Without this delay, the new instance may conflict with lingering resources
+        // (ports, file locks, IPC sockets), causing crashes or "reopen window" errors.
+        const deadline = Date.now() + 3000;
+        let processExited = false;
+
+        while (Date.now() < deadline) {
+            try {
+                const result = spawnSync('pgrep', ['-f', 'Antigravity'], { encoding: 'utf8' });
+                const output = (result.stdout || '').trim();
+                if (!output) {
+                    processExited = true;
+                    break;
+                }
+            } catch {
+                processExited = true;
+                break;
+            }
+            // Sleep 500ms between checks
+            const sleepUntil = Date.now() + 500;
+            while (Date.now() < sleepUntil) { /* busy wait */ }
+        }
+
+        // If processes still running after 3s, force kill
+        if (!processExited) {
+            try {
+                spawn('pkill', ['-9', '-f', 'Antigravity'], { stdio: 'ignore' });
+            } catch { }
+
+            // Wait a bit more for force kill to complete
+            const forceDeadline = Date.now() + 2000;
+            while (Date.now() < forceDeadline) {
+                try {
+                    const result = spawnSync('pgrep', ['-f', 'Antigravity'], { encoding: 'utf8' });
+                    if (!(result.stdout || '').trim()) break;
+                } catch {
+                    break;
+                }
+                const sleepUntil = Date.now() + 200;
+                while (Date.now() < sleepUntil) { /* busy wait */ }
+            }
+        }
     }
 
     // Escape arguments for safe shell execution
