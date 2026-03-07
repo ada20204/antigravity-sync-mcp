@@ -1,55 +1,97 @@
 #!/usr/bin/env node
 
 /**
- * Sync server runtime dependencies
+ * Sync sidecar server runtime payload for VSIX packaging.
  *
- * Copies ws and @modelcontextprotocol/sdk from sidecar root node_modules
- * to server-runtime/node_modules/ so they're bundled in the VSIX.
+ * In the monorepo layout the sidecar bundles:
+ * - server build output into server-runtime/dist
+ * - runtime npm dependencies into server-runtime/node_modules
+ * - the workspace core package into server-runtime/node_modules/@antigravity-mcp/core
  *
- * This keeps the git repo clean (no committed node_modules) while ensuring
- * the VSIX is self-contained.
+ * This keeps the extension package self-contained without changing extension.js.
  */
 
-import { cpSync, existsSync, mkdirSync, rmSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = join(__dirname, '..');
-const serverRuntimeDir = join(rootDir, 'server-runtime');
+const sidecarRoot = join(__dirname, '..');
+const workspaceRoot = join(sidecarRoot, '../..');
+const serverRoot = join(workspaceRoot, 'packages', 'server');
+const coreRoot = join(workspaceRoot, 'packages', 'core');
+const serverRuntimeDir = join(sidecarRoot, 'server-runtime');
+const targetDistDir = join(serverRuntimeDir, 'dist');
 const targetNodeModules = join(serverRuntimeDir, 'node_modules');
+const hoistedNodeModules = join(workspaceRoot, 'node_modules');
 
-// In a workspace, dependencies are hoisted to workspace root
-const workspaceRoot = join(rootDir, '../..');
-const sourceNodeModules = join(workspaceRoot, 'node_modules');
+const RUNTIME_DEPS = ['ws', '@modelcontextprotocol'];
+const SERVER_RUNTIME_PACKAGE_JSON = {
+    type: 'module',
+    dependencies: {
+        '@antigravity-mcp/core': '*',
+    },
+};
+const SOURCE_TO_TARGET_COPIES = [
+    {
+        label: 'server build output',
+        source: join(serverRoot, 'build', 'dist'),
+        target: targetDistDir,
+    },
+    {
+        label: 'core package metadata',
+        source: join(coreRoot, 'package.json'),
+        target: join(targetNodeModules, '@antigravity-mcp', 'core', 'package.json'),
+    },
+    {
+        label: 'core build output',
+        source: join(coreRoot, 'dist'),
+        target: join(targetNodeModules, '@antigravity-mcp', 'core', 'dist'),
+    },
+];
 
-const DEPS_TO_COPY = ['ws', '@modelcontextprotocol'];
+function ensureExists(path, label) {
+    if (!existsSync(path)) {
+        console.error(`Source not found for ${label}: ${path}`);
+        process.exit(1);
+    }
+}
 
-console.log('🔄 Syncing server runtime dependencies...');
+function copyPath(label, source, target) {
+    ensureExists(source, label);
+    console.log(`  Copying ${label}...`);
+    cpSync(source, target, { recursive: true });
+}
 
-// Clean target directory
+console.log('Syncing sidecar server runtime payload...');
+
+if (existsSync(targetDistDir)) {
+    console.log('  Cleaning existing server-runtime/dist/');
+    rmSync(targetDistDir, { recursive: true, force: true });
+}
+
 if (existsSync(targetNodeModules)) {
     console.log('  Cleaning existing server-runtime/node_modules/');
     rmSync(targetNodeModules, { recursive: true, force: true });
 }
 
+mkdirSync(serverRuntimeDir, { recursive: true });
 mkdirSync(targetNodeModules, { recursive: true });
 
-// Copy each dependency
-for (const dep of DEPS_TO_COPY) {
-    const sourcePath = join(sourceNodeModules, dep);
-    const targetPath = join(targetNodeModules, dep);
-
-    if (!existsSync(sourcePath)) {
-        console.error(`  ❌ Source not found: ${dep}`);
-        console.error(`     Expected at: ${sourcePath}`);
-        console.error(`     Run 'npm install' first.`);
-        process.exit(1);
-    }
-
-    console.log(`  Copying ${dep}...`);
-    cpSync(sourcePath, targetPath, { recursive: true });
+for (const entry of SOURCE_TO_TARGET_COPIES) {
+    copyPath(entry.label, entry.source, entry.target);
 }
 
-console.log('✅ Server runtime dependencies synced successfully');
-console.log(`   Target: ${targetNodeModules}`);
+for (const dep of RUNTIME_DEPS) {
+    copyPath(`${dep} runtime dependency`, join(hoistedNodeModules, dep), join(targetNodeModules, dep));
+}
+
+writeFileSync(
+    join(targetDistDir, 'package.json'),
+    `${JSON.stringify(SERVER_RUNTIME_PACKAGE_JSON, null, 2)}\n`,
+    'utf8'
+);
+
+console.log('Server runtime payload synced successfully');
+console.log(`  Dist: ${targetDistDir}`);
+console.log(`  Node modules: ${targetNodeModules}`);

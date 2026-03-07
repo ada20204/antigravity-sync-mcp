@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-# Verify that a VSIX package contains the bundled ws module.
+# Verify that a VSIX package contains the bundled server runtime,
+# runtime dependencies, and the workspace core package payload.
 # Usage:
 #   ./verify-vsix.sh                 # newest .vsix in current directory
 #   ./verify-vsix.sh path/to/x.vsix  # explicit package path
@@ -36,20 +37,21 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 unzip -q "$VSIX_PATH" -d "$WORK_DIR"
 
-if [[ ! -f "$WORK_DIR/extension/server-runtime/dist/index.js" ]]; then
-  echo "FAIL: bundled server runtime missing in $(basename "$VSIX_PATH")"
-  exit 1
-fi
+require_path() {
+  local path="$1"
+  local description="$2"
 
-if [[ ! -d "$WORK_DIR/extension/server-runtime/node_modules/ws" ]]; then
-  echo "FAIL: ws module missing in $(basename "$VSIX_PATH")"
-  exit 1
-fi
+  if [[ ! -e "$WORK_DIR/extension/$path" ]]; then
+    echo "FAIL: ${description} missing at extension/$path in $(basename "$VSIX_PATH")"
+    exit 1
+  fi
+}
 
-if [[ ! -d "$WORK_DIR/extension/server-runtime/node_modules/@modelcontextprotocol/sdk" ]]; then
-  echo "FAIL: @modelcontextprotocol/sdk missing in $(basename "$VSIX_PATH")"
-  exit 1
-fi
+require_path "server-runtime/dist/index.js" "bundled server runtime entry"
+require_path "server-runtime/node_modules/ws" "ws module"
+require_path "server-runtime/node_modules/@modelcontextprotocol/sdk" "@modelcontextprotocol/sdk module"
+require_path "server-runtime/node_modules/@antigravity-mcp/core/package.json" "@antigravity-mcp/core package metadata"
+require_path "server-runtime/node_modules/@antigravity-mcp/core/dist/index.js" "@antigravity-mcp/core build output"
 
-echo "PASS: bundled server runtime + deps present in $(basename "$VSIX_PATH")"
+echo "PASS: bundled server runtime, runtime deps, and core package present in $(basename "$VSIX_PATH")"
 exit 0

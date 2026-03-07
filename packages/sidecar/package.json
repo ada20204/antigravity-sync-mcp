@@ -18,9 +18,8 @@
     "main": "./src/extension.js",
     "files": [
         "src/**/*",
+        "scripts/**/*",
         "server-runtime/**/*",
-        "node_modules/ws/**/*",
-        "node_modules/@modelcontextprotocol/sdk/**/*",
         "package.json",
         "README.md",
         "AI_CONFIG_PROMPT.md",
@@ -161,7 +160,7 @@
     "scripts": {
         "sync-server-runtime": "node scripts/sync-server-runtime.mjs",
         "prepackage": "npm run sync-server-runtime",
-        "package": "vsce package",
+        "package": "vsce package --no-dependencies",
         "verify": "./verify-vsix.sh",
         "build": "echo 'Sidecar is plain JavaScript, no build needed'",
         "test": "node -c src/extension.js && node -c src/structured-log.js && node -c src/bridge-auth.js && echo 'Sidecar syntax check passed'"
