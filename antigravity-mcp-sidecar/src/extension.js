@@ -185,12 +185,13 @@ function mapCdpStateToRegistryState(state) {
 }
 // ──────────────────────────────────────────────────────────────────────────
 
-function resolveRuntimeRole() {
+function resolveRuntimeRole(remoteName) {
+    // Explicit env override always wins.
     const forced = String(process.env.ANTIGRAVITY_SIDECAR_ROLE || '').trim().toLowerCase();
     if (forced === 'host' || forced === 'remote') return forced;
-    // This extension is UI-kind and runs in the desktop host process.
-    // Treat it as host by default; use ANTIGRAVITY_SIDECAR_ROLE=remote only
-    // when an explicit remote-side deployment is configured.
+    // When VS Code is connected to a remote (SSH, WSL, Dev Container, etc.),
+    // vscode.env.remoteName is non-empty. Treat that as the remote sidecar.
+    if (remoteName) return 'remote';
     return 'host';
 }
 
@@ -1284,9 +1285,9 @@ function createRemoteBridgeClient({ bridgeEndpoint, bridgeToken, nodeId, onSnaps
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
     context.subscriptions.push(outputChannel);
-    const runtimeRole = resolveRuntimeRole();
-    const nodeId = createNodeId(runtimeRole);
     const remoteName = String((vscode.env && vscode.env.remoteName) || '').trim();
+    const runtimeRole = resolveRuntimeRole(remoteName);
+    const nodeId = createNodeId(runtimeRole);
     let workspaceId = '';
     structuredLogger = createStructuredLogger({
         baseDir: REGISTRY_DIR,
