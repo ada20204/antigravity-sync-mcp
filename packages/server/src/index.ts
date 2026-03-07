@@ -26,7 +26,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
     readRegistryObject as _readRegistryFromCore,
-    getRegistryPath,
+    getRegistryFilePath,
     entrySupportsCurrentSchema,
 } from "@antigravity-mcp/core";
 
@@ -78,7 +78,7 @@ const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
-const REGISTRY_FILE = getRegistryPath();
+const REGISTRY_FILE = getRegistryFilePath();
 const VERSION = "0.1.2";
 const activeAskTasks = new Map<string, AskTask>();
 const activeWorkspaceRoutes = new Map<string, { wsUrl: string; workspaceKey: string }>();
@@ -157,7 +157,6 @@ function uniqueStrings(items: string[]): string[] {
     return out;
 }
 
-const entrySupportsSchema = entrySupportsCurrentSchema;
 
 function readRegistryObjectFromDisk(): Record<string, RegistryEntry> | null {
     return _readRegistryFromCore() as Record<string, RegistryEntry> | null;
@@ -803,7 +802,7 @@ async function handleListWorkspaces(): Promise<string> {
 
     const workspaces = Object.entries(registry)
         .filter(([key, value]) => !key.startsWith("__") && !!value && typeof value === "object")
-        .filter(([, entry]) => entrySupportsSchema(entry))
+        .filter(([, entry]) => entrySupportsCurrentSchema(entry))
         .map(([registryKey, entry]) => ({
             workspacePath:
                 entry.workspace_paths?.raw ??

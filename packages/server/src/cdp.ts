@@ -62,7 +62,6 @@ export type {
 };
 
 
-const SUPPORTED_SCHEMA_VERSIONS = COMPATIBLE_SCHEMA_VERSIONS as number[];
 const READY_STATE = "ready";
 
 function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
@@ -189,7 +188,6 @@ function rankRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
     });
 }
 
-const entrySupportsSchema = entrySupportsCurrentSchema;
 
 async function resolveTargetFromEndpoint(ip: string, port: number): Promise<CDPTarget | null> {
     const response = await fetch(`http://${ip}:${port}/json/list`);
@@ -269,10 +267,10 @@ export async function discoverCDPDetailed(
         });
     }
 
-    const withSupportedSchema = entries.filter((entry) => entrySupportsSchema(entry));
+    const withSupportedSchema = entries.filter((entry) => entrySupportsCurrentSchema(entry));
     if (withSupportedSchema.length === 0) {
         const seenSchemas = [...new Set(entries.map((entry) => Number(entry.schema_version)))].filter((n) => Number.isFinite(n));
-        return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${SUPPORTED_SCHEMA_VERSIONS.join(",")})`, {
+        return discoverError("schema_mismatch", `Unsupported schema_version in registry (supported=${COMPATIBLE_SCHEMA_VERSIONS.join(",")})`, {
             workspaceId: targetId,
             details: { seen_schema_versions: seenSchemas },
         });
