@@ -293,6 +293,9 @@ function createAccountFeatures({
     getAntigravityPid,
     runtimeRole,
     executeManualLaunch,
+    getLatestQuota,
+    summarizeQuota,
+    refreshQuota,
 }) {
     const fallback = {
         accountCommandAdapter: createUnavailableAccountCommandAdapter({
@@ -336,6 +339,9 @@ function createAccountFeatures({
             outputChannel,
             log,
             executeManualLaunch,
+            getLatestQuota,
+            summarizeQuota,
+            refreshQuota,
         }));
         const accountControlApi = runtimeRole === 'host'
             ? activationDiagnostics.run('account:controlApi', () => createAccountControlApi({
@@ -1337,6 +1343,9 @@ async function activate(context) {
         getAntigravityPid: () => process.pid,
         runtimeRole,
         executeManualLaunch,
+        getLatestQuota: () => latestQuota,
+        summarizeQuota,
+        refreshQuota: async () => refreshQuota(),
     });
 
     try {
@@ -1801,7 +1810,9 @@ async function activate(context) {
             latestQuotaError = result.error;
             register();
             if (result.quota) {
-                log(`Quota snapshot updated (${result.quota.models ? result.quota.models.length : 0} model entries)`);
+                if (structuredLogger) {
+                    structuredLogger.debug(`Quota snapshot updated (${result.quota.models ? result.quota.models.length : 0} model entries)`);
+                }
             } else if (result.error) {
                 log(`Quota snapshot unavailable: ${result.error}`);
             }

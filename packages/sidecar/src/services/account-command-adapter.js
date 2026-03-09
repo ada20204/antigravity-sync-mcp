@@ -78,12 +78,73 @@ async function confirmAddAnotherAccount({ vscodeApi }) {
   return confirm === 'Save and Restart';
 }
 
+function formatAccountStatusReport({ currentAccount, quota, summarizeQuota: summarize }) {
+  const lines = ['=== Sidecar: Account Status ==='];
+
+  if (currentAccount) {
+    lines.push(`account: ${currentAccount.email}`);
+  } else {
+    lines.push('account: (not logged in)');
+  }
+
+  if (!quota) {
+    lines.push('quota: no snapshot available');
+    return lines.join('\n');
+  }
+
+  if (quota.timestamp) {
+    const ageMs = Date.now() - Number(quota.timestamp);
+    const ageSec = Math.round(ageMs / 1000);
+    lines.push(`quota snapshot age: ${ageSec}s`);
+  }
+
+  const summary = summarize ? summarize(quota) : null;
+  if (summary) {
+    if (summary.activeModelName) {
+      lines.push(`active model: ${summary.activeModelName}`);
+    }
+    if (summary.activeModelRemaining !== null && summary.activeModelRemaining !== undefined) {
+      lines.push(`active model quota: ${summary.activeModelRemaining.toFixed(1)}%`);
+    }
+    if (summary.promptRemaining !== null && summary.promptRemaining !== undefined) {
+      lines.push(`prompt credits: ${summary.promptRemaining.toFixed(1)}%`);
+    }
+    if (summary.modelCount > 0) {
+      lines.push(`models tracked: ${summary.modelCount}${summary.exhaustedCount > 0 ? `, exhausted: ${summary.exhaustedCount}` : ''}`);
+    }
+  }
+
+  const models = Array.isArray(quota.models) ? quota.models : [];
+  if (models.length > 0) {
+    lines.push('model quota:');
+    const sorted = [...models].sort((a, b) =>
+      String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || '')),
+    );
+    for (const m of sorted) {
+      const id = m.modelId || m.label || 'unknown';
+      const remaining = typeof m.remainingPercentage === 'number'
+        ? `${m.remainingPercentage.toFixed(1)}%`
+        : 'n/a';
+      const flags = [
+        m.isSelected ? '[active]' : '',
+        m.isExhausted ? '[exhausted]' : '',
+      ].filter(Boolean).join(' ');
+      lines.push(`  ${id}: ${remaining}${flags ? ' ' + flags : ''}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function createAccountCommandAdapter({
   controller,
   vscodeApi,
   outputChannel,
   log,
   executeManualLaunch,
+  getLatestQuota,
+  summarizeQuota,
+  refreshQuota,
   equalsAccount = defaultEqualsAccount,
 }) {
   return {
@@ -130,6 +191,40 @@ function createAccountCommandAdapter({
         outputChannel.appendLine(`ERROR: ${error.message}`);
         vscodeApi.window.showErrorMessage(`Sidecar: Switch failed: ${error.message}`);
       }
+    },
+
+    async runAccountStatusCommand() {
+      outputChannel.show(true);
+
+      let currentAccount = null;
+      try {
+        currentAccount = await controller.getCurrentAccount();
+      } catch (error) {
+        outputChannel.appendLine(`Account lookup failed: ${error.message}`);
+      }
+
+      if (typeof refreshQuota === 'function') {
+        try {
+          await refreshQuota();
+        } catch (error) {
+          outputChannel.appendLine(`Quota refresh failed: ${error.message}`);
+        }
+      }
+
+      const quota = typeof getLatestQuota === 'function' ? getLatestQuota() : null;
+      const report = formatAccountStatusReport({ currentAccount, quota, summarizeQuota });
+      for (const line of report.split('\n')) {
+        outputChannel.appendLine(line);
+      }
+
+      const summary = summarizeQuota ? summarizeQuota(quota) : null;
+      const accountLabel = currentAccount ? currentAccount.email : '(not logged in)';
+      const quotaLabel = summary && summary.activeModelRemaining !== null
+        ? `${summary.activeModelName || 'model'}: ${summary.activeModelRemaining.toFixed(0)}%`
+        : summary && summary.promptRemaining !== null
+          ? `credits: ${summary.promptRemaining.toFixed(0)}%`
+          : 'quota: n/a';
+      vscodeApi.window.showInformationMessage(`Sidecar: ${accountLabel} — ${quotaLabel}`);
     },
 
     async runAddAnotherAccountCommand() {

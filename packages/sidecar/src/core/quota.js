@@ -41,6 +41,26 @@ function extractActiveModelId(conversation) {
     return candidate || null;
 }
 
+function formatModelIdAsLabel(modelId) {
+    if (!modelId) return '';
+    let s = modelId.replace(/^MODEL_/, '');
+    // PLACEHOLDER_M18 → Model M18（先处理，避免被后续逻辑破坏）
+    if (/^PLACEHOLDER_M\d+$/.test(s)) {
+        return 'Model ' + s.replace('PLACEHOLDER_', '');
+    }
+    // 去掉 OPENAI_ 前缀，_OSS_ 噪音
+    s = s.replace(/^OPENAI_/, '').replace(/_OSS_/, '_');
+    const ACRONYMS = new Set(['GPT', 'API']);
+    s = s.split('_').map((w) => {
+        if (!w) return '';
+        if (ACRONYMS.has(w.toUpperCase())) return w.toUpperCase();
+        // 纯数字或数字+字母（120B、4、5）保持原样
+        if (/^\d+[A-Za-z]*$/.test(w)) return w.toUpperCase();
+        return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(' ');
+    return s;
+}
+
 function normalizeQuotaSnapshot(data, activeModelId) {
     const userStatus = (data && data.userStatus) || {};
     const planStatus = userStatus.planStatus || {};
@@ -73,7 +93,8 @@ function normalizeQuotaSnapshot(data, activeModelId) {
                 const resetTime = String(m.quotaInfo.resetTime || '');
                 const resetMs = resetTime ? Date.parse(resetTime) : NaN;
                 const modelId = String((m.modelOrAlias && m.modelOrAlias.model) || m.model || '');
-                const label = String(m.label || '');
+                const displayName = String(m.displayName || '');
+                const label = displayName || String(m.label || '') || formatModelIdAsLabel(modelId);
                 const selectedHint = m.isSelected === true || m.selected === true || m.current === true || m.isCurrent === true;
                 const selectedByActiveId = !!activeModelId && (modelIdMatches(modelId, activeModelId) || modelIdMatches(label, activeModelId));
                 return {

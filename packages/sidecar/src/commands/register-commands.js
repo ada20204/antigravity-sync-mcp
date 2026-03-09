@@ -11,6 +11,9 @@ const nullAccountCommandAdapter = {
     async runAddAnotherAccountCommand() {
         vscode.window.showErrorMessage('Sidecar: Account commands unavailable.');
     },
+    async runAccountStatusCommand() {
+        vscode.window.showErrorMessage('Sidecar: Account commands unavailable.');
+    },
 };
 
 function registerCommands(context, deps) {
@@ -473,6 +476,10 @@ function registerCommands(context, deps) {
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.addAnotherAccount', async () => {
         await accountCommandAdapter.runAddAnotherAccountCommand();
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.accountStatus', async () => {
+        await accountCommandAdapter.runAccountStatusCommand();
     }));
 
     log('registerCommands: completed command registration');

@@ -676,3 +676,98 @@ test('registerCommands switchAccount delegates to adapter', async () => {
   await registered.get('antigravityMcpSidecar.switchAccount')();
   assert.equal(delegated, 1);
 });
+
+test('accountStatus shows account email and quota summary in info message', async () => {
+  const outputChannel = createOutputChannel();
+  const infos = [];
+  const vscodeApi = {
+    executedCommands: [],
+    infos,
+    warnings: [],
+    errors: [],
+    quickPickCalls: [],
+    window: {
+      showInformationMessage(message) { infos.push(message); },
+      showWarningMessage() {},
+      showErrorMessage(message) { vscodeApi.errors.push(message); },
+      async showQuickPick() { return undefined; },
+    },
+    commands: { async executeCommand() {} },
+  };
+
+  const quota = {
+    timestamp: Date.now(),
+    models: [
+      { modelId: 'claude-3-5-sonnet', label: 'Sonnet', remainingPercentage: 72.5, isExhausted: false, isSelected: true },
+    ],
+    promptCredits: { remainingPercentage: 88.0 },
+  };
+
+  let refreshed = false;
+  const adapter = createAccountCommandAdapter({
+    controller: {
+      async getCurrentAccount() { return { email: 'user@example.com' }; },
+    },
+    vscodeApi,
+    outputChannel,
+    log() {},
+    getLatestQuota: () => quota,
+    summarizeQuota(q) {
+      const m = q.models[0];
+      return {
+        activeModelName: m.label,
+        activeModelRemaining: m.remainingPercentage,
+        promptRemaining: q.promptCredits.remainingPercentage,
+        modelCount: 1,
+        exhaustedCount: 0,
+        primaryPercent: m.remainingPercentage,
+        primaryLabel: `model ${m.label}`,
+        minModelRemaining: m.remainingPercentage,
+      };
+    },
+    refreshQuota: async () => { refreshed = true; },
+  });
+
+  await adapter.runAccountStatusCommand();
+
+  assert.equal(refreshed, true);
+  assert.ok(outputChannel.lines.some(l => l.includes('user@example.com')));
+  assert.ok(outputChannel.lines.some(l => l.includes('72.5%')));
+  assert.ok(infos.some(m => m.includes('user@example.com') && m.includes('Sonnet')));
+});
+
+test('accountStatus handles not logged in and no quota gracefully', async () => {
+  const outputChannel = createOutputChannel();
+  const infos = [];
+  const vscodeApi = {
+    executedCommands: [],
+    infos,
+    warnings: [],
+    errors: [],
+    quickPickCalls: [],
+    window: {
+      showInformationMessage(message) { infos.push(message); },
+      showWarningMessage() {},
+      showErrorMessage(message) { vscodeApi.errors.push(message); },
+      async showQuickPick() { return undefined; },
+    },
+    commands: { async executeCommand() {} },
+  };
+
+  const adapter = createAccountCommandAdapter({
+    controller: {
+      async getCurrentAccount() { return null; },
+    },
+    vscodeApi,
+    outputChannel,
+    log() {},
+    getLatestQuota: () => null,
+    summarizeQuota: () => null,
+  });
+
+  await adapter.runAccountStatusCommand();
+
+  assert.ok(outputChannel.lines.some(l => l.includes('not logged in')));
+  assert.ok(outputChannel.lines.some(l => l.includes('no snapshot available')));
+  assert.ok(infos.some(m => m.includes('not logged in')));
+});

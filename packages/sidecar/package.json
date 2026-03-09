@@ -103,6 +103,10 @@
             {
                 "command": "antigravityMcpSidecar.addAnotherAccount",
                 "title": "Sidecar: Add Another Account"
+            },
+            {
+                "command": "antigravityMcpSidecar.accountStatus",
+                "title": "Sidecar: Account Status"
             }
         ],
         "menus": {
