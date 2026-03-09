@@ -339,12 +339,42 @@ function createAccountFeatures({
             statusStore,
             randomId: () => randomBytes(16).toString('hex'),
         }));
+        const launchRestartWorker = ({ requestId }) => {
+            const workspacePath = getWorkspacePath();
+            const cdpPort = getCdpPort();
+            const configDir = accountSwitchConfigDir;
+            const pid = typeof getAntigravityPid === 'function' ? getAntigravityPid() : null;
+
+            if (!workspacePath) throw new Error('workspace folder is required for restart');
+            if (!Number.isFinite(cdpPort) || cdpPort <= 0) throw new Error('CDP port is required for restart');
+            if (!antigravityExecutablePath) throw new Error('Antigravity executable path is required for restart');
+
+            const scriptPath = path.join(__dirname, '..', 'scripts', 'restart-worker.js');
+            const args = [
+                scriptPath,
+                '--request-id', requestId,
+                '--workspace', workspacePath,
+                '--antigravity-path', antigravityExecutablePath,
+                '--port', String(cdpPort),
+                '--config-dir', configDir,
+                '--wait-exit',
+                ...getLaunchArgs().flatMap((arg) => ['--extra-arg', arg]),
+            ];
+            if (Number.isFinite(pid) && pid > 0) {
+                args.push('--pid', String(pid));
+            }
+
+            const child = spawn('node', args, { detached: true, stdio: 'ignore' });
+            child.unref();
+            log(`Restart worker started (pid=${child.pid}, requestId=${requestId})`);
+        };
+
         const accountCommandAdapter = activationDiagnostics.run('account:commandAdapter', () => createAccountCommandAdapter({
             controller: accountControl,
             vscodeApi: vscode,
             outputChannel,
             log,
-            executeManualLaunch,
+            launchRestartWorker,
             getLatestQuota,
             summarizeQuota,
             refreshQuota,

@@ -361,7 +361,7 @@ test('requestSwitchAccount failure does not trigger quit', async () => {
   assert.ok(outputChannel.lines.includes('ERROR: switch rejected'));
 });
 
-test('add another account delegates to executeManualLaunch restart flow', async () => {
+test('add another account delegates to launchRestartWorker wait-exit flow', async () => {
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
@@ -397,30 +397,25 @@ test('add another account delegates to executeManualLaunch restart flow', async 
     },
   };
   const { controller, calls } = createControllerDouble();
-  const launchCalls = [];
+  const restartCalls = [];
   const adapter = createAccountCommandAdapter({
     controller,
     vscodeApi,
     outputChannel,
     log() {},
-    executeManualLaunch: async (action, options) => {
-      launchCalls.push([action, options]);
-    },
+    launchRestartWorker: (params) => { restartCalls.push(params); },
   });
 
   await adapter.runAddAnotherAccountCommand();
 
   assert.deepEqual(calls, [['prepareAddAnotherAccount']]);
-  assert.deepEqual(launchCalls, [[
-    'restart',
-    { trigger: 'add-account', exitAfterWorkerStart: true, waitExit: true },
-  ]]);
+  assert.equal(restartCalls.length, 1);
+  assert.ok(restartCalls[0].requestId.startsWith('add-account-'));
   assert.deepEqual(vscodeApi.executedCommands, [
     'workbench.action.closeAllEditors',
     'workbench.action.quit',
   ]);
-  assert.ok(outputChannel.lines.includes('Step 3: Restart worker started.'));
-  assert.ok(outputChannel.lines.includes('Step 4: Closing Antigravity so restart can continue...'));
+  assert.ok(outputChannel.lines.includes('Step 3: Restarting Antigravity with cleared auth...'));
 });
 
 test('cancelled add another account confirmation does not prepare or restart', async () => {
@@ -464,7 +459,7 @@ test('cancelled add another account confirmation does not prepare or restart', a
     vscodeApi,
     outputChannel,
     log() {},
-    executeManualLaunch: async () => {
+    launchRestartWorker: () => {
       restarted = true;
     },
   });
@@ -519,7 +514,7 @@ test('prepareAddAnotherAccount failure does not restart', async () => {
     log(message) {
       logs.push(message);
     },
-    executeManualLaunch: async () => {
+    launchRestartWorker: () => {
       restarted = true;
     },
   });
@@ -533,7 +528,7 @@ test('prepareAddAnotherAccount failure does not restart', async () => {
   assert.deepEqual(vscodeApi.executedCommands, []);
 });
 
-test('missing executeManualLaunch reports restart unavailable for add another account', async () => {
+test('missing launchRestartWorker reports restart unavailable for add another account', async () => {
   const outputChannel = createOutputChannel();
   const warnings = [];
   const logs = [];
@@ -621,7 +616,7 @@ test('restart failure during add another account shows error and logs failure', 
     log(message) {
       logs.push(message);
     },
-    executeManualLaunch: async () => {
+    launchRestartWorker: () => {
       throw new Error('restart failed');
     },
   });

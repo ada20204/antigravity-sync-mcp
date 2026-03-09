@@ -91,6 +91,13 @@ function getWaitExit() {
     return parsedArgs['wait-exit'] !== undefined;
 }
 
+function getAntigravityPid() {
+    const val = getRuntimeValue('pid');
+    if (!val) return null;
+    const n = parseInt(val, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function validateArgs() {
     const missing = [];
     if (!getWorkspace()) missing.push('workspace');
@@ -344,6 +351,25 @@ async function phase1_killOldProcess() {
 async function phase2_waitForExit() {
     log('Phase 2: Waiting for process to exit');
     updateStatus('waiting_for_exit');
+
+    const pid = getAntigravityPid();
+
+    if (pid) {
+        log(`Waiting for PID ${pid} to exit...`);
+        const started = Date.now();
+        while (Date.now() - started < WAIT_EXIT_TIMEOUT_MS) {
+            try {
+                process.kill(pid, 0);
+                // still alive
+            } catch {
+                log(`PID ${pid} confirmed gone`);
+                return;
+            }
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+        log(`PID ${pid} still alive after timeout, continuing anyway`);
+        return;
+    }
 
     const executable = getAntigravityPath();
     const appName = executable.includes('Antigravity') ? 'Antigravity' : 'Cursor';

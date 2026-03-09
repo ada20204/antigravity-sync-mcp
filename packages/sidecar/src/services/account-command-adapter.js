@@ -141,7 +141,7 @@ function createAccountCommandAdapter({
   vscodeApi,
   outputChannel,
   log,
-  executeManualLaunch,
+  launchRestartWorker,
   getLatestQuota,
   summarizeQuota,
   refreshQuota,
@@ -279,18 +279,17 @@ function createAccountCommandAdapter({
         if (result.dbPath) {
           outputChannel.appendLine(`Auth DB: ${result.dbPath}`);
         }
-        outputChannel.appendLine('Step 3: Restart worker started.');
-        outputChannel.appendLine('Step 4: Closing Antigravity so restart can continue...');
-        outputChannel.appendLine('');
-        outputChannel.appendLine('After restart, sign in with the new account.');
-        if (typeof executeManualLaunch !== 'function') {
+
+        if (typeof launchRestartWorker !== 'function') {
           throw new Error('Restart is unavailable');
         }
-        await executeManualLaunch('restart', {
-          trigger: 'add-account',
-          exitAfterWorkerStart: true,
-          waitExit: true,
-        });
+
+        outputChannel.appendLine('Step 3: Restarting Antigravity with cleared auth...');
+        outputChannel.appendLine('');
+        outputChannel.appendLine('After restart, sign in with the new account.');
+
+        const requestId = `add-account-${Date.now()}`;
+        launchRestartWorker({ requestId });
         closeAndQuit(vscodeApi);
       } catch (error) {
         outputChannel.appendLine(`ERROR: ${error.message}`);
