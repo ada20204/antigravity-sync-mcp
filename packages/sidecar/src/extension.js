@@ -1,7 +1,9 @@
 const vscode = require('vscode');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const http = require('http');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const net = require('net');
 const { createHash, randomBytes } = require('crypto');
 const { promisify } = require('util');
@@ -35,7 +37,8 @@ const {
     resolveDefaultExecutablePath,
     resolveCdpBindAddress,
     buildLaunchArgsForWorkspace,
-    launchAntigravityDetached,
+    createExecutableKillMatcher,
+    createRestartPrimitive,
 } = require('./services/launcher');
 const { buildAiConfigPrompt } = require('./core/ai-config');
 const {
@@ -46,6 +49,11 @@ const {
 const { fetchQuotaSnapshot } = require('./services/quota-service');
 const { createRegistryService } = require('./services/registry-service');
 const { createHostBridgeServer, createRemoteBridgeClient } = require('./services/bridge-service');
+const { createAccountCommandAdapter } = require('./services/account-command-adapter');
+const { createAccountControlService } = require('./services/account-control');
+const { createAccountControlApi } = require('./services/account-control-api');
+const { createSwitchStatusStore } = require('./services/switch-status-store');
+const { createRestartWorkerStore } = require('./services/restart-worker-store');
 const { updateStatusBar: renderStatusBar } = require('./ui/status-bar');
 const {
     getQuotaLevel,
@@ -100,6 +108,8 @@ const CDP_HEARTBEAT_REPEAT_LOG_COOLDOWN_MS = 5 * 60 * 1000;
 const NO_CDP_PROMPT_REQUEST_TTL_MS = 5 * 60 * 1000;
 const LOG_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const execAsync = promisify(exec);
+let outputChannel;
+let structuredLogger;
 const registryService = createRegistryService({
     fs,
     registryDir: REGISTRY_DIR,
@@ -133,6 +143,302 @@ function errorLog(msg, fields) {
 function shortError(error) {
     const message = error && error.message ? error.message : String(error || 'unknown');
     return message.slice(0, 180);
+}
+
+function createUnavailableAccountCommandAdapter({ switchMessage, addAnotherAccountMessage }) {
+    return {
+        async runSwitchAccountCommand() {
+            vscode.window.showErrorMessage(`Sidecar: ${switchMessage}`);
+        },
+        async runAddAnotherAccountCommand() {
+            vscode.window.showErrorMessage(`Sidecar: ${addAnotherAccountMessage}`);
+        },
+    };
+}
+
+function createSwitchWorkerLauncher({
+    antigravityExecutablePath,
+    getWorkspacePath,
+    getLaunchArgs,
+    getCdpPort,
+    log,
+    getDbPath,
+    getBackupDir,
+    getConfigDir,
+    getAntigravityPid,
+}) {
+    return {
+        async launchSwitchWorker({ requestId, targetEmail }) {
+            const workspacePath = getWorkspacePath();
+            const launchArgs = getLaunchArgs();
+            const cdpPort = getCdpPort();
+            const dbPath = getDbPath();
+            const backupDir = getBackupDir();
+            const configDir = getConfigDir();
+            const antigravityPid = getAntigravityPid();
+            if (!workspacePath) {
+                throw new Error('workspace folder is required for account switch');
+            }
+            if (!Number.isFinite(cdpPort) || cdpPort <= 0) {
+                throw new Error('CDP port is required for account switch');
+            }
+            if (!dbPath) {
+                throw new Error('Antigravity database path is required for account switch');
+            }
+            if (!backupDir) {
+                throw new Error('Account backup directory is required for account switch');
+            }
+            if (!configDir) {
+                throw new Error('Config directory is required for account switch');
+            }
+            if (!Number.isFinite(antigravityPid) || antigravityPid <= 0) {
+                throw new Error('Antigravity PID is required for account switch');
+            }
+            if (!antigravityExecutablePath || !fs.existsSync(antigravityExecutablePath)) {
+                throw new Error('Antigravity executable not found');
+            }
+
+            const scriptPath = path.join(__dirname, '..', 'scripts', 'switch-worker.js');
+            const args = [
+                scriptPath,
+                '--request-id', requestId,
+                '--target-email', targetEmail,
+                '--workspace', workspacePath,
+                '--port', String(cdpPort),
+                '--db-path', dbPath,
+                '--backup-dir', backupDir,
+                '--antigravity-path', antigravityExecutablePath,
+                '--pid', String(antigravityPid),
+                '--config-dir', configDir,
+                ...launchArgs.flatMap((arg) => ['--extra-arg', arg]),
+            ];
+
+            log('Preparing switch worker launch', {
+                plane: 'ctrl',
+                state: 'launching-worker',
+                extra: {
+                    request_id: requestId,
+                    target_email: targetEmail,
+                    workspace_path: workspacePath,
+                    cdp_port: cdpPort,
+                    executable: antigravityExecutablePath,
+                    switch_worker_script: scriptPath,
+                    db_path: dbPath,
+                    backup_dir: backupDir,
+                    config_dir: configDir,
+                    antigravity_pid: antigravityPid,
+                    extra_args: launchArgs,
+                },
+            });
+
+            try {
+                const child = spawn('node', args, {
+                    detached: true,
+                    stdio: 'ignore',
+                });
+                child.unref();
+
+                log('Switch worker process started', {
+                    plane: 'ctrl',
+                    state: 'worker-started',
+                    extra: {
+                        request_id: requestId,
+                        target_email: targetEmail,
+                        worker_pid: child.pid || null,
+                        spawn_command: 'node',
+                        spawn_args: args,
+                        db_path: dbPath,
+                        backup_dir: backupDir,
+                        config_dir: configDir,
+                        antigravity_pid: antigravityPid,
+                    },
+                });
+            } catch (error) {
+                log(`Switch worker launch failed: ${shortError(error)}`, {
+                    plane: 'ctrl',
+                    state: 'worker-launch-failed',
+                    error_code: 'switch_worker_spawn_failed',
+                    extra: {
+                        request_id: requestId,
+                        target_email: targetEmail,
+                        workspace_path: workspacePath,
+                        cdp_port: cdpPort,
+                        executable: antigravityExecutablePath,
+                        switch_worker_script: scriptPath,
+                        db_path: dbPath,
+                        backup_dir: backupDir,
+                        config_dir: configDir,
+                        antigravity_pid: antigravityPid,
+                        extra_args: launchArgs,
+                        error_message: shortError(error),
+                    },
+                });
+                throw error;
+            }
+        },
+    };
+}
+
+function createAccountFeatures({
+    activationDiagnostics,
+    context,
+    outputChannel,
+    log,
+    warn,
+    restartAntigravity,
+    antigravityExecutablePath,
+    getWorkspacePath,
+    getLaunchArgs,
+    getCdpPort,
+    getAntigravityPid,
+    runtimeRole,
+    executeManualLaunch,
+}) {
+    const fallback = {
+        accountCommandAdapter: createUnavailableAccountCommandAdapter({
+            switchMessage: 'Account switch is unavailable.',
+            addAnotherAccountMessage: 'Add Another Account is unavailable.',
+        }),
+        accountControlApi: null,
+    };
+
+    try {
+        const accountSwitchConfigDir = activationDiagnostics.run('account:configDir', () => path.join(os.homedir(), '.config', 'antigravity-mcp'));
+        const statusStore = activationDiagnostics.run('account:statusStore', () => createSwitchStatusStore({
+            filePath: path.join(accountSwitchConfigDir, 'switch-status.json'),
+        }));
+        const accountService = activationDiagnostics.run('account:serviceModule', () => require('./services/account-service'));
+        const antigravityDbPath = activationDiagnostics.run('account:dbPath', () => accountService.getAntigravityDbPath());
+        const accountBackupDir = activationDiagnostics.run('account:backupDir', () => accountService.getAccountsDir());
+        const switchWorkerLauncher = activationDiagnostics.run('account:workerLauncher', () => createSwitchWorkerLauncher({
+            antigravityExecutablePath,
+            getWorkspacePath,
+            getLaunchArgs,
+            getCdpPort,
+            log,
+            getDbPath: () => antigravityDbPath,
+            getBackupDir: () => accountBackupDir,
+            getConfigDir: () => accountSwitchConfigDir,
+            getAntigravityPid: () => {
+                const pid = typeof getAntigravityPid === 'function' ? getAntigravityPid() : null;
+                return Number(pid);
+            },
+        }));
+        const accountControl = activationDiagnostics.run('account:control', () => createAccountControlService({
+            accountService,
+            workerLauncher: switchWorkerLauncher,
+            statusStore,
+            randomId: () => randomBytes(16).toString('hex'),
+        }));
+        const accountCommandAdapter = activationDiagnostics.run('account:commandAdapter', () => createAccountCommandAdapter({
+            controller: accountControl,
+            vscodeApi: vscode,
+            outputChannel,
+            log,
+            executeManualLaunch,
+        }));
+        const accountControlApi = runtimeRole === 'host'
+            ? activationDiagnostics.run('account:controlApi', () => createAccountControlApi({
+                accountControl,
+                log: (message) => log(message),
+                warn: (message) => warn(message),
+            }))
+            : null;
+
+        if (accountControlApi) {
+            context.subscriptions.push({
+                dispose: () => {
+                    try {
+                        accountControlApi.dispose();
+                    } catch (error) {
+                        warn(`AccountControlApi dispose failed: ${shortError(error)}`);
+                    }
+                },
+            });
+
+            const address = accountControlApi.getAddress();
+            if (address && typeof address === 'object') {
+                log(`Account switch API ready on ${address.address}:${address.port}`);
+            } else {
+                log('Account switch API ready.');
+            }
+        } else {
+            activationDiagnostics.mark('account:controlApi:skipped', `runtimeRole=${runtimeRole}`);
+        }
+
+        return {
+            accountCommandAdapter,
+            accountControlApi,
+        };
+    } catch (error) {
+        const message = shortError(error);
+        warn(`Account feature initialization degraded: ${message}`);
+        outputChannel.appendLine(`[Sidecar] account features degraded: ${message}`);
+        return {
+            ...fallback,
+            accountCommandAdapter: createUnavailableAccountCommandAdapter({
+                switchMessage: `Account switch unavailable: ${message}`,
+                addAnotherAccountMessage: `Add Another Account unavailable: ${message}`,
+            }),
+        };
+    }
+}
+
+function createActivationDiagnostics({ log, outputChannel }) {
+    const steps = [];
+
+    function write(line) {
+        log(line);
+    }
+
+    function start(name, extra = '') {
+        const entry = { name, startedAt: Date.now(), extra };
+        steps.push(entry);
+        write(`[diag] start ${name}${extra ? ` ${extra}` : ''}`);
+        return entry;
+    }
+
+    function ok(entry, extra = '') {
+        const durationMs = Date.now() - entry.startedAt;
+        entry.status = 'ok';
+        entry.durationMs = durationMs;
+        write(`[diag] ok ${entry.name} duration_ms=${durationMs}${extra ? ` ${extra}` : ''}`);
+    }
+
+    function fail(entry, error) {
+        const durationMs = Date.now() - entry.startedAt;
+        entry.status = 'fail';
+        entry.durationMs = durationMs;
+        entry.error = shortError(error);
+        write(`[diag] fail ${entry.name} duration_ms=${durationMs} error=${JSON.stringify(entry.error)}`);
+    }
+
+    function mark(name, extra = '') {
+        write(`[diag] mark ${name}${extra ? ` ${extra}` : ''}`);
+    }
+
+    function run(name, fn, extra = '') {
+        const entry = start(name, extra);
+        try {
+            const result = fn();
+            ok(entry);
+            return result;
+        } catch (error) {
+            fail(entry, error);
+            throw error;
+        }
+    }
+
+    function summary() {
+        const compact = steps.map((step) => `${step.name}:${step.status || 'pending'}${step.durationMs != null ? `(${step.durationMs}ms)` : ''}`);
+        write(`[diag] summary ${compact.join(', ')}`);
+    }
+
+    return {
+        mark,
+        run,
+        summary,
+    };
 }
 
 function looksLikeAntigravityVersion(versionPayload) {
@@ -323,8 +629,9 @@ async function isTcpPortAvailable(host, port, timeoutMs = 600) {
 }
 
 async function activate(context) {
-    outputChannel = vscode.window.createOutputChannel('Antigravity MCP Sidecar');
+    outputChannel = vscode.window.createOutputChannel('Sidecar');
     context.subscriptions.push(outputChannel);
+
     const remoteName = String((vscode.env && vscode.env.remoteName) || '').trim();
     const runtimeRole = resolveRuntimeRole(remoteName);
     const nodeId = createNodeId(runtimeRole);
@@ -363,6 +670,9 @@ async function activate(context) {
         });
     }
 
+    const activationDiagnostics = createActivationDiagnostics({ log, outputChannel });
+    activationDiagnostics.mark('post-launcher');
+
     let latestLs = null;
     let latestQuota = null;
     let latestQuotaError = null;
@@ -370,13 +680,19 @@ async function activate(context) {
     let lastQuotaAlertAt = 0;
 
     // ─── Status Bar (always registered, regardless of CDP) ────────────
-    let statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'antigravityMcpSidecar.toggle';
-    context.subscriptions.push(statusBarItem);
+    let statusBarItem = activationDiagnostics.run('status-bar:primary', () => {
+        const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+        item.command = 'antigravityMcpSidecar.toggle';
+        context.subscriptions.push(item);
+        return item;
+    });
 
-    let quotaStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-    quotaStatusBarItem.command = 'antigravityMcpSidecar.showQuota';
-    context.subscriptions.push(quotaStatusBarItem);
+    let quotaStatusBarItem = activationDiagnostics.run('status-bar:quota', () => {
+        const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+        item.command = 'antigravityMcpSidecar.showQuota';
+        context.subscriptions.push(item);
+        return item;
+    });
 
     let isEnabled = vscode.workspace.getConfiguration('antigravityMcpSidecar').get('enabled', true);
     let cdpTarget = null;
@@ -440,7 +756,7 @@ async function activate(context) {
         quotaAlertCooldownMs = cooldownMinutes * 60_000;
     }
 
-    reloadQuotaUiConfig();
+    activationDiagnostics.run('config:reloadQuotaUiConfig', () => reloadQuotaUiConfig());
 
     function reloadCdpConfig() {
         const config = vscode.workspace.getConfiguration('antigravityMcpSidecar');
@@ -472,18 +788,18 @@ async function activate(context) {
         bridgeHostEndpoint = configuredEndpoint || `127.0.0.1:${HOST_BRIDGE_PORT}`;
     }
 
-    reloadCdpConfig();
-    const logRetentionTimer = setInterval(() => {
+    activationDiagnostics.run('config:reloadCdpConfig', () => reloadCdpConfig());
+    const logRetentionTimer = activationDiagnostics.run('timers:logRetention', () => setInterval(() => {
         try {
             structuredLogger.cleanupOldLogs();
         } catch { }
-    }, LOG_RETENTION_SWEEP_INTERVAL_MS);
+    }, LOG_RETENTION_SWEEP_INTERVAL_MS));
     context.subscriptions.push({ dispose: () => clearInterval(logRetentionTimer) });
 
     // Periodically prune expired nonces so the NonceCache doesn't grow unboundedly.
-    const noncePruneTimer = setInterval(() => {
+    const noncePruneTimer = activationDiagnostics.run('timers:noncePrune', () => setInterval(() => {
         try { nonceCache.prune(); } catch { }
-    }, 5 * 60 * 1000);
+    }, 5 * 60 * 1000));
     context.subscriptions.push({ dispose: () => clearInterval(noncePruneTimer) });
 
     function updateQuotaStatusBar() {
@@ -570,15 +886,37 @@ async function activate(context) {
         updateStatusBar();
     }
 
+    const restartAntigravity = createRestartPrimitive();
+    const restartWorkerStore = createRestartWorkerStore();
+
+    async function waitForRestartWorker(requestId, timeoutMs = 30000, intervalMs = 400) {
+        const startedAt = Date.now();
+        let latestSeen = null;
+
+        while ((Date.now() - startedAt) < timeoutMs) {
+            const latest = restartWorkerStore.getLatest(requestId);
+            if (latest && latest.record) {
+                latestSeen = latest;
+                if (latest.terminal) {
+                    return latest;
+                }
+            }
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+
+        return latestSeen;
+    }
+
     async function executeManualLaunch(action, options = {}) {
         const trigger = options.trigger || 'local';
+        const exitAfterWorkerStart = options.exitAfterWorkerStart === true;
         if (!workspacePath) {
-            vscode.window.showWarningMessage('No workspace folder available for Antigravity launch.');
+            vscode.window.showWarningMessage('Sidecar: No workspace folder available for Antigravity launch.');
             return;
         }
         if (!antigravityExecutablePath || !fs.existsSync(antigravityExecutablePath)) {
             vscode.window.showWarningMessage(
-                'Antigravity executable not found. Configure antigravityMcpSidecar.antigravityExecutablePath first.'
+                'Sidecar: Antigravity executable not found. Configure antigravityMcpSidecar.antigravityExecutablePath first.'
             );
             return;
         }
@@ -626,25 +964,43 @@ async function activate(context) {
                 return;
             }
         }
-        const launchArgs = buildLaunchArgsForWorkspace(workspacePath, allocatedPort, antigravityLaunchExtraArgs);
+        // Launch detached restart-worker instead of direct restart
+        const workerPath = path.join(context.extensionPath, 'scripts', 'restart-worker.js');
+        const requestId = `restart-${Date.now()}`;
+        const workerArgs = [
+            '--workspace', workspacePath,
+            '--antigravity-path', antigravityExecutablePath,
+            '--port', String(allocatedPort),
+            '--bind-address', bindAddress,
+            '--request-id', requestId,
+            '--config-dir', MCP_HOME_DIR,
+            '--wait-for-cdp', 'true',
+        ];
+
+        // Add extra args
+        for (const arg of antigravityLaunchExtraArgs) {
+            workerArgs.push('--extra-arg', arg);
+        }
+
         try {
-            launchAntigravityDetached({
-                executable: antigravityExecutablePath,
-                args: launchArgs,
-                restart: action === 'restart',
+            const workerProcess = spawn('node', [workerPath, ...workerArgs], {
+                detached: true,
+                stdio: 'ignore',
             });
+            workerProcess.unref();
+
             log(
-                `${action === 'restart' ? 'Restarting' : 'Launching'} Antigravity with port=${allocatedPort} workspace=${workspacePath}`,
+                `${action === 'restart' ? 'Restart' : 'Launch'} worker started with port=${allocatedPort} workspace=${workspacePath}`,
                 {
                     plane: 'ctrl',
                     state: 'launching',
-                    extra: { action, trigger, allocated_port: allocatedPort },
+                    extra: { action, trigger, allocated_port: allocatedPort, worker_pid: workerProcess.pid },
                 }
             );
         } catch (error) {
             const message = shortError(error);
-            vscode.window.showErrorMessage(`Failed to ${action} Antigravity: ${message}`);
-            cdpLastError = createErrorInfo('launch_failed', message, { action, trigger });
+            vscode.window.showErrorMessage(`Sidecar: Failed to start ${action} worker: ${message}`);
+            cdpLastError = createErrorInfo('worker_start_failed', message, { action, trigger });
             register();
             return;
         }
@@ -669,21 +1025,62 @@ async function activate(context) {
             }
         }, LAUNCH_TIMEOUT_MS);
 
-        // Give new process a short head start before probing.
-        await new Promise((resolve) => setTimeout(resolve, action === 'restart' ? 1500 : 800));
-        const ok = await negotiateCdp();
+        if (exitAfterWorkerStart) {
+            return { requestId, detached: true };
+        }
+
+        const workerOutcome = await waitForRestartWorker(requestId, action === 'restart' ? 30000 : 20000);
         if (launchTimeoutHandle) { clearTimeout(launchTimeoutHandle); launchTimeoutHandle = null; }
+
+        if (!workerOutcome || !workerOutcome.record) {
+            cdpState = 'app_down';
+            cdpLastError = createErrorInfo(
+                'restart_worker_timeout',
+                'Timed out waiting for restart worker result',
+                { action, trigger, request_id: requestId }
+            );
+            register();
+            stopAutoAccept();
+            syncState();
+            updateQuotaStatusBar();
+            vscode.window.showWarningMessage(
+                `Sidecar: Timed out waiting for ${action} worker result. Check restart-worker.log and retry.`
+            );
+            return;
+        }
+
+        const workerRecord = workerOutcome.record;
+        if (String(workerRecord.status || '').toLowerCase() !== 'success') {
+            const workerError = workerRecord.error || `Worker ${workerRecord.status || 'failed'} at phase ${workerRecord.phase || 'unknown'}`;
+            cdpState = 'app_down';
+            cdpLastError = createErrorInfo('restart_worker_failed', workerError, {
+                action,
+                trigger,
+                request_id: requestId,
+                phase: workerRecord.phase || null,
+            });
+            register();
+            stopAutoAccept();
+            syncState();
+            updateQuotaStatusBar();
+            vscode.window.showWarningMessage(
+                `Sidecar: Antigravity ${action} worker failed: ${workerError}`
+            );
+            return;
+        }
+
+        const ok = await negotiateCdp();
         stopAutoAccept();
         syncState();
         updateQuotaStatusBar();
         if (ok) {
             vscode.window.showInformationMessage(
-                `Antigravity ${action === 'restart' ? 'restarted' : 'launched'} and CDP is ready on ${cdpTarget.ip}:${cdpTarget.port}.`
+                `Sidecar: Antigravity ${action === 'restart' ? 'restarted' : 'launched'} and CDP is ready on ${cdpTarget.ip}:${cdpTarget.port}.`
             );
             return;
         }
         vscode.window.showWarningMessage(
-            `Antigravity ${action} command sent, but CDP is still unavailable. Check launch args and retry.`
+            `Sidecar: Antigravity ${action} worker succeeded, but CDP is still unavailable. Check launch args and retry.`
         );
     }
 
@@ -702,7 +1099,7 @@ async function activate(context) {
             extra: { reason },
         });
         vscode.window.showInformationMessage(
-            'Remote host restart bridge is not configured. Restart Antigravity on host manually with CDP flags.'
+            'Sidecar: Remote host restart bridge is not configured. Restart Antigravity on host manually with CDP flags.'
         );
         return false;
     }
@@ -857,7 +1254,7 @@ async function activate(context) {
                 }
 
                 const decision = await vscode.window.showWarningMessage(
-                    `Remote sidecar requested restart for workspace ${workspacePath}. Restart Antigravity now?`,
+                    `Sidecar: Remote sidecar requested restart for workspace ${workspacePath}. Restart Antigravity now?`,
                     { modal: true },
                     'Restart',
                     'Reject'
@@ -926,7 +1323,27 @@ async function activate(context) {
         }
     }
 
-    registerCommands(context, {
+    const accountFeatures = createAccountFeatures({
+        activationDiagnostics,
+        context,
+        outputChannel,
+        log,
+        warn,
+        restartAntigravity,
+        antigravityExecutablePath,
+        getWorkspacePath: () => workspacePath,
+        getLaunchArgs: () => antigravityLaunchExtraArgs,
+        getCdpPort: () => cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort,
+        getAntigravityPid: () => process.pid,
+        runtimeRole,
+        executeManualLaunch,
+    });
+
+    try {
+        activationDiagnostics.mark('before-registerCommands');
+        log('activate: calling registerCommands');
+        outputChannel.appendLine('[Sidecar] activate: calling registerCommands');
+        registerCommands(context, {
         runtimeRole,
         outputChannel,
         refreshQuota: async () => refreshQuota(),
@@ -947,10 +1364,20 @@ async function activate(context) {
             isEnabled = value;
         },
         syncState,
+        accountCommandAdapter: accountFeatures.accountCommandAdapter,
         log,
     });
+        log('activate: registerCommands completed');
+        outputChannel.appendLine('[Sidecar] activate: registerCommands completed');
+    } catch (error) {
+        const message = shortError(error);
+        log(`activate: registerCommands failed: ${message}`);
+        outputChannel.appendLine(`[Sidecar] activate: registerCommands failed: ${message}`);
+        vscode.window.showErrorMessage(`Sidecar: Command registration failed: ${message}`);
+        throw error;
+    }
 
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+    activationDiagnostics.run('subscriptions:onDidChangeConfiguration', () => context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('antigravityMcpSidecar')) {
             const prevFixedHost = cdpFixedHost;
             const prevFixedPort = cdpFixedPort;
@@ -983,19 +1410,23 @@ async function activate(context) {
             syncState();
             updateQuotaStatusBar();
         }
-    }));
+    })));
 
     // ─── CDP Discovery ────────────────────────────────────────────────
+    activationDiagnostics.mark('before-workspaceFolders');
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
+        activationDiagnostics.mark('workspaceFolders:none');
         log('No workspace folders found');
         updateStatusBar();
+        activationDiagnostics.summary();
         return;
     }
 
     workspacePath = workspaceFolders[0].uri.fsPath;
     workspaceId = computeWorkspaceId(workspacePath);
     workspaceName = vscode.workspace.name || "";
+    activationDiagnostics.mark('workspaceFolders:resolved', `workspace=${JSON.stringify(workspacePath)}`);
     if (!fs.existsSync(REGISTRY_DIR)) {
         fs.mkdirSync(REGISTRY_DIR, { recursive: true });
     }
@@ -1440,6 +1871,57 @@ async function activate(context) {
 
     syncState();
 
+    // ─── Check for account switch result ──────────────────────────────
+    const configDir = path.join(os.homedir(), '.config', 'antigravity-mcp');
+    const resultFile = path.join(configDir, 'switch-result.json');
+    log(`Checking switch result file: ${resultFile}`);
+
+    if (fs.existsSync(resultFile)) {
+        log('Switch result file detected, attempting to display it in output channel');
+        try {
+            const resultRaw = fs.readFileSync(resultFile, 'utf-8');
+            log(`Switch result file read successfully (${resultRaw.length} chars)`);
+            const result = JSON.parse(resultRaw);
+            outputChannel.show(true);
+            outputChannel.appendLine('=== Sidecar: Account Switch Result ===');
+            outputChannel.appendLine(`Status: ${result.status}`);
+            outputChannel.appendLine(`Target: ${result.target}`);
+            outputChannel.appendLine(`Phase: ${result.phase}`);
+            if (result.error) {
+                outputChannel.appendLine(`Error: ${result.error}`);
+            }
+            outputChannel.appendLine('');
+            outputChannel.appendLine('=== Sidecar: Worker Logs ===');
+            if (result.logs && Array.isArray(result.logs)) {
+                log(`Appending ${result.logs.length} worker log lines to output channel`);
+                for (const logLine of result.logs) {
+                    outputChannel.appendLine(logLine);
+                }
+            } else {
+                log('Switch result contains no logs array');
+                outputChannel.appendLine('(No logs available)');
+            }
+
+            fs.unlinkSync(resultFile);
+            log('Switch result file displayed and removed');
+            log('Switch status lookup remains backed by switch-status.json');
+
+            if (result.status === 'success') {
+                vscode.window.showInformationMessage(`Sidecar: Switched account to ${result.target}.`);
+                log(`Account switched to ${result.target}`);
+            } else {
+                vscode.window.showErrorMessage(`Sidecar: Account switch failed: ${result.error || 'unknown error'}`);
+                log(`Account switch failed: ${result.error || 'unknown error'}`);
+            }
+        } catch (e) {
+            log(`Failed to read switch result: ${e.message}`);
+        }
+    } else {
+        log('No switch result file found on activation');
+    }
+
+    activationDiagnostics.summary();
+
     context.subscriptions.push({
         dispose: () => {
             stopAutoAccept();
@@ -1459,7 +1941,7 @@ async function activate(context) {
 
 function autoFixWindowsShortcut() {
     if (process.platform !== 'win32') {
-        vscode.window.showInformationMessage('Auto-fix is Windows-only. See the "How to Fix" option for your platform.');
+        vscode.window.showInformationMessage('Sidecar: Auto-fix is Windows-only. See the "How to Fix" option for your platform.');
         return;
     }
 
@@ -1498,7 +1980,7 @@ if ($patched) { Write-Output "SUCCESS" } else { Write-Output "NOT_FOUND" }
         fs.writeFileSync(psFile, psContent, 'utf8');
     } catch (e) {
         log(`[CDP] Failed to write patcher script: ${e.message}`);
-        vscode.window.showWarningMessage('Could not create patcher script. Please add the flag manually.');
+        vscode.window.showWarningMessage('Sidecar: Could not create patcher script. Please add the flag manually.');
         return;
     }
 
@@ -1508,19 +1990,19 @@ if ($patched) { Write-Output "SUCCESS" } else { Write-Output "NOT_FOUND" }
 
         if (err) {
             log(`[CDP] Patcher error: ${err.message}`);
-            vscode.window.showWarningMessage('Shortcut patching failed. Please add the flag manually.');
+            vscode.window.showWarningMessage('Sidecar: Shortcut patching failed. Please add the flag manually.');
             return;
         }
         log(`[CDP] Patcher output: ${stdout.trim()}`);
         if (stdout.includes('SUCCESS')) {
             log('[CDP] ✓ Shortcut patched!');
             vscode.window.showInformationMessage(
-                '✅ Shortcut updated! Restart Antigravity for the fix to take effect.',
+                'Sidecar: Shortcut updated! Restart Antigravity for the fix to take effect.',
                 'OK'
             );
         } else {
             vscode.window.showWarningMessage(
-                'No Antigravity shortcut found. Add --remote-debugging-port=9000 to your shortcut manually.'
+                'Sidecar: No Antigravity shortcut found. Add --remote-debugging-port=9000 to your shortcut manually.'
             );
         }
     });
