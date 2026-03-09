@@ -107,6 +107,10 @@
             {
                 "command": "antigravityMcpSidecar.accountStatus",
                 "title": "Sidecar: Account Status"
+            },
+            {
+                "command": "antigravityMcpSidecar.deleteAccount",
+                "title": "Sidecar: Delete Saved Account"
             }
         ],
         "menus": {

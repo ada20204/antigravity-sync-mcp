@@ -72,6 +72,11 @@ function createAccountControlService({
       return accountService.listSavedAccounts();
     },
 
+    async deleteAccount({ email }) {
+      accountService.deleteAccount(email);
+      return { email };
+    },
+
     async getCurrentAccount() {
       const current = await accountService.readCurrentAuthFields();
       const rawAuth = current?.authStatus;

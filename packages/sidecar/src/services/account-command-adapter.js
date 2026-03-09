@@ -193,6 +193,38 @@ function createAccountCommandAdapter({
       }
     },
 
+    async runDeleteAccountCommand() {
+      const accounts = await controller.listAccounts();
+      if (!accounts || accounts.length === 0) {
+        vscodeApi.window.showWarningMessage('Sidecar: No saved accounts found.');
+        return;
+      }
+
+      const picked = await vscodeApi.window.showQuickPick(
+        accounts.map(toQuickPickItem),
+        { placeHolder: 'Select account to delete' },
+      );
+      if (!picked) return;
+
+      const targetEmail = picked.label;
+
+      const confirm = await vscodeApi.window.showWarningMessage(
+        `Sidecar: Delete saved account "${targetEmail}"?\n\nThis only removes the local backup file. It does not log out.`,
+        { modal: true },
+        'Delete',
+      );
+      if (confirm !== 'Delete') return;
+
+      try {
+        await controller.deleteAccount({ email: targetEmail });
+        vscodeApi.window.showInformationMessage(`Sidecar: Deleted account ${targetEmail}`);
+        log(`Deleted account: ${targetEmail}`);
+      } catch (error) {
+        vscodeApi.window.showErrorMessage(`Sidecar: Delete failed: ${error.message}`);
+        log(`Delete account failed: ${error.message}`);
+      }
+    },
+
     async runAccountStatusCommand() {
       outputChannel.show(true);
 

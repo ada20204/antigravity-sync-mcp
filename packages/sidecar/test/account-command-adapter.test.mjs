@@ -771,3 +771,118 @@ test('accountStatus handles not logged in and no quota gracefully', async () => 
   assert.ok(outputChannel.lines.some(l => l.includes('no snapshot available')));
   assert.ok(infos.some(m => m.includes('not logged in')));
 });
+
+test('deleteAccount deletes selected account and shows confirmation', async () => {
+  const infos = [];
+  const logs = [];
+  const vscodeApi = {
+    executedCommands: [],
+    infos,
+    warnings: [],
+    errors: [],
+    quickPickCalls: [],
+    window: {
+      async showQuickPick(items, options) {
+        vscodeApi.quickPickCalls.push({ items, options });
+        return { label: 'user@example.com' };
+      },
+      async showWarningMessage(message, options, ...actions) {
+        vscodeApi.warnings.push({ message, options, actions });
+        return 'Delete';
+      },
+      showInformationMessage(message) { infos.push(message); },
+      showErrorMessage(message) { vscodeApi.errors.push(message); },
+    },
+    commands: { async executeCommand() {} },
+  };
+
+  let deletedEmail = null;
+  const adapter = createAccountCommandAdapter({
+    controller: {
+      async listAccounts() {
+        return [{ email: 'user@example.com', modifiedTime: new Date('2026-03-08T00:00:00.000Z') }];
+      },
+      async deleteAccount({ email }) { deletedEmail = email; return { email }; },
+    },
+    vscodeApi,
+    outputChannel: { lines: [], show() {}, appendLine() {} },
+    log(m) { logs.push(m); },
+    getLatestQuota: () => null,
+    summarizeQuota: () => null,
+  });
+
+  await adapter.runDeleteAccountCommand();
+
+  assert.equal(deletedEmail, 'user@example.com');
+  assert.ok(infos.some(m => m.includes('user@example.com')));
+  assert.ok(logs.some(m => m.includes('user@example.com')));
+});
+
+test('deleteAccount cancelled confirmation does not delete', async () => {
+  let deleted = false;
+  const vscodeApi = {
+    executedCommands: [],
+    infos: [],
+    warnings: [],
+    errors: [],
+    quickPickCalls: [],
+    window: {
+      async showQuickPick() { return { label: 'user@example.com' }; },
+      async showWarningMessage() { return undefined; },
+      showInformationMessage() {},
+      showErrorMessage() {},
+    },
+    commands: { async executeCommand() {} },
+  };
+
+  const adapter = createAccountCommandAdapter({
+    controller: {
+      async listAccounts() {
+        return [{ email: 'user@example.com', modifiedTime: new Date('2026-03-08T00:00:00.000Z') }];
+      },
+      async deleteAccount() { deleted = true; },
+    },
+    vscodeApi,
+    outputChannel: { lines: [], show() {}, appendLine() {} },
+    log() {},
+    getLatestQuota: () => null,
+    summarizeQuota: () => null,
+  });
+
+  await adapter.runDeleteAccountCommand();
+
+  assert.equal(deleted, false);
+});
+
+test('deleteAccount no accounts shows warning', async () => {
+  const warnings = [];
+  const vscodeApi = {
+    executedCommands: [],
+    infos: [],
+    warnings,
+    errors: [],
+    quickPickCalls: [],
+    window: {
+      async showQuickPick() { throw new Error('should not show quick pick'); },
+      async showWarningMessage(message) { warnings.push(message); },
+      showInformationMessage() {},
+      showErrorMessage() {},
+    },
+    commands: { async executeCommand() {} },
+  };
+
+  const adapter = createAccountCommandAdapter({
+    controller: {
+      async listAccounts() { return []; },
+    },
+    vscodeApi,
+    outputChannel: { lines: [], show() {}, appendLine() {} },
+    log() {},
+    getLatestQuota: () => null,
+    summarizeQuota: () => null,
+  });
+
+  await adapter.runDeleteAccountCommand();
+
+  assert.ok(warnings.some(m => m.includes('No saved accounts')));
+});
