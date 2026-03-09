@@ -289,6 +289,7 @@ function createAccountCommandAdapter({
         await executeManualLaunch('restart', {
           trigger: 'add-account',
           exitAfterWorkerStart: true,
+          waitExit: true,
         });
         closeAndQuit(vscodeApi);
       } catch (error) {

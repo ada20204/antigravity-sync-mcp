@@ -413,7 +413,7 @@ test('add another account delegates to executeManualLaunch restart flow', async 
   assert.deepEqual(calls, [['prepareAddAnotherAccount']]);
   assert.deepEqual(launchCalls, [[
     'restart',
-    { trigger: 'add-account', exitAfterWorkerStart: true },
+    { trigger: 'add-account', exitAfterWorkerStart: true, waitExit: true },
   ]]);
   assert.deepEqual(vscodeApi.executedCommands, [
     'workbench.action.closeAllEditors',

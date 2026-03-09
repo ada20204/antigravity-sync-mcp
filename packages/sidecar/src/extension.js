@@ -922,6 +922,7 @@ async function activate(context) {
     async function executeManualLaunch(action, options = {}) {
         const trigger = options.trigger || 'local';
         const exitAfterWorkerStart = options.exitAfterWorkerStart === true;
+        const waitExit = options.waitExit === true;
         if (!workspacePath) {
             vscode.window.showWarningMessage('Sidecar: No workspace folder available for Antigravity launch.');
             return;
@@ -988,6 +989,12 @@ async function activate(context) {
             '--config-dir', MCP_HOME_DIR,
             '--wait-for-cdp', 'true',
         ];
+
+        if (action === 'launch') {
+            workerArgs.push('--cold-start');
+        } else if (waitExit) {
+            workerArgs.push('--wait-exit');
+        }
 
         // Add extra args
         for (const arg of antigravityLaunchExtraArgs) {

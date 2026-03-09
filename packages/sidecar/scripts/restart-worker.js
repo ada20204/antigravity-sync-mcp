@@ -87,6 +87,10 @@ function getColdStart() {
     return parsedArgs['cold-start'] !== undefined;
 }
 
+function getWaitExit() {
+    return parsedArgs['wait-exit'] !== undefined;
+}
+
 function validateArgs() {
     const missing = [];
     if (!getWorkspace()) missing.push('workspace');
@@ -478,10 +482,11 @@ async function phase4_verifyCdp(processLaunchResult = {}) {
 async function main() {
     validateArgs();
     const coldStart = getColdStart();
+    const waitExit = getWaitExit();
 
     log('=== Antigravity Restart Worker Started ===');
     log(`Request ID: ${getRequestId()}`);
-    log(`Mode: ${coldStart ? 'cold-start' : 'restart'}`);
+    log(`Mode: ${coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart'}`);
     log(`Workspace: ${getWorkspace()}`);
     log(`Antigravity: ${getAntigravityPath()}`);
     log(`Port: ${getPort()}`);
@@ -498,12 +503,17 @@ async function main() {
     }, ABSOLUTE_TIMEOUT_MS);
 
     try {
-        // 冷启动模式跳过 kill 和 wait
-        if (!coldStart) {
-            await phase1_killOldProcess();
+        if (coldStart) {
+            // 冷启动模式：跳过 kill 和 wait，直接 launch
+            log('Cold start mode: skipping kill and wait phases');
+        } else if (waitExit) {
+            // wait-exit 模式：跳过主动 kill，只等待进程自己退出（配合 closeAndQuit）
+            log('Wait-exit mode: skipping kill, waiting for process to exit on its own');
             await phase2_waitForExit();
         } else {
-            log('Cold start mode: skipping kill and wait phases');
+            // 标准 restart 模式：主动 kill + wait
+            await phase1_killOldProcess();
+            await phase2_waitForExit();
         }
 
         const launchResult = await phase3_launchNewProcess();
@@ -513,12 +523,12 @@ async function main() {
         writeResult('success', 'complete', null, {
             port: getPort(),
             workspace: getWorkspace(),
-            mode: coldStart ? 'cold-start' : 'restart',
+            mode: coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart',
             ...cdpResult,
         });
 
         clearTimeout(absoluteTimeout);
-        log(`=== ${coldStart ? 'Cold start' : 'Restart'} completed successfully ===`);
+        log(`=== ${coldStart ? 'Cold start' : waitExit ? 'Wait-exit' : 'Restart'} completed successfully ===`);
         process.exit(0);
 
     } catch (error) {
