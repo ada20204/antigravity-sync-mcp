@@ -7,3 +7,5 @@ build/
 *.tgz
 *.tsbuildinfo
 .worktrees/
+.DS_Store
+.claude/
