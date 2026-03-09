@@ -153,6 +153,12 @@ function createUnavailableAccountCommandAdapter({ switchMessage, addAnotherAccou
         async runAddAnotherAccountCommand() {
             vscode.window.showErrorMessage(`Sidecar: ${addAnotherAccountMessage}`);
         },
+        async runAccountStatusCommand() {
+            vscode.window.showErrorMessage(`Sidecar: ${switchMessage}`);
+        },
+        async runDeleteAccountCommand() {
+            vscode.window.showErrorMessage(`Sidecar: ${switchMessage}`);
+        },
     };
 }
 
