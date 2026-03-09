@@ -127,99 +127,149 @@ function buildLaunchArgsForWorkspace(workspacePath, port, extraArgs) {
     ];
 }
 
-function launchAntigravityDetached(params) {
-    const { executable, args, restart } = params;
-    if (process.platform === 'win32') {
+function shellQuote(value) {
+    return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+function buildKillMatcher(dependencies = {}, params = {}) {
+    return params.killMatcher
+        || dependencies.killMatcher
+        || {
+            pgrepArgs: ['-f', 'Antigravity'],
+            pkillArgs: ['-f', 'Antigravity'],
+            forceKillArgs: ['-9', '-f', 'Antigravity'],
+        };
+}
+
+function createExecutableKillMatcher(executable) {
+    const matchTarget = String(executable || '').trim();
+    if (!matchTarget) {
+        return buildKillMatcher();
+    }
+    return {
+        pgrepArgs: ['-f', matchTarget],
+        pkillArgs: ['-f', matchTarget],
+        forceKillArgs: ['-9', '-f', matchTarget],
+    };
+}
+
+function launchDetached(executable, args, dependencies = {}) {
+    const spawnImpl = dependencies.spawn || spawn;
+    const platform = dependencies.platform || process.platform;
+
+    if (platform === 'win32') {
         const exe = psQuote(executable);
         const argList = args.map((item) => `'${psQuote(item)}'`).join(',');
-        const script = restart
-            ? `$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity | Stop-Process -Force; $deadline=(Get-Date).AddSeconds(8); while((Get-Date)-lt $deadline){if(-not(Get-Process Antigravity -EA SilentlyContinue)){break};Start-Sleep -Milliseconds 200}; Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`
-            : `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
-
-        const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
+        const script = `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
+        const child = spawnImpl('powershell.exe', ['-NoProfile', '-Command', script], {
             detached: true,
             stdio: 'ignore',
         });
-        child.unref();
-        return;
+        if (child && typeof child.unref === 'function') child.unref();
+        return child;
     }
 
     // macOS/Linux: Use bash -c to properly pass arguments through shell script wrapper.
-    //
-    // On macOS/Linux, the antigravity executable is a bash script that wraps Electron.
-    // Using spawn(executable, args, { shell: false }) fails to pass arguments correctly
-    // through the script to the underlying Electron process, causing CDP parameters like
-    // --remote-debugging-port to be lost.
-    //
-    // Solution: Execute the full command via bash -c, which properly handles the script
-    // wrapper and ensures all arguments reach Electron. This matches the behavior of
-    // manually running the command in a terminal.
-    //
-    // Note: macOS and Linux share this logic as both use bash script wrappers with
-    // identical structure (VS Code upstream pattern). If Linux behavior differs in
-    // practice, this can be adjusted in a follow-up.
-    if (restart) {
-        try {
-            spawn('pkill', ['-f', 'Antigravity'], { stdio: 'ignore' });
-        } catch { }
+    const escapedArgs = args.map(shellQuote);
+    const cmd = `exec ${shellQuote(executable)}${escapedArgs.length ? ` ${escapedArgs.join(' ')}` : ''}`;
 
-        // Wait for processes to exit. Use shorter timeout (3s) since we'll force kill anyway.
-        // Without this delay, the new instance may conflict with lingering resources
-        // (ports, file locks, IPC sockets), causing crashes or "reopen window" errors.
-        const deadline = Date.now() + 3000;
-        let processExited = false;
-
-        while (Date.now() < deadline) {
-            try {
-                const result = spawnSync('pgrep', ['-f', 'Antigravity'], { encoding: 'utf8' });
-                const output = (result.stdout || '').trim();
-                if (!output) {
-                    processExited = true;
-                    break;
-                }
-            } catch {
-                processExited = true;
-                break;
-            }
-            // Sleep 500ms between checks
-            const sleepUntil = Date.now() + 500;
-            while (Date.now() < sleepUntil) { /* busy wait */ }
-        }
-
-        // If processes still running after 3s, force kill
-        if (!processExited) {
-            try {
-                spawn('pkill', ['-9', '-f', 'Antigravity'], { stdio: 'ignore' });
-            } catch { }
-
-            // Wait a bit more for force kill to complete
-            const forceDeadline = Date.now() + 2000;
-            while (Date.now() < forceDeadline) {
-                try {
-                    const result = spawnSync('pgrep', ['-f', 'Antigravity'], { encoding: 'utf8' });
-                    if (!(result.stdout || '').trim()) break;
-                } catch {
-                    break;
-                }
-                const sleepUntil = Date.now() + 200;
-                while (Date.now() < sleepUntil) { /* busy wait */ }
-            }
-        }
-    }
-
-    // Escape arguments for safe shell execution
-    const escapedArgs = args.map(arg => {
-        // Escape backslashes and single quotes to prevent shell injection
-        const escaped = String(arg).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        return `'${escaped}'`;
-    });
-    const cmd = `exec "${executable}" ${escapedArgs.join(' ')}`;
-
-    const child = spawn('bash', ['-c', cmd], {
+    const child = spawnImpl('bash', ['-c', cmd], {
         detached: true,
         stdio: 'ignore',
     });
-    child.unref();
+    if (child && typeof child.unref === 'function') child.unref();
+    return child;
+}
+
+function performRestartShutdown(dependencies = {}, options = {}) {
+    const spawnImpl = dependencies.spawn || spawn;
+    const spawnSyncImpl = dependencies.spawnSync || spawnSync;
+    const nowImpl = dependencies.now || Date.now;
+    const platform = dependencies.platform || process.platform;
+    const matcher = buildKillMatcher(dependencies, options);
+    const waitImpl = dependencies.wait || ((ms) => {
+        const end = Date.now() + ms;
+        while (Date.now() < end) { /* busy wait */ }
+    });
+    const observer = options.observer || null;
+
+    if (platform === 'win32') {
+        if (observer && typeof observer.onKillStart === 'function') observer.onKillStart();
+        const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process Antigravity | Stop-Process -Force; $deadline=(Get-Date).AddSeconds(8); while((Get-Date)-lt $deadline){if(-not(Get-Process Antigravity -EA SilentlyContinue)){break};Start-Sleep -Milliseconds 200}";
+        spawnImpl('powershell.exe', ['-NoProfile', '-Command', script], {
+            detached: true,
+            stdio: 'ignore',
+        });
+        if (observer && typeof observer.onKillComplete === 'function') observer.onKillComplete({ forced: false });
+        return;
+    }
+
+    if (observer && typeof observer.onKillStart === 'function') observer.onKillStart();
+    try {
+        spawnImpl('pkill', matcher.pkillArgs, { stdio: 'ignore' });
+    } catch { }
+
+    const deadline = nowImpl() + 3000;
+    let processExited = false;
+
+    while (nowImpl() < deadline) {
+        try {
+            if (observer && typeof observer.onProbe === 'function') observer.onProbe({ phase: 'term-check' });
+            const result = spawnSyncImpl('pgrep', matcher.pgrepArgs, { encoding: 'utf8' });
+            const output = (result.stdout || '').trim();
+            if (!output) {
+                processExited = true;
+                break;
+            }
+        } catch {
+            processExited = true;
+            break;
+        }
+        waitImpl(500);
+    }
+
+    let forced = false;
+    if (!processExited) {
+        forced = true;
+        try {
+            spawnImpl('pkill', matcher.forceKillArgs, { stdio: 'ignore' });
+        } catch { }
+
+        const forceDeadline = nowImpl() + 2000;
+        while (nowImpl() < forceDeadline) {
+            try {
+                if (observer && typeof observer.onProbe === 'function') observer.onProbe({ phase: 'kill-check' });
+                const result = spawnSyncImpl('pgrep', matcher.pgrepArgs, { encoding: 'utf8' });
+                if (!(result.stdout || '').trim()) break;
+            } catch {
+                break;
+            }
+            waitImpl(200);
+        }
+    }
+
+    if (observer && typeof observer.onKillComplete === 'function') observer.onKillComplete({ forced });
+}
+
+function createRestartPrimitive(dependencies = {}) {
+    return function restartPrimitive(params) {
+        const { executable, args = [], restart = false, observer, killMatcher } = params;
+        if (restart) {
+            performRestartShutdown(dependencies, { observer, killMatcher });
+        }
+        if (observer && typeof observer.onBeforeLaunch === 'function') {
+            observer.onBeforeLaunch({ executable, args: [...args], restart });
+        }
+        const child = launchDetached(executable, args, dependencies);
+        if (observer && typeof observer.onAfterLaunch === 'function') {
+            observer.onAfterLaunch({ executable, args: [...args], restart, child });
+        }
+        return child;
+    };
+}
+
+function launchAntigravityDetached(params) {
+    return createRestartPrimitive()(params);
 }
 
 module.exports = {
@@ -235,5 +285,7 @@ module.exports = {
     psQuote,
     resolveCdpBindAddress,
     buildLaunchArgsForWorkspace,
+    createExecutableKillMatcher,
+    createRestartPrimitive,
     launchAntigravityDetached,
 };

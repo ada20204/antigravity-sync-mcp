@@ -2,7 +2,7 @@
     "name": "antigravity-mcp-sidecar",
     "displayName": "Antigravity MCP Sidecar",
     "description": "All-in-one companion: auto-accept agent prompts + MCP registry routing for Antigravity.",
-    "version": "0.1.13",
+    "version": "0.1.14",
     "publisher": "antigravity",
     "icon": "icon.png",
     "engines": {
@@ -22,6 +22,7 @@
         "server-runtime/**/*",
         "vendor/ws/**/*",
         "vendor/core/**/*",
+        "vendor/sql.js/**/*",
         "package.json",
         "README.md",
         "AI_CONFIG_PROMPT.md",
@@ -33,41 +34,109 @@
         "commands": [
             {
                 "command": "antigravityMcpSidecar.toggle",
-                "title": "Toggle Antigravity Sidecar Auto-Accept"
+                "title": "Sidecar: Toggle Auto-Accept"
             },
             {
                 "command": "antigravityMcpSidecar.showQuota",
-                "title": "Show Antigravity Quota Snapshot"
+                "title": "Sidecar: Show Quota"
             },
             {
                 "command": "antigravityMcpSidecar.showQuotaTable",
-                "title": "Show Antigravity Model Quota Table"
+                "title": "Sidecar: Show Quota Table"
             },
             {
                 "command": "antigravityMcpSidecar.refreshQuota",
-                "title": "Refresh Antigravity Quota Snapshot"
+                "title": "Sidecar: Refresh Quota"
             },
             {
                 "command": "antigravityMcpSidecar.launchAntigravity",
-                "title": "Launch Antigravity (New Window)"
+                "title": "Sidecar: Launch Antigravity"
             },
             {
                 "command": "antigravityMcpSidecar.restartAntigravity",
-                "title": "Restart Antigravity (Confirm)"
+                "title": "Sidecar: Restart Antigravity"
             },
             {
                 "command": "antigravityMcpSidecar.requestHostRestart",
-                "title": "Request Host Restart (Remote)"
+                "title": "Sidecar: Request Host Restart"
             },
             {
                 "command": "antigravityMcpSidecar.installBundledServer",
-                "title": "Install Bundled MCP Server Launcher"
+                "title": "Sidecar: Install Bundled MCP Server"
             },
             {
                 "command": "antigravityMcpSidecar.showAiConfigPrompt",
-                "title": "Show AI MCP Config Prompt"
+                "title": "Sidecar: Show AI Config Prompt"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountReadDb",
+                "title": "Sidecar: Test Read Current Auth"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountSave",
+                "title": "Sidecar: Test Save Current Account"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountList",
+                "title": "Sidecar: Test List Saved Accounts"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountClearAndReload",
+                "title": "Sidecar: Test Clear Auth and Reload"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountRestore",
+                "title": "Sidecar: Test Restore Account and Reload"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountClearAndRestart",
+                "title": "Sidecar: Test Clear Auth and Restart"
+            },
+            {
+                "command": "antigravityMcpSidecar.testAccountRestoreAndRestart",
+                "title": "Sidecar: Test Restore Account and Restart"
+            },
+            {
+                "command": "antigravityMcpSidecar.switchAccount",
+                "title": "Sidecar: Switch Account"
+            },
+            {
+                "command": "antigravityMcpSidecar.addAnotherAccount",
+                "title": "Sidecar: Add Another Account"
             }
         ],
+        "menus": {
+            "commandPalette": [
+                {
+                    "command": "antigravityMcpSidecar.testAccountReadDb",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountSave",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountList",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountClearAndReload",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountRestore",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountClearAndRestart",
+                    "when": "false"
+                },
+                {
+                    "command": "antigravityMcpSidecar.testAccountRestoreAndRestart",
+                    "when": "false"
+                }
+            ]
+        },
         "configuration": {
             "title": "Antigravity Sidecar",
             "properties": {
@@ -170,6 +239,7 @@
     "dependencies": {
         "@antigravity-mcp/core": "*",
         "@modelcontextprotocol/sdk": "^1.27.1",
+        "sql.js": "^1.14.1",
         "ws": "^8.19.0"
     },
     "devDependencies": {
