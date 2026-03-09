@@ -14,6 +14,22 @@ All-in-one companion extension for Antigravity.
 
 ## How It Works
 
+### Launch and Restart Architecture
+
+**Server (MCP):**
+- Checks if Antigravity is running using CDP discovery
+- For cold-start (not running): spawns `restart-worker.js` with `--cold-start` flag
+- For restart requests: delegates to `restart-worker.js` without `--cold-start`
+- Returns immediately with worker PID and port info
+
+**Worker (`scripts/restart-worker.js`):**
+- Runs as detached process, independent of server lifecycle
+- **Cold-start mode** (`--cold-start`): skip kill/wait, directly launch + verify CDP
+- **Restart mode** (default): kill → wait → launch → verify CDP
+- Writes status to `~/.config/antigravity-mcp/restart-status.json`
+- Writes final result to `~/.config/antigravity-mcp/restart-result.json`
+- Logs to `~/.config/antigravity-mcp/restart-worker.log`
+
 ### Auto-Accept (Two Channels)
 1. **Native Commands (500ms)**: Fires `antigravity.agent.acceptAgentStep` and related commands
 2. **CDP Webview Injection (1500ms)**: Injects click scripts into the isolated agent panel via Chrome DevTools Protocol
