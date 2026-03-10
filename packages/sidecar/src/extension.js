@@ -197,9 +197,6 @@ function createSwitchWorkerLauncher({
             if (!configDir) {
                 throw new Error('Config directory is required for account switch');
             }
-            if (!Number.isFinite(antigravityPid) || antigravityPid <= 0) {
-                throw new Error('Antigravity PID is required for account switch');
-            }
             if (!antigravityExecutablePath || !fs.existsSync(antigravityExecutablePath)) {
                 throw new Error('Antigravity executable not found');
             }

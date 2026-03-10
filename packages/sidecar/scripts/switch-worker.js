@@ -35,7 +35,7 @@ function parseArgs() {
             continue;
         }
         const key = rawKey.replace(/^--/, '');
-        const value = (i + 1 < args.length && !args[i + 1].startsWith('--')) ? args[++i] : true;
+        const value = (i + 1 < args.length && !args[i + 1].startsWith('--') || key === 'extra-arg') ? args[++i] : true;
 
         if (Object.prototype.hasOwnProperty.call(parsed, key)) {
             if (Array.isArray(parsed[key])) {
@@ -338,16 +338,16 @@ async function phase0_precheck() {
     // 验证备份文件
     const backupFile = path.join(getBackupDir(), `${getTargetEmail()}.json`);
     if (!fs.existsSync(backupFile)) {
-        exitWithError('precheck', `Backup file not found: ${backupFile}`);
+        return exitWithError('precheck', `Backup file not found: ${backupFile}`);
     }
 
     try {
         const backup = JSON.parse(fs.readFileSync(backupFile, 'utf-8'));
         if (!backup[DB_KEYS.AUTH_STATUS]) {
-            exitWithError('precheck', 'Invalid backup file: missing authStatus');
+            return exitWithError('precheck', 'Invalid backup file: missing authStatus');
         }
     } catch (e) {
-        exitWithError('precheck', `Invalid backup file: ${e.message}`);
+        return exitWithError('precheck', `Invalid backup file: ${e.message}`);
     }
 
     log('Precheck passed');

@@ -128,7 +128,8 @@ function registerCommands(context, deps) {
             'Restart'
         );
         if (confirm !== 'Restart') return;
-        await executeManualLaunch('restart', { exitAfterWorkerStart: true });
+        const launched = await executeManualLaunch('restart', { exitAfterWorkerStart: true });
+        if (!launched) return;
         // Worker is now waiting for Antigravity to exit; close the window to trigger that.
         setTimeout(async () => {
             await vscode.commands.executeCommand('workbench.action.closeAllEditors');
