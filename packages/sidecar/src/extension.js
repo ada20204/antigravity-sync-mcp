@@ -1025,7 +1025,7 @@ async function activate(context) {
             workerArgs.push('--wait-exit');
             try {
                 const { execSync } = require('child_process');
-                const out = execSync('pgrep -f "Antigravity" -P 1', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+                const out = execSync(`lsof -nP -iTCP:${allocatedPort} -sTCP:LISTEN -t`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
                 const antigravityPid = parseInt(String(out || '').trim().split('\n')[0], 10);
                 if (Number.isFinite(antigravityPid) && antigravityPid > 0) {
                     workerArgs.push('--pid', String(antigravityPid));
@@ -1391,15 +1391,17 @@ async function activate(context) {
         getLaunchArgs: () => antigravityLaunchExtraArgs,
         getCdpPort: () => cdpTarget ? cdpTarget.port : (cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort),
         getAntigravityPid: () => {
-            // Find the Antigravity main process (PPID=1, owned by launchd).
+            // Find the Antigravity main process by looking up who owns the CDP port.
             // process.pid is the extension-host PID inside Antigravity, not the app PID.
             try {
                 const { execSync } = require('child_process');
                 if (process.platform === 'win32') {
                     return null;
                 }
-                // pgrep -P 1 matches processes whose parent is launchd (the main app process)
-                const out = execSync('pgrep -f "Antigravity" -P 1', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+                const port = cdpTarget ? cdpTarget.port : (cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort);
+                if (!port) return null;
+                // lsof -t gives just the PID of the process listening on the CDP port
+                const out = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
                 const pid = parseInt(String(out || '').trim().split('\n')[0], 10);
                 return Number.isFinite(pid) && pid > 0 ? pid : null;
             } catch {
