@@ -23,12 +23,18 @@ All-in-one companion extension for Antigravity.
 - Returns immediately with worker PID and port info
 
 **Worker (`scripts/restart-worker.js`):**
-- Runs as detached process, independent of server lifecycle
+- Runs as detached process, independent of server/sidecar lifecycle
 - **Cold-start mode** (`--cold-start`): skip kill/wait, directly launch + verify CDP
 - **Restart mode** (default): kill → wait → launch → verify CDP
+- **Wait-exit mode** (`--wait-exit`): skip active kill, wait for Antigravity to exit on its own; sidecar calls `closeAndQuit` to trigger graceful exit, worker waits by PID (resolved via `lsof` on the CDP port)
+- **Clear-auth mode** (`--clear-auth --db-path`): after process exits, deletes auth keys from SQLite DB before launching (used by Add Another Account)
 - Writes status to `~/.config/antigravity-mcp/restart-status.json`
 - Writes final result to `~/.config/antigravity-mcp/restart-result.json`
 - Logs to `~/.config/antigravity-mcp/restart-worker.log`
+
+**Account commands (Switch / Add Another Account / Restart):**
+- All use wait-exit mode to avoid killing sidecar (which runs inside Antigravity)
+- Sidecar triggers `closeAndQuit`, worker waits for the process to exit by PID, then launches a fresh instance
 
 ### Auto-Accept (Two Channels)
 1. **Native Commands (500ms)**: Fires `antigravity.agent.acceptAgentStep` and related commands
@@ -71,6 +77,10 @@ Writes workspace state to `~/.config/antigravity-mcp/registry.json`:
 - `Launch Antigravity (New Window)`
 - `Restart Antigravity (Confirm)`
 - `Request Host Restart (Remote)`
+- `Sidecar: Switch Account`
+- `Sidecar: Add Another Account`
+- `Sidecar: Account Status`
+- `Sidecar: Delete Saved Account`
 - `Install Bundled MCP Server Launcher`
 - `Show AI MCP Config Prompt`
 
