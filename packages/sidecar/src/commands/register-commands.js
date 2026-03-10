@@ -128,7 +128,12 @@ function registerCommands(context, deps) {
             'Restart'
         );
         if (confirm !== 'Restart') return;
-        await executeManualLaunch('restart');
+        await executeManualLaunch('restart', { exitAfterWorkerStart: true });
+        // Worker is now waiting for Antigravity to exit; close the window to trigger that.
+        setTimeout(async () => {
+            await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+            await vscode.commands.executeCommand('workbench.action.quit');
+        }, 500);
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand('antigravityMcpSidecar.showQuota', async () => {

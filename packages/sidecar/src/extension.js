@@ -1022,8 +1022,18 @@ async function activate(context) {
 
         if (action === 'launch') {
             workerArgs.push('--cold-start');
-        } else if (waitExit) {
+        } else {
+            // restart: use wait-exit mode so the worker waits for Antigravity to exit
+            // gracefully instead of actively killing it (which would kill sidecar too).
             workerArgs.push('--wait-exit');
+            try {
+                const { execSync } = require('child_process');
+                const out = execSync('pgrep -f "Antigravity" -P 1', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+                const antigravityPid = parseInt(String(out || '').trim().split('\n')[0], 10);
+                if (Number.isFinite(antigravityPid) && antigravityPid > 0) {
+                    workerArgs.push('--pid', String(antigravityPid));
+                }
+            } catch { /* pid optional */ }
         }
 
         // Add extra args
@@ -1382,8 +1392,23 @@ async function activate(context) {
         antigravityExecutablePath,
         getWorkspacePath: () => workspacePath,
         getLaunchArgs: () => antigravityLaunchExtraArgs,
-        getCdpPort: () => cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort,
-        getAntigravityPid: () => process.pid,
+        getCdpPort: () => cdpTarget ? cdpTarget.port : (cdpFixedPort > 0 ? cdpFixedPort : antigravityLaunchPort),
+        getAntigravityPid: () => {
+            // Find the Antigravity main process (PPID=1, owned by launchd).
+            // process.pid is the extension-host PID inside Antigravity, not the app PID.
+            try {
+                const { execSync } = require('child_process');
+                if (process.platform === 'win32') {
+                    return null;
+                }
+                // pgrep -P 1 matches processes whose parent is launchd (the main app process)
+                const out = execSync('pgrep -f "Antigravity" -P 1', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+                const pid = parseInt(String(out || '').trim().split('\n')[0], 10);
+                return Number.isFinite(pid) && pid > 0 ? pid : null;
+            } catch {
+                return null;
+            }
+        },
         runtimeRole,
         executeManualLaunch,
         getLatestQuota: () => latestQuota,
