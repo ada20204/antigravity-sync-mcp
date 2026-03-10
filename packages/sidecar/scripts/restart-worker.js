@@ -91,6 +91,14 @@ function getWaitExit() {
     return parsedArgs['wait-exit'] !== undefined;
 }
 
+function getClearAuth() {
+    return parsedArgs['clear-auth'] !== undefined;
+}
+
+function getDbPath() {
+    return getRuntimeValue('db-path');
+}
+
 function getAntigravityPid() {
     const val = getRuntimeValue('pid');
     if (!val) return null;
@@ -519,6 +527,7 @@ async function main() {
     log(`Bind Address: ${getBindAddress()}`);
     log(`Wait for CDP: ${getWaitForCdp()}`);
     log(`Extra Args: ${getExtraArgs().join(' ')}`);
+    log(`Clear Auth: ${getClearAuth()}`);
 
     updateStatus('starting');
 
@@ -530,16 +539,53 @@ async function main() {
 
     try {
         if (coldStart) {
-            // 冷启动模式：跳过 kill 和 wait，直接 launch
             log('Cold start mode: skipping kill and wait phases');
         } else if (waitExit) {
-            // wait-exit 模式：跳过主动 kill，只等待进程自己退出（配合 closeAndQuit）
             log('Wait-exit mode: skipping kill, waiting for process to exit on its own');
             await phase2_waitForExit();
         } else {
-            // 标准 restart 模式：主动 kill + wait
             await phase1_killOldProcess();
             await phase2_waitForExit();
+        }
+
+        // 清空 auth（在进程退出后执行，避免被 Antigravity 写回覆盖）
+        if (getClearAuth()) {
+            const dbPath = getDbPath();
+            if (!dbPath) {
+                log('WARNING: --clear-auth specified but --db-path missing, skipping');
+            } else {
+                log(`Clearing auth fields in DB: ${dbPath}`);
+                updateStatus('clearing_auth');
+                try {
+                    const initSqlJs = require(path.join(__dirname, '../vendor/sql.js/sql-asm.js'));
+                    const SQL = await initSqlJs();
+                    const dbBuffer = fs.readFileSync(dbPath);
+                    const db = new SQL.Database(dbBuffer);
+                    const AUTH_KEYS = [
+                        'antigravityAuthStatus',
+                        'antigravityUnifiedStateSync.oauthToken',
+                        'antigravityUnifiedStateSync.userStatus',
+                    ];
+                    for (const key of AUTH_KEYS) {
+                        db.run('DELETE FROM ItemTable WHERE key = ?', [key]);
+                    }
+                    db.run('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', ['onboarding', 'true']);
+                    const data = db.export();
+                    const tmpPath = dbPath + '.tmp';
+                    fs.writeFileSync(tmpPath, Buffer.from(data));
+                    fs.renameSync(tmpPath, dbPath);
+                    db.close();
+                    // 删除 backup DB 防止 Antigravity 从备份恢复
+                    const backupDbPath = dbPath.replace('.vscdb', '.vscdb.backup');
+                    if (fs.existsSync(backupDbPath)) {
+                        try { fs.unlinkSync(backupDbPath); } catch { /* ignore */ }
+                    }
+                    log('Auth fields cleared successfully');
+                } catch (e) {
+                    log(`WARNING: Failed to clear auth fields: ${e.message}`);
+                    // 不中断流程，继续 launch
+                }
+            }
         }
 
         const launchResult = await phase3_launchNewProcess();

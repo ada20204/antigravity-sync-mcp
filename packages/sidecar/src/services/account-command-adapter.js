@@ -275,10 +275,7 @@ function createAccountCommandAdapter({
         if (result.filePath) {
           outputChannel.appendLine(`Saved file: ${result.filePath}`);
         }
-        outputChannel.appendLine(`Step 2: Cleared local auth (${result.cleared ? 'cleared' : 'no changes'})`);
-        if (result.dbPath) {
-          outputChannel.appendLine(`Auth DB: ${result.dbPath}`);
-        }
+        outputChannel.appendLine('Step 2: Auth will be cleared after Antigravity exits');
 
         if (typeof launchRestartWorker !== 'function') {
           throw new Error('Restart is unavailable');

@@ -152,13 +152,10 @@ function createAccountControlService({
       }
 
       const saveResult = await accountService.saveCurrentAccount();
-      const clearResult = await accountService.clearAuthFields();
 
       return {
         email,
         filePath: saveResult.filePath,
-        dbPath: clearResult.dbPath,
-        cleared: clearResult.cleared,
       };
     },
 

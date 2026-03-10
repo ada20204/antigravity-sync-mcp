@@ -355,6 +355,8 @@ function createAccountFeatures({
                 '--port', String(cdpPort),
                 '--config-dir', configDir,
                 '--wait-exit',
+                '--clear-auth',
+                '--db-path', antigravityDbPath,
                 ...getLaunchArgs().flatMap((arg) => ['--extra-arg', arg]),
             ];
             if (Number.isFinite(pid) && pid > 0) {
