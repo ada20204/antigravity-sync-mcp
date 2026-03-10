@@ -365,7 +365,7 @@ function createAccountFeatures({
 
             const child = spawn('node', args, { detached: true, stdio: 'ignore' });
             child.unref();
-            log(`Restart worker started (pid=${child.pid}, requestId=${requestId})`);
+            log(`Restart worker started (pid=${child.pid}, requestId=${requestId}, antigravityPid=${pid}, cdpPort=${cdpPort})`);
         };
 
         const accountCommandAdapter = activationDiagnostics.run('account:commandAdapter', () => createAccountCommandAdapter({
