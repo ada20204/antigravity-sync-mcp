@@ -55,20 +55,7 @@ jobs:
           mkdir -p build
           cd packages/sidecar
           SHORT_SHA="$(echo "$GITHUB_SHA" | cut -c1-7)"
-          npx -y @vscode/vsce@2.26.1 package --no-yarn --no-dependencies --allow-missing-repository --out ../../build/antigravity-mcp-sidecar-${SHORT_SHA}-base.vsix
-
-      - name: Inject runtime dependencies into VSIX
-        run: |
-          VSIX_BASE="$(ls build/*-base.vsix | head -1)"
-          OUT_VSIX="${VSIX_BASE%-base.vsix}.vsix"
-          rm -rf /tmp/ag-vsix-repack && mkdir -p /tmp/ag-vsix-repack
-          unzip -q "$VSIX_BASE" -d /tmp/ag-vsix-repack
-          # In workspace mode, dependencies are hoisted to root node_modules.
-          # Copy from root, following symlinks to resolve workspace packages.
-          cp -aL node_modules /tmp/ag-vsix-repack/extension/node_modules
-          (cd /tmp/ag-vsix-repack && zip -qr /tmp/ag-vsix-packed.vsix .)
-          mv /tmp/ag-vsix-packed.vsix "$OUT_VSIX"
-          rm -f "$VSIX_BASE"
+          npx -y @vscode/vsce@2.26.1 package --no-yarn --no-dependencies --allow-missing-repository --out ../../build/antigravity-mcp-sidecar-${SHORT_SHA}.vsix
 
       - name: Verify VSIX contents
         run: |

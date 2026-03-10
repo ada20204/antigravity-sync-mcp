@@ -1,5 +1,7 @@
 # antigravity-sync
 
+> ⚠️ **免责声明**：此项目完全是 vibe coding 产物，代码由 AI 生成，未经严格审查。使用风险自己承担。
+
 一个面向 Antigravity 的 MCP 集成项目，目标是让外部 AI 客户端（Claude/Cursor/其他 MCP 客户端）稳定调用 Antigravity 的对话能力。
 
 ## 项目目标
