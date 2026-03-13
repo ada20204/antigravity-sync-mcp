@@ -24,6 +24,13 @@ function isNoiseSegment(segment) {
         return true;
     if (/^```$/.test(s))
         return true;
+    // Filter out UI button text
+    if (/^Copy\s*$/i.test(s))
+        return true;
+    if (/^Retry\s*$/i.test(s))
+        return true;
+    if (/^Edit\s*$/i.test(s))
+        return true;
     return false;
 }
 function pickLastAnswerSegment(text) {

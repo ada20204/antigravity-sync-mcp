@@ -21,6 +21,10 @@ function isNoiseSegment(segment: string): boolean {
     if (/^Thought for\b/i.test(s)) return true;
     if (/^Fast\b[\s\S]*\bSend$/i.test(s)) return true;
     if (/^```$/.test(s)) return true;
+    // Filter out UI button text
+    if (/^Copy\s*$/i.test(s)) return true;
+    if (/^Retry\s*$/i.test(s)) return true;
+    if (/^Edit\s*$/i.test(s)) return true;
     return false;
 }
 
