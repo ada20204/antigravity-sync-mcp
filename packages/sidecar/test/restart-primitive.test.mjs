@@ -78,6 +78,31 @@ test('restart quoting handles single quotes in executable and args', () => {
   ]);
 });
 
+test('windows launch spawns the executable directly', () => {
+  const recorder = createSpawnRecorder();
+  const restart = createRestartPrimitive({
+    platform: 'win32',
+    spawn: recorder.spawn,
+  });
+
+  restart({
+    executable: 'C:\\Program Files\\Antigravity\\Antigravity.exe',
+    args: ['C:\\workspace', '--new-window', '--remote-debugging-port=9002'],
+    restart: false,
+  });
+
+  assert.equal(recorder.calls.length, 1);
+  assert.equal(recorder.calls[0].command, 'C:\\Program Files\\Antigravity\\Antigravity.exe');
+  assert.deepEqual(recorder.calls[0].args, ['C:\\workspace', '--new-window', '--remote-debugging-port=9002']);
+  assert.deepEqual(recorder.calls[0].options, {
+    detached: true,
+    stdio: 'ignore',
+    shell: false,
+    windowsHide: true,
+  });
+  assert.equal(recorder.calls[0].child.unrefCalled, true);
+});
+
 test('restart path invokes process-kill flow before relaunch', () => {
   const recorder = createSpawnRecorder();
   const probeOutputs = ['1234\n', '1234\n', '1234\n', '1234\n', '1234\n', '1234\n', '1234\n', '1234\n', '1234\n', ''];
