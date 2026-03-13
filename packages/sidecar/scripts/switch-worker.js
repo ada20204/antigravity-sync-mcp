@@ -508,6 +508,7 @@ function phase3_restart() {
             const child = require('child_process').spawn('node', args, {
                 detached: true,
                 stdio: 'ignore',
+                windowsHide: true,
             });
             child.unref();
             log(`Formal restart worker started (pid=${child.pid || 'unknown'}) with requestId=switch-restart-${getRequestId()} workspace=${getWorkspace()} port=${getPort()} extraArgs=${JSON.stringify(getExtraArgs())}`);

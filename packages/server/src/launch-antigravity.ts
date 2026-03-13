@@ -143,6 +143,7 @@ async function killWindowsProcess(processName: string, log?: (msg: string) => vo
     return new Promise<void>((resolve) => {
         const child = spawn("taskkill.exe", ["/im", imageName, "/f"], {
             stdio: "ignore",
+            windowsHide: true,
         });
         child.on("exit", () => resolve());
         child.on("error", () => resolve());
@@ -164,9 +165,13 @@ export async function atomicWindowsLaunch(
     }
 
     log?.(`Spawning ${executable} with args: ${args.join(" ")}`);
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(executable, args, {
         detached: true,
         stdio: "ignore",
+        windowsHide: false,
+        env,
     });
     child.unref();
 }
