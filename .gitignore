@@ -7,3 +7,4 @@ build/
 *.tgz
 *.tsbuildinfo
 .worktrees/
+.claude/settings.local.json
