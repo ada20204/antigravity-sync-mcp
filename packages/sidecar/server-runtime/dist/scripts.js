@@ -201,9 +201,12 @@ export async function applyModeAndModelSelection(cdp, options) {
  * Inject a text message into Antigravity's chat input and submit it.
  * Ported from OmniRemote server.js injectMessage() (lines 432-490).
  */
-export async function injectMessage(cdp, text) {
+export async function injectMessage(cdp, text, options = {}) {
+    const maxWaitMs = options.maxWaitMs || 120000;
+    const pollIntervalMs = options.pollIntervalMs || 500;
+    const startTime = Date.now();
     const safeText = JSON.stringify(text);
-    const expression = `(async () => {
+    const tryInjectExpression = `(async () => {
     // Check if AI is already generating
     const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
     if (cancel && cancel.offsetParent !== null) return { ok: false, reason: "busy" };
@@ -243,8 +246,22 @@ export async function injectMessage(cdp, text) {
 
     return { ok: true, method: "enter_keypress" };
   })()`;
-    const result = await evaluateInAllContexts(cdp, expression, true);
-    return result || { ok: false, reason: "no_context" };
+    // Poll until the editor is ready or timeout
+    while (true) {
+        const result = await evaluateInAllContexts(cdp, tryInjectExpression, true);
+        const waitedMs = Date.now() - startTime;
+        if (!result) {
+            return { ok: false, reason: "no_context", waitedMs };
+        }
+        if (result.ok) {
+            return { ...result, waitedMs };
+        }
+        // Editor busy or not found — keep polling if time allows
+        if (waitedMs >= maxWaitMs) {
+            return { ok: false, reason: result.reason || result.error || "timeout", waitedMs };
+        }
+        await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
 }
 // --- pollCompletionStatus ---
 /**
