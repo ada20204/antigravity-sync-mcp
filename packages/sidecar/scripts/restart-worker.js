@@ -124,9 +124,9 @@ function validateArgs() {
 // 常量
 // ============================================================================
 
-const ABSOLUTE_TIMEOUT_MS = 30000;  // 30 秒绝对超时
+const ABSOLUTE_TIMEOUT_MS = 60000;  // 60 秒绝对超时
 const WAIT_EXIT_TIMEOUT_MS = 12000; // 12 秒等待进程退出
-const LAUNCH_DETECT_TIMEOUT_MS = 3000; // 3 秒等待新进程出现
+const LAUNCH_DETECT_TIMEOUT_MS = 15000; // 15 秒等待新进程出现（Windows 启动慢）
 const CDP_VERIFY_TIMEOUT_MS = 10000; // 10 秒 CDP 验证超时
 const POLL_INTERVAL_MS = 500;       // 轮询间隔
 
@@ -230,36 +230,163 @@ function exitWithError(phase, error) {
 // Helper functions
 // ============================================================================
 
+function checkProcessExists(processPattern, dependencies = {}) {
+    const platform = dependencies.platform || process.platform;
+    const execSyncImpl = dependencies.execSync || require('child_process').execSync;
+
+    try {
+        if (platform === 'win32') {
+            const baseName = path.basename(String(processPattern || ''), path.extname(String(processPattern || '')));
+            const script = `(Get-Process ${baseName} -ErrorAction SilentlyContinue | Measure-Object).Count`;
+            const output = execSyncImpl(
+                `powershell -NoProfile -Command "${script}"`,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }
+            );
+            return parseInt(String(output || '').trim(), 10) > 0;
+        }
+
+        execSyncImpl(`pgrep -f "${processPattern}"`, { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function checkListeningPort(port, dependencies = {}) {
+    const platform = dependencies.platform || process.platform;
+    const execSyncImpl = dependencies.execSync || require('child_process').execSync;
+    const targetSuffix = ':' + String(port);
+
+    try {
+        if (platform === 'win32') {
+            const output = execSyncImpl('netstat -ano -p TCP', {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                windowsHide: true,
+            });
+            for (const rawLine of String(output || '').split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                const parts = line.split(/\s+/);
+                if (parts.length < 5) continue;
+                const localAddress = String(parts[1] || '');
+                const state = String(parts[3] || '').toUpperCase();
+                if (!localAddress.endsWith(targetSuffix)) continue;
+                if (state !== 'LISTENING') continue;
+                return true;
+            }
+            return false;
+        }
+
+        execSyncImpl(`lsof -nP -iTCP:${port} -sTCP:LISTEN`, { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function launchWindowsDetached(executable, args, dependencies = {}) {
+    const spawnImpl = dependencies.spawn || spawn;
+    // Clear ELECTRON_RUN_AS_NODE so the new Antigravity instance starts as a
+    // normal Electron app, not in Node.js script mode (which it inherits when
+    // spawned from inside an Electron process).
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const child = spawnImpl(executable, args, {
+        detached: true,
+        stdio: 'ignore',
+        shell: false,
+        env,
+    });
+    if (child && typeof child.unref === 'function') {
+        child.unref();
+    }
+    return child;
+}
+
+async function replaceFileWithRetry(tmpPath, targetPath, dependencies = {}) {
+    const renameSyncImpl = dependencies.renameSync || fs.renameSync;
+    const existsSyncImpl = dependencies.existsSync || fs.existsSync;
+    const delayImpl = dependencies.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const retries = Number.isFinite(dependencies.retries) ? dependencies.retries : 12;
+    const retryDelayMs = Number.isFinite(dependencies.retryDelayMs) ? dependencies.retryDelayMs : 250;
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            renameSyncImpl(tmpPath, targetPath);
+            return;
+        } catch (error) {
+            lastError = error;
+            const code = error && error.code;
+            const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+            if (!retryable || attempt === retries) {
+                break;
+            }
+            await delayImpl(retryDelayMs);
+            if (!existsSyncImpl(tmpPath)) {
+                break;
+            }
+        }
+    }
+
+    throw lastError || new Error(`Failed to replace ${targetPath}`);
+}
+
+async function waitForWindowsRelaunchCooldown(dependencies = {}) {
+    const platform = dependencies.platform || process.platform;
+    if (platform !== 'win32') {
+        return 0;
+    }
+
+    const delayImpl = dependencies.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const cooldownMs = Number.isFinite(dependencies.cooldownMs) ? dependencies.cooldownMs : 1500;
+    await delayImpl(cooldownMs);
+    return cooldownMs;
+}
+
 async function waitForProcessGone(processPattern, timeoutMs = WAIT_EXIT_TIMEOUT_MS, intervalMs = POLL_INTERVAL_MS) {
-    const { execSync } = require('child_process');
     const started = Date.now();
 
     while (Date.now() - started < timeoutMs) {
-        try {
-            execSync(`pgrep -f "${processPattern}"`, { stdio: 'ignore' });
-            await new Promise((r) => setTimeout(r, intervalMs));
-        } catch {
-            // Process not found
+        if (!checkProcessExists(processPattern)) {
             return true;
         }
+        await new Promise((r) => setTimeout(r, intervalMs));
     }
     return false;
 }
 
 async function waitForProcessAppeared(processPattern, timeoutMs = LAUNCH_DETECT_TIMEOUT_MS, intervalMs = POLL_INTERVAL_MS) {
-    const { execSync } = require('child_process');
     const started = Date.now();
 
     while (Date.now() - started < timeoutMs) {
-        try {
-            const output = execSync(`pgrep -af "${processPattern}"`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-            if (String(output || '').trim()) {
-                return true;
-            }
-        } catch {
-            // Not found yet
+        if (checkProcessExists(processPattern)) {
+            return true;
         }
         await new Promise((r) => setTimeout(r, intervalMs));
+    }
+
+    return false;
+}
+
+async function waitForLaunchSignal(processPattern, dependencies = {}) {
+    const timeoutMs = Number.isFinite(dependencies.timeoutMs) ? dependencies.timeoutMs : LAUNCH_DETECT_TIMEOUT_MS;
+    const intervalMs = Number.isFinite(dependencies.intervalMs) ? dependencies.intervalMs : POLL_INTERVAL_MS;
+    const platform = dependencies.platform || process.platform;
+    const checkProcessExistsImpl = dependencies.checkProcessExists || checkProcessExists;
+    const checkListeningPortImpl = dependencies.checkListeningPort || checkListeningPort;
+    const delayImpl = dependencies.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+        if (checkProcessExistsImpl(processPattern, dependencies)) {
+            return true;
+        }
+        if (platform === 'win32' && checkListeningPortImpl(getPort(), dependencies)) {
+            return true;
+        }
+        await delayImpl(intervalMs);
     }
 
     return false;
@@ -317,7 +444,8 @@ async function phase1_killOldProcess() {
             const processName = path.basename(executable, path.extname(executable));
             const imageName = processName.endsWith('.exe') ? processName : `${processName}.exe`;
             log(`Killing ${imageName} via taskkill...`);
-            execSync(`taskkill /im ${imageName} /f`, { stdio: 'ignore' });
+            const { spawnSync } = require('child_process');
+            spawnSync('taskkill', ['/im', imageName, '/f'], { stdio: 'ignore', windowsHide: true });
         } else {
             // macOS/Linux: use pkill
             const appName = executable.includes('Antigravity') ? 'Antigravity' : 'Cursor';
@@ -371,24 +499,66 @@ async function phase2_waitForExit() {
                 // still alive
             } catch {
                 log(`PID ${pid} confirmed gone`);
-                return;
+                break;
             }
             await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
         }
-        log(`PID ${pid} still alive after timeout, continuing anyway`);
+        if (Date.now() - started >= WAIT_EXIT_TIMEOUT_MS) {
+            log(`PID ${pid} still alive after timeout, continuing anyway`);
+        }
+
+        // Wait for CDP port to be released (Electron child processes may hold it briefly)
+        if (process.platform === 'win32') {
+            const port = getPort();
+            const portWaitStarted = Date.now();
+            const PORT_RELEASE_TIMEOUT_MS = 8000;
+            while (Date.now() - portWaitStarted < PORT_RELEASE_TIMEOUT_MS) {
+                if (!checkListeningPort(port)) {
+                    log(`CDP port ${port} released`);
+                    break;
+                }
+                await new Promise((r) => setTimeout(r, 500));
+            }
+            if (checkListeningPort(port)) {
+                log(`WARNING: CDP port ${port} still occupied after ${PORT_RELEASE_TIMEOUT_MS}ms, launching anyway`);
+            }
+        }
         return;
     }
 
+    // Fallback: check by process name/path
     const executable = getAntigravityPath();
-    const appName = executable.includes('Antigravity') ? 'Antigravity' : 'Cursor';
+    const processPattern = process.platform === 'win32'
+        ? path.basename(executable, path.extname(executable))
+        : (executable.includes('Antigravity') ? 'Antigravity' : 'Cursor');
 
-    const gone = await waitForProcessGone(appName, WAIT_EXIT_TIMEOUT_MS);
+    const gone = await waitForProcessGone(processPattern, WAIT_EXIT_TIMEOUT_MS);
 
     if (gone) {
         log('Process confirmed gone');
     } else {
         log('Process may still be running after timeout');
         // Continue anyway - launch will handle it
+    }
+
+    // On Windows, Electron leaves child processes holding the CDP port for a few
+    // seconds after the main process exits.  Wait for the port to be released
+    // before launching the new instance, otherwise the new instance gets
+    // exit code=1 due to port conflict.
+    if (process.platform === 'win32') {
+        const port = getPort();
+        const portWaitStarted = Date.now();
+        const PORT_RELEASE_TIMEOUT_MS = 8000;
+        while (Date.now() - portWaitStarted < PORT_RELEASE_TIMEOUT_MS) {
+            if (!checkListeningPort(port)) {
+                log(`CDP port ${port} released`);
+                break;
+            }
+            await new Promise((r) => setTimeout(r, 500));
+        }
+        if (checkListeningPort(port)) {
+            log(`WARNING: CDP port ${port} still occupied after ${PORT_RELEASE_TIMEOUT_MS}ms, launching anyway`);
+        }
     }
 }
 
@@ -402,17 +572,28 @@ async function phase3_launchNewProcess() {
 
     const executable = getAntigravityPath();
     const args = buildLaunchArgs();
-    const processPattern = process.platform === 'darwin'
-        ? `Antigravity.*--remote-debugging-port=${getPort()}`
-        : executable;
+
+    // Process pattern for detection after launch
+    let processPattern;
+    if (process.platform === 'darwin') {
+        processPattern = `Antigravity.*--remote-debugging-port=${getPort()}`;
+    } else if (process.platform === 'win32') {
+        // On Windows, use just the base name without extension for tasklist matching
+        processPattern = path.basename(executable, path.extname(executable));
+    } else {
+        processPattern = executable;
+    }
 
     log(`Launch command: ${executable} ${args.join(' ')}`);
 
     const launchDirectly = () => {
+        const env = { ...process.env };
+        delete env.ELECTRON_RUN_AS_NODE;
         const child = spawn(executable, args, {
             detached: true,
             stdio: 'ignore',
             shell: false,
+            env,
         });
         child.unref();
         return child;
@@ -451,18 +632,15 @@ async function phase3_launchNewProcess() {
                 log('Launched directly');
             }
         } else if (process.platform === 'win32') {
-            const child = spawn(executable, args, {
-                detached: true,
-                stdio: 'ignore',
-            });
-            child.unref();
-            log('Launched on Windows');
+            const child = launchWindowsDetached(executable, args);
+            launchedVia = 'direct spawn';
+            log(`Launched on Windows via ${launchedVia}`);
         } else {
             launchDirectly();
             log('Launched on Linux');
         }
 
-        const appeared = await waitForProcessAppeared(processPattern, LAUNCH_DETECT_TIMEOUT_MS);
+        const appeared = await waitForLaunchSignal(processPattern);
         if (!appeared) {
             throw new Error(`Antigravity process did not appear after launch via ${launchedVia}`);
         }
@@ -548,6 +726,11 @@ async function main() {
             await phase2_waitForExit();
         }
 
+        const relaunchCooldownMs = await waitForWindowsRelaunchCooldown();
+        if (relaunchCooldownMs > 0) {
+            log(`Windows relaunch cooldown: waited ${relaunchCooldownMs}ms for locks to settle`);
+        }
+
         // 清空 auth（在进程退出后执行，避免被 Antigravity 写回覆盖）
         if (getClearAuth()) {
             const dbPath = getDbPath();
@@ -573,8 +756,8 @@ async function main() {
                     const data = db.export();
                     const tmpPath = dbPath + '.tmp';
                     fs.writeFileSync(tmpPath, Buffer.from(data));
-                    fs.renameSync(tmpPath, dbPath);
                     db.close();
+                    await replaceFileWithRetry(tmpPath, dbPath);
                     // 删除 backup DB 防止 Antigravity 从备份恢复
                     const backupDbPath = dbPath.replace('.vscdb', '.vscdb.backup');
                     if (fs.existsSync(backupDbPath)) {
@@ -631,5 +814,11 @@ module.exports = {
         getBindAddress,
         getExtraArgs,
         getColdStart,
+        checkProcessExists,
+        checkListeningPort,
+        launchWindowsDetached,
+        replaceFileWithRetry,
+        waitForWindowsRelaunchCooldown,
+        waitForLaunchSignal,
     },
 };

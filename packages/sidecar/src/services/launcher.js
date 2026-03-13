@@ -156,14 +156,15 @@ function createExecutableKillMatcher(executable) {
 function launchDetached(executable, args, dependencies = {}) {
     const spawnImpl = dependencies.spawn || spawn;
     const platform = dependencies.platform || process.platform;
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
 
     if (platform === 'win32') {
-        const exe = psQuote(executable);
-        const argList = args.map((item) => `'${psQuote(item)}'`).join(',');
-        const script = `Start-Process -FilePath '${exe}' -ArgumentList @(${argList})`;
-        const child = spawnImpl('powershell.exe', ['-NoProfile', '-Command', script], {
+        const child = spawnImpl(executable, args, {
             detached: true,
             stdio: 'ignore',
+            shell: false,
+            env,
         });
         if (child && typeof child.unref === 'function') child.unref();
         return child;
@@ -176,6 +177,7 @@ function launchDetached(executable, args, dependencies = {}) {
     const child = spawnImpl('bash', ['-c', cmd], {
         detached: true,
         stdio: 'ignore',
+        env,
     });
     if (child && typeof child.unref === 'function') child.unref();
     return child;
@@ -199,6 +201,7 @@ function performRestartShutdown(dependencies = {}, options = {}) {
         spawnImpl('powershell.exe', ['-NoProfile', '-Command', script], {
             detached: true,
             stdio: 'ignore',
+            windowsHide: true,
         });
         if (observer && typeof observer.onKillComplete === 'function') observer.onKillComplete({ forced: false });
         return;
