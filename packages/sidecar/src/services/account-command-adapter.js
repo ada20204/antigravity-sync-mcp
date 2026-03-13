@@ -285,8 +285,13 @@ function createAccountCommandAdapter({
         outputChannel.appendLine('');
         outputChannel.appendLine('After restart, sign in with the new account.');
 
+        const { OPERATION_TYPES, TRIGGERS } = require('../restart-semantics');
         const requestId = `add-account-${Date.now()}`;
-        launchRestartWorker({ requestId });
+        launchRestartWorker({
+          requestId,
+          operationType: OPERATION_TYPES.RELAUNCH_WITH_AUTH_CLEAR,
+          trigger: TRIGGERS.ACCOUNT_ADD,
+        });
         closeAndQuit(vscodeApi);
       } catch (error) {
         outputChannel.appendLine(`ERROR: ${error.message}`);

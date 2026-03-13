@@ -500,8 +500,11 @@ function phase3_restart() {
                 '--port', String(getPort()),
                 '--bind-address', '127.0.0.1',
                 '--request-id', `switch-restart-${getRequestId()}`,
+                '--operation-type', 'switch_account_relaunch',
+                '--trigger', 'account_switch',
                 '--config-dir', getConfigDir(),
                 '--wait-for-cdp', 'true',
+                '--wait-exit',
                 ...getExtraArgs().flatMap((arg) => ['--extra-arg', arg]),
             ];
 

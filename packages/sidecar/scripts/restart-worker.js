@@ -106,6 +106,22 @@ function getAntigravityPid() {
     return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function getOperationType() {
+    return getRuntimeValue('operation-type') || 'relaunch_in_place';
+}
+
+function getTrigger() {
+    return getRuntimeValue('trigger') || 'manual_command';
+}
+
+function getPortSource() {
+    return getRuntimeValue('port-source') || 'unknown';
+}
+
+function getPidSource() {
+    return getRuntimeValue('pid-source') || (getAntigravityPid() ? 'provided' : 'none');
+}
+
 function validateArgs() {
     const missing = [];
     if (!getWorkspace()) missing.push('workspace');
@@ -126,7 +142,7 @@ function validateArgs() {
 
 const ABSOLUTE_TIMEOUT_MS = 60000;  // 60 秒绝对超时
 const WAIT_EXIT_TIMEOUT_MS = 12000; // 12 秒等待进程退出
-const LAUNCH_DETECT_TIMEOUT_MS = 15000; // 15 秒等待新进程出现（Windows 启动慢）
+const LAUNCH_DETECT_TIMEOUT_MS = 8000; // 8 秒等待新进程出现（macOS 通常 2-3 秒）
 const CDP_VERIFY_TIMEOUT_MS = 10000; // 10 秒 CDP 验证超时
 const POLL_INTERVAL_MS = 500;       // 轮询间隔
 
@@ -219,10 +235,76 @@ function writeResult(status, phase, error = null, extra = {}) {
     log(`Result written: ${status} at phase ${phase}`);
 }
 
+function getResultV2File() {
+    return path.join(getConfigDir(), `restart-result-v2-${getRequestId()}.json`);
+}
+
+// v2 diagnostic state accumulated during the run
+const v2Diagnostics = {
+    wait_timeout_hit: false,
+    launch_method: 'unknown',
+    auth_clear_applied: false,
+    auth_restore_applied: false,
+    cdp_verified: false,
+    errors: [],
+    warnings: [],
+    degraded_fallbacks: [],
+};
+
+function writeResultV2(status, phase, additionalFields = {}) {
+    const now = Date.now();
+    const result = {
+        schema_version: 2,
+        request_id: getRequestId(),
+        operation_type: getOperationType(),
+        trigger: getTrigger(),
+        status,
+        phase,
+        started_at: requestCreatedAt,
+        ended_at: now,
+        duration_ms: now - requestCreatedAt,
+        workspace_path: getWorkspace(),
+        endpoint: { host: getBindAddress(), port: getPort() },
+        selected_port: getPort(),
+        selected_port_source: getPortSource(),
+        resolved_pid: getAntigravityPid() || null,
+        resolved_pid_source: getPidSource(),
+        wait_strategy: getAntigravityPid() ? 'by_pid' : 'by_process_name',
+        wait_timeout_ms: WAIT_EXIT_TIMEOUT_MS,
+        wait_timeout_hit: v2Diagnostics.wait_timeout_hit,
+        launch_method: v2Diagnostics.launch_method,
+        auth_clear_applied: v2Diagnostics.auth_clear_applied,
+        auth_restore_applied: v2Diagnostics.auth_restore_applied,
+        cdp_verified: v2Diagnostics.cdp_verified,
+        timeouts_effective: {
+            wait_exit_ms: WAIT_EXIT_TIMEOUT_MS,
+            port_release_ms: process.platform === 'win32' ? 8000 : 0,
+            launch_detect_ms: LAUNCH_DETECT_TIMEOUT_MS,
+            cdp_verify_ms: CDP_VERIFY_TIMEOUT_MS,
+            absolute_ms: ABSOLUTE_TIMEOUT_MS,
+            relaunch_cooldown_ms: process.platform === 'win32' ? 1500 : 0,
+        },
+        errors: [...v2Diagnostics.errors],
+        warnings: [...v2Diagnostics.warnings],
+        degraded_fallbacks: [...v2Diagnostics.degraded_fallbacks],
+        ...additionalFields,
+    };
+
+    ensureConfigDir();
+    const v2Path = getResultV2File();
+    const tmpFile = v2Path + '.tmp';
+    fs.writeFileSync(tmpFile, JSON.stringify(result, null, 2));
+    fs.renameSync(tmpFile, v2Path);
+
+    // Continue writing v1 for backward compatibility
+    writeResult(status, phase, null, additionalFields);
+}
+
 function exitWithError(phase, error) {
     log(`ERROR at ${phase}: ${error}`);
     updateStatus(phase, 'failed', error);
-    writeResult('failed', phase, error);
+    v2Diagnostics.errors.push({ phase, message: String(error) });
+    writeResultV2('failed', phase);
     process.exit(1);
 }
 
@@ -380,10 +462,12 @@ async function waitForLaunchSignal(processPattern, dependencies = {}) {
     const started = Date.now();
 
     while (Date.now() - started < timeoutMs) {
-        if (checkProcessExistsImpl(processPattern, dependencies)) {
+        // Check CDP port first (faster and more reliable than process name matching)
+        if (checkListeningPortImpl(getPort(), dependencies)) {
             return true;
         }
-        if (platform === 'win32' && checkListeningPortImpl(getPort(), dependencies)) {
+        // Fallback to process name check
+        if (checkProcessExistsImpl(processPattern, dependencies)) {
             return true;
         }
         await delayImpl(intervalMs);
@@ -505,6 +589,8 @@ async function phase2_waitForExit() {
         }
         if (Date.now() - started >= WAIT_EXIT_TIMEOUT_MS) {
             log(`PID ${pid} still alive after timeout, continuing anyway`);
+            v2Diagnostics.wait_timeout_hit = true;
+            v2Diagnostics.warnings.push(`pid_wait_timeout: PID ${pid} still alive after ${WAIT_EXIT_TIMEOUT_MS}ms`);
         }
 
         // Wait for CDP port to be released (Electron child processes may hold it briefly)
@@ -527,6 +613,8 @@ async function phase2_waitForExit() {
     }
 
     // Fallback: check by process name/path
+    log('WARNING: No PID available, falling back to process-name wait (degraded mode)');
+    v2Diagnostics.degraded_fallbacks.push('pid_unresolved_process_name_fallback');
     const executable = getAntigravityPath();
     const processPattern = process.platform === 'win32'
         ? path.basename(executable, path.extname(executable))
@@ -538,6 +626,8 @@ async function phase2_waitForExit() {
         log('Process confirmed gone');
     } else {
         log('Process may still be running after timeout');
+        v2Diagnostics.wait_timeout_hit = true;
+        v2Diagnostics.warnings.push('process_name_wait_timeout: process may still be running');
         // Continue anyway - launch will handle it
     }
 
@@ -603,40 +693,19 @@ async function phase3_launchNewProcess() {
         let launchedVia = 'direct';
 
         if (process.platform === 'darwin') {
-            const appMatch = executable.match(/^(.+\.app)/);
-            if (appMatch) {
-                const appName = path.basename(appMatch[1], '.app');
-                const child = spawn('open', ['-a', appName, '--args', ...args], {
-                    detached: true,
-                    stdio: 'ignore',
-                    shell: false,
-                });
-                child.unref();
-                launchedVia = `open -a ${appName}`;
-                log(`Launched via '${launchedVia}'`);
-
-                let appeared = await waitForProcessAppeared(processPattern, LAUNCH_DETECT_TIMEOUT_MS);
-                if (!appeared) {
-                    log(`Process did not appear after '${launchedVia}', falling back to direct executable launch`);
-                    launchDirectly();
-                    launchedVia = 'direct fallback';
-                    appeared = await waitForProcessAppeared(processPattern, LAUNCH_DETECT_TIMEOUT_MS);
-                }
-                if (!appeared) {
-                    throw new Error(`Antigravity process did not appear after launch via ${launchedVia}`);
-                }
-                log('Antigravity process detected after launch');
-                return { processDetected: true };
-            } else {
-                launchDirectly();
-                log('Launched directly');
-            }
+            // Skip 'open -a' approach - it causes 15s timeout waiting for process detection
+            // Direct spawn is faster and more reliable
+            launchDirectly();
+            v2Diagnostics.launch_method = 'direct_spawn';
+            log('Launched directly via executable');
         } else if (process.platform === 'win32') {
             const child = launchWindowsDetached(executable, args);
             launchedVia = 'direct spawn';
+            v2Diagnostics.launch_method = 'windows_spawn';
             log(`Launched on Windows via ${launchedVia}`);
         } else {
             launchDirectly();
+            v2Diagnostics.launch_method = 'direct_spawn';
             log('Launched on Linux');
         }
 
@@ -698,20 +767,24 @@ async function main() {
 
     log('=== Antigravity Restart Worker Started ===');
     log(`Request ID: ${getRequestId()}`);
+    log(`Operation Type: ${getOperationType()}`);
+    log(`Trigger: ${getTrigger()}`);
     log(`Mode: ${coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart'}`);
     log(`Workspace: ${getWorkspace()}`);
     log(`Antigravity: ${getAntigravityPath()}`);
-    log(`Port: ${getPort()}`);
+    log(`Port: ${getPort()} (source: ${getPortSource()})`);
     log(`Bind Address: ${getBindAddress()}`);
     log(`Wait for CDP: ${getWaitForCdp()}`);
     log(`Extra Args: ${getExtraArgs().join(' ')}`);
     log(`Clear Auth: ${getClearAuth()}`);
+    log(`PID: ${getAntigravityPid() || 'none'} (source: ${getPidSource()})`);
 
     updateStatus('starting');
 
     const absoluteTimeout = setTimeout(() => {
         log('ABSOLUTE TIMEOUT REACHED');
-        writeResult('timeout', 'unknown', 'Worker exceeded 30s absolute timeout');
+        v2Diagnostics.errors.push({ phase: 'absolute_timeout', message: 'Worker exceeded absolute timeout' });
+        writeResultV2('timeout', 'unknown');
         process.exit(1);
     }, ABSOLUTE_TIMEOUT_MS);
 
@@ -764,8 +837,10 @@ async function main() {
                         try { fs.unlinkSync(backupDbPath); } catch { /* ignore */ }
                     }
                     log('Auth fields cleared successfully');
+                    v2Diagnostics.auth_clear_applied = true;
                 } catch (e) {
                     log(`WARNING: Failed to clear auth fields: ${e.message}`);
+                    v2Diagnostics.warnings.push(`auth_clear_failed: ${e.message}`);
                     // 不中断流程，继续 launch
                 }
             }
@@ -774,8 +849,10 @@ async function main() {
         const launchResult = await phase3_launchNewProcess();
         const cdpResult = await phase4_verifyCdp(launchResult);
 
+        v2Diagnostics.cdp_verified = cdpResult.cdpVerified === true;
+
         updateStatus('complete', 'success');
-        writeResult('success', 'complete', null, {
+        writeResultV2('success', 'complete', {
             port: getPort(),
             workspace: getWorkspace(),
             mode: coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart',
@@ -814,11 +891,17 @@ module.exports = {
         getBindAddress,
         getExtraArgs,
         getColdStart,
+        getOperationType,
+        getTrigger,
+        getPortSource,
+        getPidSource,
         checkProcessExists,
         checkListeningPort,
         launchWindowsDetached,
         replaceFileWithRetry,
         waitForWindowsRelaunchCooldown,
         waitForLaunchSignal,
+        getResultV2File,
+        v2Diagnostics,
     },
 };

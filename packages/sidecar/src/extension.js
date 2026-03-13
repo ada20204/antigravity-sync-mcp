@@ -50,6 +50,8 @@ const { fetchQuotaSnapshot } = require('./services/quota-service');
 const { createRegistryService } = require('./services/registry-service');
 const { createHostBridgeServer, createRemoteBridgeClient } = require('./services/bridge-service');
 const { createAccountCommandAdapter } = require('./services/account-command-adapter');
+const { resolveListeningPidForPort: resolvePidForPort } = require('./pid-resolver');
+const { selectWorkerLaunchPort: selectEndpointForWorker, getRegistryActiveCdpCandidate: findRegistryCdpCandidate } = require('./endpoint-resolver');
 const { createAccountControlService } = require('./services/account-control');
 const { createAccountControlApi } = require('./services/account-control-api');
 const { createSwitchStatusStore } = require('./services/switch-status-store');
@@ -337,23 +339,44 @@ function createAccountFeatures({
             statusStore,
             randomId: () => randomBytes(16).toString('hex'),
         }));
-        const launchRestartWorker = ({ requestId }) => {
+        const launchRestartWorker = ({ requestId, operationType, trigger }) => {
+            const { OPERATION_TYPES, TRIGGERS } = require('./restart-semantics');
             const workspacePath = getWorkspacePath();
             const cdpPort = getCdpPort();
             const configDir = accountSwitchConfigDir;
-            const pid = typeof getAntigravityPid === 'function' ? getAntigravityPid() : null;
 
             if (!workspacePath) throw new Error('workspace folder is required for restart');
             if (!Number.isFinite(cdpPort) || cdpPort <= 0) throw new Error('CDP port is required for restart');
             if (!antigravityExecutablePath) throw new Error('Antigravity executable path is required for restart');
 
+            const effectiveOperationType = operationType || OPERATION_TYPES.RELAUNCH_IN_PLACE;
+            const effectiveTrigger = trigger || TRIGGERS.MANUAL_COMMAND;
+
+            // Use unified endpoint resolver to determine port source
+            const portResult = selectEndpointForWorker({
+                action: 'restart',
+                currentCdpPort: cdpPort,
+                registryCdpPort: null,
+                allocatedPort: null,
+                fixedPort: null,
+            });
+            const portSource = portResult.source;
+
+            // Use unified PID resolver to get PID and source
+            const pidResult = resolvePidForPort(cdpPort, { retries: 1 });
+            const pid = pidResult.pid;
+            const pidSource = pidResult.source;
+
             const scriptPath = path.join(__dirname, '..', 'scripts', 'restart-worker.js');
             const args = [
                 scriptPath,
                 '--request-id', requestId,
+                '--operation-type', effectiveOperationType,
+                '--trigger', effectiveTrigger,
                 '--workspace', workspacePath,
                 '--antigravity-path', antigravityExecutablePath,
                 '--port', String(cdpPort),
+                '--port-source', portSource,
                 '--config-dir', configDir,
                 '--wait-exit',
                 '--clear-auth',
@@ -361,12 +384,12 @@ function createAccountFeatures({
                 ...getLaunchArgs().flatMap((arg) => ['--extra-arg', arg]),
             ];
             if (Number.isFinite(pid) && pid > 0) {
-                args.push('--pid', String(pid));
+                args.push('--pid', String(pid), '--pid-source', pidSource);
             }
 
             const child = spawn('node', args, { detached: true, stdio: 'ignore', windowsHide: true });
             child.unref();
-            log(`Restart worker started (pid=${child.pid}, requestId=${requestId}, antigravityPid=${pid}, cdpPort=${cdpPort})`);
+            log(`Restart worker started (operation=${effectiveOperationType}, trigger=${effectiveTrigger}, pid=${child.pid}, requestId=${requestId}, antigravityPid=${pid}, pidSource=${pidSource}, cdpPort=${cdpPort}, portSource=${portSource})`);
         };
 
         const accountCommandAdapter = activationDiagnostics.run('account:commandAdapter', () => createAccountCommandAdapter({
@@ -670,118 +693,27 @@ async function isTcpPortAvailable(host, port, timeoutMs = 600) {
     });
 }
 
-function parseWindowsNetstatListeningPid(output, port) {
-    const targetSuffix = ':' + String(port);
-    for (const rawLine of String(output || '').split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        const parts = line.split(/\s+/);
-        if (parts.length < 5) continue;
-        const localAddress = String(parts[1] || '');
-        const state = String(parts[3] || '').toUpperCase();
-        const pid = parseInt(parts[4], 10);
-        if (!localAddress.endsWith(targetSuffix)) continue;
-        if (state !== 'LISTENING') continue;
-        if (!Number.isFinite(pid) || pid <= 0) continue;
-        return pid;
-    }
-    return null;
-}
-
+// Wrapper functions for backward compatibility - delegate to new modules
 function resolveListeningPidForPort(port) {
-    if (!Number.isFinite(port) || port <= 0) {
-        return null;
-    }
-    try {
-        const { execSync } = require('child_process');
-        if (process.platform === 'win32') {
-            const out = execSync('netstat -ano -p TCP', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-            return parseWindowsNetstatListeningPid(String(out || ''), port);
-        }
-        const out = execSync('lsof -nP -iTCP:' + port + ' -sTCP:LISTEN -t', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-        const pid = parseInt(String(out || '').trim().split('\n')[0], 10);
-        return Number.isFinite(pid) && pid > 0 ? pid : null;
-    } catch {
-        return null;
-    }
+    const result = resolvePidForPort(port, { retries: 1 });
+    return result.pid;
 }
 
 function selectWorkerLaunchPort(params = {}) {
-    const { action, currentCdpPort, registryCdpPort, allocatedPort, fixedPort } = params;
-    if (action === 'restart' && Number.isFinite(currentCdpPort) && currentCdpPort > 0) {
-        return currentCdpPort;
-    }
-    if (action === 'restart' && Number.isFinite(registryCdpPort) && registryCdpPort > 0) {
-        return registryCdpPort;
-    }
-    if (Number.isFinite(allocatedPort) && allocatedPort > 0) {
-        return allocatedPort;
-    }
-    if (Number.isFinite(fixedPort) && fixedPort > 0) {
-        return fixedPort;
-    }
-    return null;
+    const result = selectEndpointForWorker(params);
+    return result.port;
 }
 
 function describeWorkerLaunchPortSource(params = {}) {
-    const { action, currentCdpPort, registryCdpPort, allocatedPort, fixedPort } = params;
-    if (action === 'restart' && Number.isFinite(currentCdpPort) && currentCdpPort > 0) {
-        return 'current';
-    }
-    if (action === 'restart' && Number.isFinite(registryCdpPort) && registryCdpPort > 0) {
-        return 'registry';
-    }
-    if (Number.isFinite(allocatedPort) && allocatedPort > 0) {
-        return 'allocated';
-    }
-    if (Number.isFinite(fixedPort) && fixedPort > 0) {
-        return 'fixed';
-    }
-    return 'unresolved';
+    const result = selectEndpointForWorker(params);
+    return result.source;
 }
 
 function getRegistryActiveCdpCandidate(registry, workspacePath, workspaceId) {
-    const normalizedWorkspacePath = normalizeWorkspacePath(workspacePath);
-    const entries = Object.entries(registry || {});
-    let bestCandidate = null;
-    for (const [key, entry] of entries) {
-        if (key === REGISTRY_CONTROL_KEY || !entry || typeof entry !== 'object') continue;
-        let matchScore = 0;
-        if (key === workspacePath) matchScore += 8;
-        if (entry.workspace_id === workspaceId) matchScore += 6;
-        if (entry.workspace_paths && entry.workspace_paths.raw === workspacePath) matchScore += 5;
-        if (entry.workspace_paths && entry.workspace_paths.normalized === normalizedWorkspacePath) matchScore += 4;
-        if (matchScore <= 0) continue;
-
-        const active = entry.cdp && entry.cdp.active && typeof entry.cdp.active === 'object'
-            ? entry.cdp.active
-            : null;
-        const host = active && active.host ? active.host : entry.ip;
-        const port = active && Number.isFinite(active.port) ? active.port : entry.port;
-        if (!Number.isFinite(port) || port <= 0) continue;
-
-        const lastActive = Number.isFinite(entry.lastActive) ? entry.lastActive : 0;
-        const stateScore = entry.state === 'ready' ? 3 : 0;
-        const activeScore = active ? 2 : 0;
-        const candidate = {
-            host: host || '127.0.0.1',
-            port,
-            source: active && active.source ? active.source : 'registry',
-            match: key === workspacePath ? 'workspace-key' : (entry.workspace_id === workspaceId ? 'workspace-id' : 'workspace-path'),
-            state: entry.state || null,
-            lastActive,
-            score: matchScore + stateScore + activeScore,
-        };
-
-        if (
-            !bestCandidate ||
-            candidate.score > bestCandidate.score ||
-            (candidate.score === bestCandidate.score && candidate.lastActive > bestCandidate.lastActive)
-        ) {
-            bestCandidate = candidate;
-        }
-    }
-    return bestCandidate;
+    return findRegistryCdpCandidate(registry, workspacePath, workspaceId, {
+        normalizeWorkspacePath,
+        registryControlKey: REGISTRY_CONTROL_KEY,
+    });
 }
 
 async function activate(context) {
@@ -1144,27 +1076,38 @@ async function activate(context) {
         }
 
         // Launch detached restart-worker instead of direct restart
+        const { OPERATION_TYPES, TRIGGERS } = require('./restart-semantics');
         const workerPath = path.join(context.extensionPath, 'scripts', 'restart-worker.js');
         const requestId = `restart-${Date.now()}`;
+        const operationType = action === 'launch'
+            ? OPERATION_TYPES.COLD_START
+            : OPERATION_TYPES.RELAUNCH_IN_PLACE;
+        const operationTrigger = trigger === 'remote-request'
+            ? TRIGGERS.REMOTE_REQUEST
+            : TRIGGERS.MANUAL_COMMAND;
         const workerArgs = [
             '--workspace', workspacePath,
             '--antigravity-path', antigravityExecutablePath,
             '--port', String(selectedPort),
+            '--port-source', selectedPortSource,
             '--bind-address', bindAddress,
             '--request-id', requestId,
+            '--operation-type', operationType,
+            '--trigger', operationTrigger,
             '--config-dir', MCP_HOME_DIR,
             '--wait-for-cdp', 'true',
         ];
 
+        let pidResult = null;
         if (action === 'launch') {
             workerArgs.push('--cold-start');
         } else {
             // restart: use wait-exit mode so the worker waits for Antigravity to exit
             // gracefully instead of actively killing it (which would kill sidecar too).
             workerArgs.push('--wait-exit');
-            const antigravityPid = resolveListeningPidForPort(selectedPort);
-            if (Number.isFinite(antigravityPid) && antigravityPid > 0) {
-                workerArgs.push('--pid', String(antigravityPid));
+            pidResult = resolvePidForPort(selectedPort, { retries: 1 });
+            if (Number.isFinite(pidResult.pid) && pidResult.pid > 0) {
+                workerArgs.push('--pid', String(pidResult.pid), '--pid-source', pidResult.source);
             }
         }
 
@@ -1176,6 +1119,8 @@ async function activate(context) {
         const launchDiagnostic = {
             action,
             trigger,
+            operation_type: operationType,
+            operation_trigger: operationTrigger,
             runtime_role: runtimeRole,
             workspace: workspacePath,
             antigravity_path: antigravityExecutablePath,
@@ -1193,7 +1138,8 @@ async function activate(context) {
             registry_cdp_match: registryCdpCandidate ? registryCdpCandidate.match : null,
             registry_cdp_state: registryCdpCandidate ? registryCdpCandidate.state : null,
             registry_cdp_last_active: registryCdpCandidate ? registryCdpCandidate.lastActive : null,
-            detected_antigravity_pid: action === 'restart' ? resolveListeningPidForPort(selectedPort) : null,
+            detected_antigravity_pid: action === 'restart' && pidResult ? pidResult.pid : null,
+            detected_antigravity_pid_source: action === 'restart' && pidResult ? pidResult.source : null,
             extra_args: [...antigravityLaunchExtraArgs],
             worker_args: [...workerArgs],
         };
@@ -2258,7 +2204,6 @@ module.exports = {
         isStrictCdpPortSpec,
         buildPortCandidateOrder,
         collectRegistryOccupiedPorts,
-        parseWindowsNetstatListeningPid,
         selectWorkerLaunchPort,
         describeWorkerLaunchPortSource,
         getRegistryActiveCdpCandidate,

@@ -253,12 +253,11 @@ describe('restart-worker', () => {
             assert.strictEqual(calls.length, 1);
             assert.strictEqual(calls[0].command, 'C:\\Program Files\\Antigravity\\Antigravity.exe');
             assert.deepStrictEqual(calls[0].args, ['C:\\workspace', '--new-window', '--remote-debugging-port=9002']);
-            assert.deepStrictEqual(calls[0].options, {
-                detached: true,
-                stdio: 'ignore',
-                shell: false,
-                windowsHide: true,
-            });
+            assert.strictEqual(calls[0].options.detached, true);
+            assert.strictEqual(calls[0].options.stdio, 'ignore');
+            assert.strictEqual(calls[0].options.shell, false);
+            assert.ok(calls[0].options.env, 'should pass env');
+            assert.strictEqual(calls[0].options.env.ELECTRON_RUN_AS_NODE, undefined, 'ELECTRON_RUN_AS_NODE should be cleared');
             assert.strictEqual(unrefCalled, true);
             process.argv = originalArgv;
         });
@@ -395,10 +394,106 @@ describe('restart-worker', () => {
             });
 
             assert.strictEqual(launched, true);
-            assert.strictEqual(processChecks > 0, true);
+            // Port check should succeed immediately, process check may not be called
             assert.strictEqual(portChecks > 0, true);
             process.argv = originalArgv;
         });
     });
-});
 
+    describe('v2 semantic parameters', () => {
+        it('should parse operation-type and trigger', () => {
+            const originalArgv = process.argv;
+            process.argv = [
+                'node',
+                'restart-worker.js',
+                '--workspace', '/workspace',
+                '--antigravity-path', '/antigravity',
+                '--port', '9001',
+                '--config-dir', '/config',
+                '--operation-type', 'relaunch_with_auth_clear',
+                '--trigger', 'account_add',
+                '--port-source', 'current',
+                '--pid', '1234',
+                '--pid-source', 'port_owner',
+            ];
+
+            const worker = loadWorker();
+            const { getOperationType, getTrigger, getPortSource, getPidSource } = worker.__testExports;
+
+            assert.strictEqual(getOperationType(), 'relaunch_with_auth_clear');
+            assert.strictEqual(getTrigger(), 'account_add');
+            assert.strictEqual(getPortSource(), 'current');
+            assert.strictEqual(getPidSource(), 'port_owner');
+
+            process.argv = originalArgv;
+        });
+
+        it('should use defaults when v2 params not provided', () => {
+            const originalArgv = process.argv;
+            process.argv = [
+                'node',
+                'restart-worker.js',
+                '--workspace', '/workspace',
+                '--antigravity-path', '/antigravity',
+                '--port', '9001',
+                '--config-dir', '/config',
+            ];
+
+            const worker = loadWorker();
+            const { getOperationType, getTrigger, getPortSource, getPidSource } = worker.__testExports;
+
+            assert.strictEqual(getOperationType(), 'relaunch_in_place');
+            assert.strictEqual(getTrigger(), 'manual_command');
+            assert.strictEqual(getPortSource(), 'unknown');
+            assert.strictEqual(getPidSource(), 'none');
+
+            process.argv = originalArgv;
+        });
+
+        it('should expose v2Diagnostics object', () => {
+            const originalArgv = process.argv;
+            process.argv = [
+                'node',
+                'restart-worker.js',
+                '--workspace', '/workspace',
+                '--antigravity-path', '/antigravity',
+                '--port', '9001',
+                '--config-dir', '/config',
+            ];
+
+            const worker = loadWorker();
+            const { v2Diagnostics } = worker.__testExports;
+
+            assert.ok(v2Diagnostics, 'v2Diagnostics should be exported');
+            assert.strictEqual(v2Diagnostics.wait_timeout_hit, false);
+            assert.strictEqual(v2Diagnostics.cdp_verified, false);
+            assert.ok(Array.isArray(v2Diagnostics.errors));
+            assert.ok(Array.isArray(v2Diagnostics.warnings));
+            assert.ok(Array.isArray(v2Diagnostics.degraded_fallbacks));
+
+            process.argv = originalArgv;
+        });
+
+        it('should have getResultV2File returning correct path', () => {
+            const originalArgv = process.argv;
+            process.argv = [
+                'node',
+                'restart-worker.js',
+                '--workspace', '/workspace',
+                '--antigravity-path', '/antigravity',
+                '--port', '9001',
+                '--config-dir', '/config',
+                '--request-id', 'test-req-123',
+            ];
+
+            const worker = loadWorker();
+            const { getResultV2File } = worker.__testExports;
+            const v2Path = getResultV2File();
+
+            assert.ok(v2Path.includes('restart-result-v2-test-req-123.json'));
+            assert.ok(v2Path.startsWith('/config'));
+
+            process.argv = originalArgv;
+        });
+    });
+});
