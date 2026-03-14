@@ -237,11 +237,13 @@
         }
     },
     "scripts": {
+        "build:server": "cd ../server && npm run build",
         "sync-server-runtime": "node scripts/sync-server-runtime.mjs",
-        "prepackage": "npm run sync-server-runtime",
+        "prepackage": "npm run build:server && npm run sync-server-runtime",
         "package": "vsce package --no-dependencies",
         "verify": "./verify-vsix.sh",
         "build": "echo 'Sidecar is plain JavaScript, no build needed'",
+        "clean": "rm -rf server-runtime/dist server-runtime/node_modules vendor/ws vendor/core",
         "test": "node -c src/extension.js && node -c src/structured-log.js && node -c src/bridge-auth.js && echo 'Sidecar syntax check passed'"
     },
     "dependencies": {

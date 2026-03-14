@@ -1,6 +1,0 @@
-{
-  "type": "module",
-  "dependencies": {
-    "@antigravity-mcp/core": "*"
-  }
-}

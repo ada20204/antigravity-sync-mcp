@@ -10,3 +10,9 @@ build/
 .claude/settings.local.json
 .DS_Store
 .agents/
+
+# Sidecar compiled artifacts (built during packaging)
+packages/sidecar/server-runtime/dist/
+packages/sidecar/server-runtime/node_modules/
+packages/sidecar/vendor/ws/
+packages/sidecar/vendor/core/
