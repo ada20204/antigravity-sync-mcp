@@ -372,7 +372,34 @@ async function phase1_waitExit() {
     }
 
     if (!actualPid) {
-        log('Antigravity process not found, assuming already exited');
+        // No valid PID — wait for CDP port to be released (Antigravity holds it while running)
+        const port = parseInt(getPort(), 10);
+        if (Number.isFinite(port) && port > 0) {
+            log(`No valid PID, waiting for CDP port ${port} to be released...`);
+            const startTime = Date.now();
+            let released = false;
+            while (Date.now() - startTime < WAIT_EXIT_TIMEOUT_MS) {
+                if (!checkPortListening(port)) {
+                    released = true;
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+            }
+            if (released) {
+                log(`CDP port ${port} released, Antigravity has exited`);
+                // On Windows, Electron child processes may still hold file handles briefly
+                // after the main process releases the CDP port. Wait for them to settle.
+                // Increased to 3s based on testing with slow systems and high load scenarios.
+                if (process.platform === 'win32') {
+                    log('Windows: waiting 3s for file handles to be released...');
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                }
+            } else {
+                log(`WARNING: CDP port ${port} still listening after ${WAIT_EXIT_TIMEOUT_MS}ms timeout, proceeding anyway`);
+            }
+        } else {
+            log('No valid PID or port, assuming Antigravity already exited');
+        }
         return;
     }
 
@@ -394,7 +421,74 @@ async function phase1_waitExit() {
 // Phase 2: 修改 DB
 // ============================================================================
 
+function checkPortListening(port) {
+    try {
+        const { execSync } = require('child_process');
+        if (process.platform === 'win32') {
+            const out = execSync('netstat -ano -p TCP', {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                windowsHide: true,
+            });
+            const targetSuffix = ':' + String(port);
+            return String(out).split(/\r?\n/).some(rawLine => {
+                const parts = rawLine.trim().split(/\s+/);
+                return parts.length >= 5 &&
+                    String(parts[1] || '').endsWith(targetSuffix) &&
+                    String(parts[3] || '').toUpperCase() === 'LISTENING';
+            });
+        }
+        execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN`, { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 function findAntigravityPid() {
+    const port = parseInt(getPort(), 10);
+    if (!Number.isFinite(port) || port <= 0) {
+        log('findAntigravityPid: invalid port');
+        return null;
+    }
+
+    try {
+        const { execSync } = require('child_process');
+        if (process.platform === 'win32') {
+            const out = execSync('netstat -ano -p TCP', {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                windowsHide: true,
+            });
+            const targetSuffix = ':' + String(port);
+            for (const rawLine of String(out || '').split(/\r?\n/)) {
+                const parts = rawLine.trim().split(/\s+/);
+                if (parts.length < 5) continue;
+                const localAddress = String(parts[1] || '');
+                const state = String(parts[3] || '').toUpperCase();
+                const pid = parseInt(parts[4], 10);
+                if (!localAddress.endsWith(targetSuffix)) continue;
+                if (state !== 'LISTENING') continue;
+                if (!Number.isFinite(pid) || pid <= 0) continue;
+                log(`findAntigravityPid: found PID ${pid} for port ${port}`);
+                return pid;
+            }
+            log(`findAntigravityPid: no process found listening on port ${port}`);
+        } else {
+            const out = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`, {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const pid = parseInt(String(out || '').trim().split('\n')[0], 10);
+            if (Number.isFinite(pid) && pid > 0) {
+                log(`findAntigravityPid: found PID ${pid} for port ${port}`);
+                return pid;
+            }
+            log(`findAntigravityPid: no process found listening on port ${port}`);
+        }
+    } catch (err) {
+        log(`findAntigravityPid: error - ${err.message || err}`);
+    }
     return null;
 }
 
@@ -452,12 +546,40 @@ function phase2_modifyDb() {
             const afterUser = queryValue(db, DB_KEYS.USER_STATUS);
             log(`DB after restore (in-memory): auth=${summarizeAuthValue(afterAuth)} oauth=${afterOauth ? `len=${afterOauth.length}` : 'null'} user=${afterUser ? `len=${afterUser.length}` : 'null'}`);
 
-            // 导出并原子写入
+            // 导出并原子写入（带重试，Windows 上文件可能短暂被占用）
             const data = db.export();
             const buffer = Buffer.from(data);
             const tmpPath = getDbPath() + '.tmp';
             fs.writeFileSync(tmpPath, buffer);
-            fs.renameSync(tmpPath, getDbPath());
+
+            // Retry logic: reduced to 8 attempts to keep total time reasonable
+            // Total retry window: 8 × 500ms = 4s (combined with 3s wait = 7s total)
+            const RENAME_RETRIES = 8;
+            const RENAME_RETRY_DELAY_MS = 500;
+            let lastRenameError = null;
+            for (let attempt = 0; attempt <= RENAME_RETRIES; attempt++) {
+                try {
+                    fs.renameSync(tmpPath, getDbPath());
+                    lastRenameError = null;
+                    if (attempt > 0) {
+                        log(`rename succeeded on attempt ${attempt + 1}`);
+                    }
+                    break;
+                } catch (renameErr) {
+                    lastRenameError = renameErr;
+                    const code = renameErr && renameErr.code;
+                    if ((code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') && attempt < RENAME_RETRIES) {
+                        log(`rename attempt ${attempt + 1} failed (${code}), retrying in ${RENAME_RETRY_DELAY_MS}ms...`);
+                        const end = Date.now() + RENAME_RETRY_DELAY_MS;
+                        while (Date.now() < end) { /* busy wait */ }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (lastRenameError) {
+                throw lastRenameError;
+            }
 
             const persistedBuffer = fs.readFileSync(getDbPath());
             log(`Database file size after modify: ${persistedBuffer.length} bytes`);

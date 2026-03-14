@@ -491,7 +491,12 @@ describe('restart-worker', () => {
             const v2Path = getResultV2File();
 
             assert.ok(v2Path.includes('restart-result-v2-test-req-123.json'));
-            assert.ok(v2Path.startsWith('/config'));
+            // Verify path is in config directory (platform-aware)
+            const normalized = v2Path.replace(/\\/g, '/');
+            assert.ok(
+                normalized.includes('/config/') || normalized.endsWith('/config'),
+                `expected path to be in config directory, got: ${v2Path}`
+            );
 
             process.argv = originalArgv;
         });

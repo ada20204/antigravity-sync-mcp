@@ -94,12 +94,12 @@ test('windows launch spawns the executable directly', () => {
   assert.equal(recorder.calls.length, 1);
   assert.equal(recorder.calls[0].command, 'C:\\Program Files\\Antigravity\\Antigravity.exe');
   assert.deepEqual(recorder.calls[0].args, ['C:\\workspace', '--new-window', '--remote-debugging-port=9002']);
-  assert.deepEqual(recorder.calls[0].options, {
-    detached: true,
-    stdio: 'ignore',
-    shell: false,
-    windowsHide: true,
-  });
+  const opts = recorder.calls[0].options;
+  assert.equal(opts.detached, true);
+  assert.equal(opts.stdio, 'ignore');
+  assert.equal(opts.shell, false);
+  assert.equal(opts.windowsHide, true);
+  assert.ok(!opts.env?.ELECTRON_RUN_AS_NODE, 'ELECTRON_RUN_AS_NODE should be removed from env');
   assert.equal(recorder.calls[0].child.unrefCalled, true);
 });
 

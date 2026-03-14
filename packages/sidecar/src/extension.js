@@ -213,7 +213,7 @@ function createSwitchWorkerLauncher({
                 '--db-path', dbPath,
                 '--backup-dir', backupDir,
                 '--antigravity-path', antigravityExecutablePath,
-                '--pid', String(antigravityPid),
+                ...(Number.isFinite(antigravityPid) && antigravityPid > 0 ? ['--pid', String(antigravityPid)] : []),
                 '--config-dir', configDir,
                 ...launchArgs.flatMap((arg) => ['--extra-arg', arg]),
             ];
@@ -330,7 +330,8 @@ function createAccountFeatures({
             getConfigDir: () => accountSwitchConfigDir,
             getAntigravityPid: () => {
                 const pid = typeof getAntigravityPid === 'function' ? getAntigravityPid() : null;
-                return Number(pid);
+                const n = Number(pid);
+                return Number.isFinite(n) && n > 0 ? n : null;
             },
         }));
         const accountControl = activationDiagnostics.run('account:control', () => createAccountControlService({

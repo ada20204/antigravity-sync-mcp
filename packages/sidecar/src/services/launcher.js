@@ -164,6 +164,7 @@ function launchDetached(executable, args, dependencies = {}) {
             detached: true,
             stdio: 'ignore',
             shell: false,
+            windowsHide: true,
             env,
         });
         if (child && typeof child.unref === 'function') child.unref();
