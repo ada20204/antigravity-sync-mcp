@@ -65,6 +65,7 @@ import {
     summarizeQuota,
 } from "./quota-query.js";
 import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
+import { resolveActiveCascadeId } from "./ls-client.js";
 import { launchAntigravityForWorkspace } from "./launch-antigravity.js";
 
 // --- Constants ---
@@ -74,7 +75,7 @@ const POLL_INTERVAL = 1000; // 1 second
 const MAX_TIMEOUT = 5 * 60 * 1000; // 5 minutes default
 const DISCOVER_TIMEOUT_MS = 10000;
 const CONNECT_TIMEOUT_MS = 15000;
-const INJECT_TIMEOUT_MS = 10000;
+const INJECT_TIMEOUT_MS = 125000; // polling up to 120s inside injectMessage, +5s buffer
 const EXTRACT_TIMEOUT_MS = 10000;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
@@ -623,10 +624,37 @@ async function handleAskAntigravity(
         );
         log(`[${task.id}] Message injected via ${injectResult.method}`);
 
-        // 5. Initialize LS-first wait engine.
+        // 5. Wait for a NEW cascadeId to appear (different from pre-inject snapshot).
+        //    This ensures we don't monitor a stale, already-terminal cascade.
+        const preCascadeId = await resolveActiveCascadeId(discovered).catch(() => undefined);
+        if (preCascadeId) {
+            log(`[${task.id}] Pre-inject cascadeId: ${preCascadeId}`);
+        }
+
+        const CASCADE_SETTLE_TIMEOUT = 15000;
+        const CASCADE_SETTLE_POLL = 500;
+        let newCascadeId: string | undefined;
+        if (preCascadeId) {
+            const settleStart = Date.now();
+            while (Date.now() - settleStart < CASCADE_SETTLE_TIMEOUT) {
+                const current = await resolveActiveCascadeId(discovered).catch(() => undefined);
+                if (current && current !== preCascadeId) {
+                    newCascadeId = current;
+                    log(`[${task.id}] New cascadeId detected: ${newCascadeId} (waited ${Date.now() - settleStart}ms)`);
+                    break;
+                }
+                await new Promise((r) => setTimeout(r, CASCADE_SETTLE_POLL));
+            }
+            if (!newCascadeId) {
+                log(`[${task.id}] New cascadeId not detected within ${CASCADE_SETTLE_TIMEOUT}ms, falling back to DOM wait.`);
+            }
+        }
+
+        // 6. Initialize LS-first wait engine.
         waitEngine = await createWaitStateEngine({
             discovered,
             log: (message) => log(`[${task.id}] ${message}`),
+            cascadeIdOverride: newCascadeId,
         });
         if (waitEngine.cascadeId) {
             log(`[${task.id}] Active cascade resolved: ${waitEngine.cascadeId}`);

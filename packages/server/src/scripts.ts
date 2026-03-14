@@ -212,11 +212,15 @@ export async function applyModeAndModelSelection(
  */
 export async function injectMessage(
     cdp: CDPConnection,
-    text: string
-): Promise<{ ok: boolean; method?: string; reason?: string; error?: string }> {
+    text: string,
+    options: { maxWaitMs?: number; pollIntervalMs?: number } = {}
+): Promise<{ ok: boolean; method?: string; reason?: string; error?: string; waitedMs?: number }> {
+    const maxWaitMs = options.maxWaitMs || 120000;
+    const pollIntervalMs = options.pollIntervalMs || 500;
+    const startTime = Date.now();
     const safeText = JSON.stringify(text);
 
-    const expression = `(async () => {
+    const tryInjectExpression = `(async () => {
     // Check if AI is already generating
     const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
     if (cancel && cancel.offsetParent !== null) return { ok: false, reason: "busy" };
@@ -257,8 +261,22 @@ export async function injectMessage(
     return { ok: true, method: "enter_keypress" };
   })()`;
 
-    const result = await evaluateInAllContexts(cdp, expression, true);
-    return result || { ok: false, reason: "no_context" };
+    // Poll until the editor is ready or timeout
+    while (true) {
+        const result = await evaluateInAllContexts(cdp, tryInjectExpression, true);
+        const waitedMs = Date.now() - startTime;
+        if (!result) {
+            return { ok: false, reason: "no_context", waitedMs };
+        }
+        if (result.ok) {
+            return { ...result, waitedMs };
+        }
+        // Editor busy or not found — keep polling if time allows
+        if (waitedMs >= maxWaitMs) {
+            return { ok: false, reason: result.reason || result.error || "timeout", waitedMs };
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
 }
 
 // --- pollCompletionStatus ---
@@ -322,6 +340,19 @@ export async function extractLatestResponse(
       if (/^Fast\\s+[\\s\\S]*\\s+Send$/.test(trimmed)) return true;
       return false;
     };
+    // Filter out generation-in-progress placeholder text from Antigravity UI
+    const isGeneratingPlaceholder = (text) => {
+      if (!text) return false;
+      const trimmed = text.trim().toLowerCase();
+      if (/^generating\.{0,3}$/.test(trimmed)) return true;
+      if (/^thinking\.{0,3}$/.test(trimmed)) return true;
+      if (/^loading\.{0,3}$/.test(trimmed)) return true;
+      if (/^writing\.{0,3}$/.test(trimmed)) return true;
+      if (/^searching\.{0,3}$/.test(trimmed)) return true;
+      if (/^analyzing\.{0,3}$/.test(trimmed)) return true;
+      if (/^processing\.{0,3}$/.test(trimmed)) return true;
+      return false;
+    };
 
     // Find the main chat container
     const container = document.getElementById('conversation')
@@ -334,7 +365,7 @@ export async function extractLatestResponse(
     if (messages.length > 0) {
       const last = messages[messages.length - 1];
       const text = last.innerText || last.textContent || '';
-      if (!isComposerText(text)) return { text };
+      if (!isComposerText(text) && !isGeneratingPlaceholder(text)) return { text };
     }
 
     // Strategy 2: Look for all top-level message-like divs, skipping composer-like blocks.
@@ -342,7 +373,7 @@ export async function extractLatestResponse(
     for (let i = allBlocks.length - 1; i >= 0; i--) {
       const last = allBlocks[i];
       const text = last.innerText || last.textContent || '';
-      if (text.length > 20 && !isComposerText(text)) {
+      if (text.length > 20 && !isComposerText(text) && !isGeneratingPlaceholder(text)) {
         return { text };
       }
     }

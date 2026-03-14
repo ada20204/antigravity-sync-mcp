@@ -34,13 +34,14 @@ function createDomFallbackEngine(note: string): WaitStateEngine {
 export async function createWaitStateEngine(params: {
     discovered: DiscoveredCDP;
     log?: (message: string) => void;
+    cascadeIdOverride?: string;
 }): Promise<WaitStateEngine> {
-    const { discovered, log } = params;
+    const { discovered, log, cascadeIdOverride } = params;
     if (!resolveLsEndpoint(discovered)) {
         return createDomFallbackEngine("ls_endpoint_unavailable");
     }
 
-    const cascadeId = await resolveActiveCascadeId(discovered).catch(() => undefined);
+    const cascadeId = cascadeIdOverride || await resolveActiveCascadeId(discovered).catch(() => undefined);
     if (!cascadeId) {
         return createDomFallbackEngine("cascade_id_unavailable");
     }
