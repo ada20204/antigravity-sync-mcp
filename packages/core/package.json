@@ -1,6 +1,6 @@
 {
   "name": "@antigravity-mcp/core",
-  "version": "0.1.0",
+  "version": "0.1.14",
   "description": "Shared types and utilities for Antigravity MCP",
   "type": "module",
   "main": "dist/cjs/index.cjs",
