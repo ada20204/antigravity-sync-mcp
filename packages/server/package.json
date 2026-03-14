@@ -8,9 +8,10 @@
     "antigravity-mcp": "build/dist/index.js"
   },
   "scripts": {
+    "prebuild": "node scripts/generate-version.mjs",
     "build": "tsc",
     "start": "node build/dist/index.js",
-    "dev": "tsc && node build/dist/index.js",
+    "dev": "node scripts/generate-version.mjs && tsc && node build/dist/index.js",
     "test": "node --test test/*.test.mjs"
   },
   "keywords": [

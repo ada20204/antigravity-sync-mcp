@@ -16,3 +16,6 @@ packages/sidecar/server-runtime/dist/
 packages/sidecar/server-runtime/node_modules/
 packages/sidecar/vendor/ws/
 packages/sidecar/vendor/core/
+
+# Auto-generated version files
+packages/server/src/version.ts

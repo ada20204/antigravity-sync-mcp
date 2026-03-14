@@ -57,6 +57,7 @@ import {
     withRetry,
     withTimeout,
 } from "./task-runtime.js";
+import { VERSION, BUILD_TIME, COMMIT_SHA, FULL_VERSION } from "./version.js";
 import { selectModelWithQuotaPolicy } from "./quota-policy.js";
 import {
     fetchLiveQuotaSnapshot,
@@ -79,7 +80,6 @@ const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
 const COLD_START_WAIT_MS = 45_000;
 const REGISTRY_FILE = getRegistryFilePath();
-const VERSION = "0.1.2";
 const activeAskTasks = new Map<string, AskTask>();
 const activeWorkspaceRoutes = new Map<string, { wsUrl: string; workspaceKey: string }>();
 const NO_WORKSPACE_GUIDANCE =
