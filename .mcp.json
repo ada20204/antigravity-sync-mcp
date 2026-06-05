@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "antigravity-mcp": {
+      "command": "node",
+      "args": ["packages/server/build/dist/index.js"]
+    }
+  }
+}
