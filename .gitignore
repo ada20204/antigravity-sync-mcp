@@ -19,3 +19,5 @@ packages/sidecar/vendor/core/
 
 # Auto-generated version files
 packages/server/src/version.ts
+# stray nested copy from sidecar packaging script
+packages/sidecar/packages/
