@@ -28,7 +28,10 @@ const extensionVendorWsDir = join(extensionVendorDir, 'ws');
 const extensionVendorCoreDir = join(extensionVendorDir, 'core');
 const hoistedNodeModules = join(workspaceRoot, 'node_modules');
 
-const RUNTIME_DEPS = ['ws'];
+// node-pty: native PTY dep required by the CLI path (agy-cli.ts). Its full dir
+// (incl. prebuilds/) must ship in the VSIX or the bundled server-runtime fails
+// to load with ERR_MODULE_NOT_FOUND.
+const RUNTIME_DEPS = ['ws', 'node-pty'];
 const SDK_RUNTIME_PACKAGE = '@modelcontextprotocol/sdk';
 const SERVER_RUNTIME_PACKAGE_JSON = {
     type: 'module',
