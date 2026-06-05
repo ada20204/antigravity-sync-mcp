@@ -1,8 +1,16 @@
 {
   "mcpServers": {
-    "antigravity-mcp": {
+    "antigravity-cdp": {
       "command": "node",
-      "args": ["packages/server/build/dist/index.js"]
+      "args": [
+        "packages/server/build/dist/index.js"
+      ]
+    },
+    "antigravity-cli": {
+      "command": "node",
+      "args": [
+        "packages/cli-server/build/dist/index.js"
+      ]
     }
   }
 }

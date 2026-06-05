@@ -1,23 +1,22 @@
 {
-  "name": "antigravity-mcp-server",
+  "name": "@antigravity-mcp/cli-server",
   "version": "0.1.15",
-  "description": "MCP server that bridges external AI agents to Antigravity via CDP",
+  "description": "Standalone MCP server driving the Antigravity CLI (agy) via PTY",
   "type": "module",
   "main": "build/dist/index.js",
   "bin": {
-    "antigravity-mcp": "build/dist/index.js"
+    "antigravity-cli-mcp": "build/dist/index.js"
   },
   "scripts": {
-    "prebuild": "node scripts/generate-version.mjs",
     "build": "tsc",
     "start": "node build/dist/index.js",
-    "dev": "node scripts/generate-version.mjs && tsc && node build/dist/index.js",
     "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "mcp",
     "antigravity",
-    "cdp",
+    "agy",
+    "cli",
     "ai",
     "agent"
   ],
@@ -28,17 +27,14 @@
   },
   "files": [
     "build/dist/",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "dependencies": {
-    "@antigravity-mcp/core": "*",
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "ws": "^8.19.0"
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",
-    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   }
 }

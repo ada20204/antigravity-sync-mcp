@@ -67,8 +67,6 @@ import {
 import { createWaitStateEngine, type WaitStateEngine } from "./wait-state.js";
 import { resolveActiveCascadeId } from "./ls-client.js";
 import { launchAntigravityForWorkspace } from "./launch-antigravity.js";
-import { runAgyPrompt, AgyAuthRequiredError, buildChangeModePrompt } from "./agy-cli.js";
-import { startTask, pollTask, cancelTask, listTasks } from "./agy-tasks.js";
 
 // --- Constants ---
 
@@ -378,90 +376,6 @@ const TOOLS: Tool[] = [
                     description: "If true (default), kill any existing Antigravity process before launching so the new one gets CDP debug flags",
                 },
             },
-        },
-    },
-    {
-        name: "ask-antigravity-cli",
-        description:
-            "Send a prompt to the Antigravity CLI (`agy`) in headless print mode and return its reply. " +
-            "This path does NOT use the Antigravity IDE/CDP — it drives the `agy` binary directly via a PTY, " +
-            "so no workspace needs to be open. Use it as a lightweight fallback when the IDE is unavailable.\n\n" +
-            "Requirements: `agy` must be installed and already logged in (run `agy` once in a terminal to complete " +
-            "Google OAuth). Note: the CLI has no model-selection flag, so the active CLI model is used as-is.",
-        inputSchema: {
-            type: "object" as const,
-            properties: {
-                prompt: {
-                    type: "string",
-                    description: "The task or question to send to the Antigravity CLI. Use @path to reference files.",
-                },
-                sandbox: {
-                    type: "boolean",
-                    description:
-                        "Pass agy --sandbox (terminal restrictions). NOTE: reported to be a no-op in -p/print " +
-                        "mode (does not constrain filesystem/network) — not a real security boundary (default false)",
-                },
-                changeMode: {
-                    type: "boolean",
-                    description:
-                        "Return structured OLD/NEW edit blocks (directly applicable) instead of free-form text (default false)",
-                },
-                timeoutMs: {
-                    type: "number",
-                    description: "Optional hard timeout in milliseconds (default 300000 = 5 minutes)",
-                },
-            },
-            required: ["prompt"],
-        },
-    },
-    {
-        name: "start-antigravity-task",
-        description:
-            "Start a long-running Antigravity CLI task asynchronously and return a runId immediately " +
-            "(non-blocking). Use this instead of ask-antigravity-cli for deep tasks that may take minutes. " +
-            "Poll with poll-antigravity-task to get progress/result; cancel with cancel-antigravity-task. " +
-            "Runs are globally serialized (agy is not concurrency-safe), so a started task may sit queued briefly.",
-        inputSchema: {
-            type: "object" as const,
-            properties: {
-                prompt: { type: "string", description: "The task to send to the Antigravity CLI. Use @path to reference files." },
-                sandbox: { type: "boolean", description: "Pass agy --sandbox (reported no-op for -p; not a security boundary)" },
-                changeMode: { type: "boolean", description: "Return structured OLD/NEW edit blocks instead of free-form text" },
-                timeoutMs: { type: "number", description: "Optional hard timeout in ms (default 300000 = 5 minutes)" },
-            },
-            required: ["prompt"],
-        },
-    },
-    {
-        name: "poll-antigravity-task",
-        description:
-            "Poll an async Antigravity task by runId. While running: returns status + a rolling tail of output. " +
-            "Once finished: returns status (done/failed/cancelled) + full result or error.",
-        inputSchema: {
-            type: "object" as const,
-            properties: {
-                runId: { type: "string", description: "The runId returned by start-antigravity-task" },
-            },
-            required: ["runId"],
-        },
-    },
-    {
-        name: "cancel-antigravity-task",
-        description: "Cancel an async Antigravity task by runId (force-kills the agy process group if running).",
-        inputSchema: {
-            type: "object" as const,
-            properties: {
-                runId: { type: "string", description: "The runId returned by start-antigravity-task" },
-            },
-            required: ["runId"],
-        },
-    },
-    {
-        name: "list-antigravity-tasks",
-        description: "List Antigravity CLI tasks (running + recent finished, newest-bounded LRU).",
-        inputSchema: {
-            type: "object" as const,
-            properties: {},
         },
     },
 ];
@@ -1072,89 +986,6 @@ async function handleQuotaStatus(params: {
     return lines.join("\n");
 }
 
-async function handleAskAntigravityCli(
-    params: { prompt: string; timeoutMs?: number; sandbox?: boolean; changeMode?: boolean },
-    progressToken?: string | number
-): Promise<string> {
-    await sendProgressNotification(progressToken, 0, "🚀 Starting Antigravity CLI...");
-    let progress = 5;
-    let lastNotify = Date.now();
-    const effectivePrompt = params.changeMode
-        ? buildChangeModePrompt(params.prompt)
-        : params.prompt;
-    const result = await runAgyPrompt(effectivePrompt, {
-        sandbox: params.sandbox === true,
-        hardTimeoutMs:
-            typeof params.timeoutMs === "number" && params.timeoutMs > 0
-                ? params.timeoutMs
-                : undefined,
-        onProgress: () => {
-            const now = Date.now();
-            if (now - lastNotify < 2000) return;
-            lastNotify = now;
-            progress = Math.min(progress + 5, 90);
-            void sendProgressNotification(progressToken, progress, "🧠 Antigravity CLI is responding...");
-        },
-    });
-    await sendProgressNotification(progressToken, 100, "✅ Done");
-    return result.timedOut
-        ? `[Antigravity CLI timed out — partial reply below]\n\n${result.text}`
-        : result.text;
-}
-
-function handleStartTask(params: {
-    prompt: string;
-    sandbox?: boolean;
-    changeMode?: boolean;
-    timeoutMs?: number;
-}): string {
-    const effectivePrompt = params.changeMode ? buildChangeModePrompt(params.prompt) : params.prompt;
-    const runId = startTask(effectivePrompt, {
-        sandbox: params.sandbox === true,
-        hardTimeoutMs:
-            typeof params.timeoutMs === "number" && params.timeoutMs > 0 ? params.timeoutMs : undefined,
-    });
-    return JSON.stringify(
-        { runId, status: "started", hint: "Poll with poll-antigravity-task using this runId." },
-        null,
-        2
-    );
-}
-
-function handlePollTask(runId: string): string {
-    const poll = pollTask(runId);
-    if (!poll) return JSON.stringify({ runId, error: "not_found" }, null, 2);
-    if (poll.status === "queued" || poll.status === "running") {
-        return JSON.stringify({ runId, status: poll.status, tail: poll.tail ?? "" }, null, 2);
-    }
-    return JSON.stringify(
-        {
-            runId,
-            status: poll.status,
-            result: poll.result?.text,
-            timedOut: poll.result?.timedOut,
-            truncated: poll.result?.truncated,
-            error: poll.error,
-        },
-        null,
-        2
-    );
-}
-
-function handleCancelTask(runId: string): string {
-    return JSON.stringify({ runId, outcome: cancelTask(runId) }, null, 2);
-}
-
-function handleListTasks(): string {
-    const tasks = listTasks().map((t) => ({
-        id: t.id,
-        status: t.status,
-        startedAt: t.startedAt,
-        finishedAt: t.finishedAt,
-    }));
-    return JSON.stringify({ count: tasks.length, tasks }, null, 2);
-}
-
 // --- Parse CLI Args ---
 const argvTargetDirIndex = process.argv.indexOf("--target-dir");
 const globalTargetDir = argvTargetDirIndex !== -1 ? process.argv[argvTargetDirIndex + 1] : undefined;
@@ -1225,51 +1056,6 @@ server.setRequestHandler(
                         mode: typeof args.mode === "string" ? args.mode : undefined,
                         requestedModel: typeof args.requestedModel === "string" ? args.requestedModel : undefined,
                     });
-                    break;
-
-                case "ask-antigravity-cli":
-                    if (!args.prompt || typeof args.prompt !== "string") {
-                        throw new Error("Missing required argument: prompt");
-                    }
-                    resultText = await handleAskAntigravityCli(
-                        {
-                            prompt: args.prompt,
-                            sandbox: args.sandbox === true,
-                            changeMode: args.changeMode === true,
-                            timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
-                        },
-                        progressToken
-                    );
-                    break;
-
-                case "start-antigravity-task":
-                    if (!args.prompt || typeof args.prompt !== "string") {
-                        throw new Error("Missing required argument: prompt");
-                    }
-                    resultText = handleStartTask({
-                        prompt: args.prompt,
-                        sandbox: args.sandbox === true,
-                        changeMode: args.changeMode === true,
-                        timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
-                    });
-                    break;
-
-                case "poll-antigravity-task":
-                    if (!args.runId || typeof args.runId !== "string") {
-                        throw new Error("Missing required argument: runId");
-                    }
-                    resultText = handlePollTask(args.runId);
-                    break;
-
-                case "cancel-antigravity-task":
-                    if (!args.runId || typeof args.runId !== "string") {
-                        throw new Error("Missing required argument: runId");
-                    }
-                    resultText = handleCancelTask(args.runId);
-                    break;
-
-                case "list-antigravity-tasks":
-                    resultText = handleListTasks();
                     break;
 
                 case "launch-antigravity":
