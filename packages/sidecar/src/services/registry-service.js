@@ -42,10 +42,18 @@ function createRegistryService(params) {
             fs.mkdirSync(registryDir, { recursive: true });
         }
         registry[registryControlKey] = getControlRecord(registry);
-        fs.writeFileSync(registryFile, JSON.stringify(registry, null, 2), 'utf-8');
+        // Atomic write: tmp + rename so concurrent readers (the server) never
+        // observe a half-written file. chmod the tmp before rename so the final
+        // file keeps 0o600 atomically.
+        const tmp = `${registryFile}.${process.pid}.${Date.now()}.tmp`;
         try {
-            fs.chmodSync(registryFile, 0o600);
-        } catch { }
+            fs.writeFileSync(tmp, JSON.stringify(registry, null, 2), 'utf-8');
+            try { fs.chmodSync(tmp, 0o600); } catch { }
+            fs.renameSync(tmp, registryFile);
+        } catch (e) {
+            try { fs.unlinkSync(tmp); } catch { }
+            throw e;
+        }
     }
 
     return {

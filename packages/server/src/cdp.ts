@@ -11,6 +11,7 @@ import path from "path";
 import WebSocket from "ws";
 import {
     readRegistryObject as _readRegistryObject,
+    writeRegistryObjectAtomic,
     getRegistryFilePath,
     computeWorkspaceId,
     COMPATIBLE_SCHEMA_VERSIONS,
@@ -73,7 +74,8 @@ function isFreshTimestamp(value: unknown, maxAgeMs: number): boolean {
 
 function writeRegistryObject(registryFile: string, payload: Record<string, unknown>): void {
     try {
-        fs.writeFileSync(registryFile, JSON.stringify(payload, null, 2), "utf-8");
+        // Atomic write (tmp + rename) so concurrent readers never see a torn file.
+        writeRegistryObjectAtomic(payload, registryFile);
     } catch (e) {
         console.error(`[CDP] Failed to write registry '${registryFile}': ${(e as Error).message}`);
     }

@@ -7,6 +7,7 @@
  */
 
 import fs from "fs";
+import path from "path";
 import { getRegistryPath } from "../platform/paths.js";
 
 /**
@@ -33,4 +34,33 @@ export function readRegistryObject(): Record<string, unknown> | null {
         console.error(`[registry-io] Failed to read registry '${registryFile}': ${(e as Error).message}`);
     }
     return null;
+}
+
+/**
+ * Atomically writes the registry JSON. Writes to a temp file in the same
+ * directory then renames over the target — rename is atomic on a single
+ * filesystem, so readers never observe a half-written file (no torn reads).
+ *
+ * NOTE: this prevents torn reads, NOT lost updates between concurrent writers.
+ * The registry currently has multiple writers (sidecar + server __control__);
+ * single-writer separation is a separate follow-up.
+ */
+export function writeRegistryObjectAtomic(
+    registry: Record<string, unknown>,
+    targetFile?: string
+): void {
+    const registryFile = targetFile ?? getRegistryFilePath();
+    fs.mkdirSync(path.dirname(registryFile), { recursive: true });
+    const tmp = `${registryFile}.${process.pid}.${Date.now()}.tmp`;
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf-8");
+        fs.renameSync(tmp, registryFile);
+    } catch (e) {
+        try {
+            fs.unlinkSync(tmp);
+        } catch {
+            // temp already gone
+        }
+        throw e;
+    }
 }
