@@ -69,8 +69,8 @@ const TOOLS: Tool[] = [
                 sandbox: {
                     type: "boolean",
                     description:
-                        "Pass agy --sandbox (terminal restrictions). NOTE: reported to be a no-op in -p/print " +
-                        "mode (does not constrain filesystem/network) — not a real security boundary (default false)",
+                        "REFUSED: agy --sandbox is a no-op in -p/print mode (no filesystem/network isolation). " +
+                        "Passing true returns an error rather than giving a false sense of security.",
                 },
                 changeMode: {
                     type: "boolean",
@@ -96,7 +96,7 @@ const TOOLS: Tool[] = [
             type: "object" as const,
             properties: {
                 prompt: { type: "string", description: "The task to send to the Antigravity CLI. Use @path to reference files." },
-                sandbox: { type: "boolean", description: "Pass agy --sandbox (reported no-op for -p; not a security boundary)" },
+                sandbox: { type: "boolean", description: "REFUSED: agy --sandbox is a no-op in -p mode; passing true returns an error" },
                 changeMode: { type: "boolean", description: "Return structured OLD/NEW edit blocks instead of free-form text" },
                 timeoutMs: { type: "number", description: "Optional hard timeout in ms (default 300000 = 5 minutes)" },
             },

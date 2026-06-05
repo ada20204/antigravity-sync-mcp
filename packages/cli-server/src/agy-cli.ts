@@ -162,13 +162,29 @@ export class AgyCancelledError extends Error {
     }
 }
 
+export class AgySandboxUnsupportedError extends Error {
+    constructor() {
+        super(
+            "agy --sandbox is a no-op in -p/print mode (does not constrain filesystem or network). " +
+            "Refusing to pass it so callers are not given a false sense of isolation. " +
+            "Remove the sandbox flag, or run agy under a real OS-level sandbox."
+        );
+        this.name = "AgySandboxUnsupportedError";
+    }
+}
+
 /** Handle for an in-flight agy run: its eventual result plus a cancel trigger. */
 export interface AgyRunHandle {
     promise: Promise<AgyRunResult>;
     cancel: () => void;
 }
 
-const DEFAULT_IDLE_MS = 3000;
+// agy pauses between reasoning and the final result (observed ~3s, but unbounded
+// for deep tasks / tool calls). A short idle window mis-fires completion mid-task
+// and truncates the answer. 12s covers common pauses; deep tasks should use the
+// async task model with a larger timeout. (Idle is heuristic — see README; a
+// transcript-based completion signal is the eventual root fix.)
+const DEFAULT_IDLE_MS = 12000;
 const DEFAULT_HARD_MS = 5 * 60 * 1000;
 const PRINT_TIMEOUT_MARGIN_S = 10;
 const MAX_OUTPUT_CHARS = 10 * 1024 * 1024; // 10MB cap; stop appending past this to avoid OOM
@@ -211,6 +227,11 @@ function acquireAgyLock(): Promise<() => void> {
  * cancel() works both while queued (skips execution) and while running (kills agy).
  */
 export function enqueueAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle {
+    // Refuse --sandbox up front: it is a no-op in -p mode, so accepting it would
+    // hand back a false sense of isolation. Fail loud instead of pretending.
+    if (options.sandbox) {
+        return { promise: Promise.reject(new AgySandboxUnsupportedError()), cancel: () => {} };
+    }
     let cancelled = false;
     let activeCancel: (() => void) | null = null;
     const cancel = () => {
@@ -254,9 +275,8 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         ensureSpawnHelperExecutable();
         const agyBin = resolveAgyBin();
         checkAgyVersion(agyBin);
-        const agyArgs = ["--print-timeout", `${printTimeoutS}s`];
-        if (options.sandbox) agyArgs.push("--sandbox");
-        agyArgs.push("-p", prompt);
+        // sandbox is refused at enqueue time (see enqueueAgyRun) — never passed here.
+        const agyArgs = ["--print-timeout", `${printTimeoutS}s`, "-p", prompt];
         let child: pty.IPty;
         try {
             child = pty.spawn(agyBin, agyArgs, {

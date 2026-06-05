@@ -7,6 +7,8 @@ import {
     AgyAuthRequiredError,
     AgyTimeoutError,
     buildChangeModePrompt,
+    enqueueAgyRun,
+    AgySandboxUnsupportedError,
 } from "../build/dist/agy-cli.js";
 
 test("stripAnsi removes CSI color/cursor sequences", () => {
@@ -72,4 +74,11 @@ test("buildChangeModePrompt normalizes file: refs to @path", () => {
     assert.match(out, /@src\/app\.ts/);
     assert.match(out, /@lib\/x\.ts/);
     assert.doesNotMatch(out, /file:src/);
+});
+
+test("enqueueAgyRun refuses sandbox=true with AgySandboxUnsupportedError", async () => {
+    await assert.rejects(
+        enqueueAgyRun("hi", { sandbox: true }).promise,
+        (err) => err instanceof AgySandboxUnsupportedError
+    );
 });
