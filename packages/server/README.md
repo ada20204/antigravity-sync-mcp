@@ -61,6 +61,28 @@ Add to your MCP config:
 | `quota-status` | Query quota status for models/prompt credits. Prefers live LS query and falls back to registry snapshot; also prints policy recommendation preview for model routing. |
 | `launch-antigravity` | Launch Antigravity in a new window with CDP flags and optionally wait for CDP readiness. |
 
+## CLI Tools (Antigravity CLI / `agy`)
+
+A second, independent path that drives the **Antigravity CLI binary (`agy`)** directly via a PTY — no IDE/CDP needed. Use when the IDE is unavailable or for headless/scripted calls. Requires `agy` installed and already logged in (run `agy` once in a terminal to complete Google OAuth).
+
+| Tool | Description |
+|------|-------------|
+| `ask-antigravity-cli` | Synchronous: send a prompt to `agy -p`, block until done, return the reply. Params: `prompt` (required), `sandbox`, `changeMode`, `timeoutMs`. |
+| `start-antigravity-task` | Asynchronous: start a long task, return a `runId` immediately (non-blocking). Same params as `ask-antigravity-cli`. |
+| `poll-antigravity-task` | Poll a task by `runId`: rolling output tail while running, full result once finished. |
+| `cancel-antigravity-task` | Cancel a task by `runId` (force-kills the agy process group). |
+| `list-antigravity-tasks` | List running + recent finished tasks (LRU-bounded). |
+
+Behavior & design notes:
+- **PTY-driven**: `agy -p` produces no output and hangs under a non-TTY pipe; this path runs it inside a pseudo-terminal (node-pty), no external interpreter needed.
+- **Serialized**: `agy` is not concurrency-safe (it rewrites shared `~/.gemini/antigravity-cli` index files), so all runs go through a global mutex — concurrent calls queue rather than race.
+- **Completion**: process self-exit or output idle (~3s), whichever first; hard timeout (default 5 min) as backstop.
+- **Process cleanup**: SIGKILL on the whole process group (agy ignores gentle signals and may fork children).
+- **`changeMode`**: wraps the prompt to return structured `OLD/NEW` edit blocks (mirrors gemini-mcp-tool).
+- **`sandbox`**: passes `agy --sandbox`, but it is reported to be a **no-op in `-p` mode** (does not constrain filesystem/network) — **not a security boundary**.
+- **Model**: agy CLI has no model flag; the active CLI model is used as-is (change via `agy` TUI `/model`).
+- Output is capped at 10 MB; the result's `truncated` flag is set if exceeded.
+
 ## Configuration
 
 | Environment Variable | Default | Description |
@@ -72,6 +94,7 @@ Add to your MCP config:
 | `ANTIGRAVITY_LAUNCH_PORT` | `9000` | Port used when server cold-starts Antigravity |
 | `ANTIGRAVITY_LAUNCH_EXTRA_ARGS` | empty | Extra args appended on cold-start launch |
 | `ANTIGRAVITY_REGISTRY_FILE` | `~/.config/antigravity-mcp/registry.json` | Override registry file path used for discovery/control requests |
+| `AGY_BIN` | auto-resolve | Absolute path to the `agy` binary for the CLI tools (falls back to PATH + `~/.local/bin`) |
 
 `ask-antigravity` input schema:
 - `prompt` (required): prompt text

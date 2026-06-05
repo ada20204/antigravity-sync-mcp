@@ -1,3 +1,8 @@
+// This is the CDP path's task model (remote IDE session over CDP). It tracks
+// fine-grained connection phases. The CLI path has a separate, deliberately
+// simpler model — TaskStatus / TaskEntry in agy-tasks.ts. The two are NOT a
+// duplicate to unify: their lifecycles genuinely differ (note "completed" here
+// vs "done" there).
 export type AskTaskStatus =
     | "queued"
     | "discovering"
