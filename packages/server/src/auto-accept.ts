@@ -49,7 +49,13 @@ export async function autoAcceptPoll(
     const BANNED_COMMANDS = ${bannedJson};
 
     // --- Selectors (from 00_selectors.js) ---
-    const BUTTON_SELECTORS = ['button', '.bg-ide-button-background', '[class*="button"]'];
+    // Antigravity's "Accept all" edit-bar is a <div class="...cursor-pointer">,
+    // not a <button>, so the cursor-pointer selector is required to catch it.
+    const BUTTON_SELECTORS = ['button', '.bg-ide-button-background', '[class*="button"]', '[class*="cursor-pointer"]'];
+
+    // Candidates inside these containers are chrome/preview/menu surfaces, not
+    // accept controls, and must never be auto-clicked.
+    const EXCLUDED_CONTAINERS = '.monaco-editor, .terminal-wrapper, .terminal-container, .part.editor, [class*="command"], [class*="preview"], [class*="output"], [class*="history"], [class*="menubar"], .monaco-menu, .statusbar, .titlebar-container, [aria-label="Application Menu"]';
 
     let clicked = 0;
     let blocked = 0;
@@ -87,10 +93,21 @@ export async function autoAcceptPoll(
       // Must match at least one accept pattern
       if (!ACCEPT_PATTERNS.some(p => text.includes(p))) return false;
 
-      // Visibility check
+      // Never click candidates living inside editor/terminal/menu chrome.
+      try { if (el.closest(EXCLUDED_CONTAINERS)) return false; } catch (e) {}
+
+      // The cursor-pointer selector also matches non-button divs (e.g. sidebar
+      // chat titles). A bare single accept word on such a div is too risky, so
+      // require a real <button>; multi-word phrases like "accept all" may pass.
+      const isRealButton = el.tagName === 'BUTTON';
+      const isMultiWord = text.split(/\\s+/).filter(Boolean).length > 1;
+      if (!isRealButton && !isMultiWord) return false;
+
+      // Visibility check (zero-size elements are not clickable targets)
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
-      return style.display !== 'none' && rect.width > 0 && style.pointerEvents !== 'none' && !el.disabled;
+      if (rect.width === 0 || rect.height === 0) return false;
+      return style.display !== 'none' && style.pointerEvents !== 'none' && !el.disabled;
     }
 
     // --- Banned command detection (from 03_clicking.js) ---

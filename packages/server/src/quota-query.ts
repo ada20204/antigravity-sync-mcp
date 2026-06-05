@@ -56,7 +56,7 @@ export function extractActiveModelId(conversation: unknown): string | null {
     return candidate || null;
 }
 
-function normalizeQuotaSnapshot(data: unknown, activeModelId: string | null): RegistryQuotaSnapshot {
+export function normalizeQuotaSnapshot(data: unknown, activeModelId: string | null): RegistryQuotaSnapshot {
     const root = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
     const userStatus = (root.userStatus && typeof root.userStatus === "object" ? root.userStatus : {}) as Record<string, unknown>;
     const planStatus = (userStatus.planStatus && typeof userStatus.planStatus === "object" ? userStatus.planStatus : {}) as Record<string, unknown>;
@@ -76,26 +76,36 @@ function normalizeQuotaSnapshot(data: unknown, activeModelId: string | null): Re
         };
     }
 
+    // snake_case fallback at every level: a camelCase-only read here empties
+    // models[] before the leaf-field fallbacks below ever run, so the container
+    // keys must tolerate the newer wire format too.
+    const cascadeModelConfigDataRaw = userStatus.cascadeModelConfigData ?? userStatus.cascade_model_config_data;
     const cascadeModelConfigData =
-        userStatus.cascadeModelConfigData && typeof userStatus.cascadeModelConfigData === "object"
-            ? (userStatus.cascadeModelConfigData as Record<string, unknown>)
+        cascadeModelConfigDataRaw && typeof cascadeModelConfigDataRaw === "object"
+            ? (cascadeModelConfigDataRaw as Record<string, unknown>)
             : {};
-    const clientModelConfigs = Array.isArray(cascadeModelConfigData.clientModelConfigs)
-        ? cascadeModelConfigData.clientModelConfigs
-        : [];
+    const clientModelConfigsRaw = cascadeModelConfigData.clientModelConfigs ?? cascadeModelConfigData.client_model_configs;
+    const clientModelConfigs = Array.isArray(clientModelConfigsRaw) ? clientModelConfigsRaw : [];
 
     const now = Date.now();
     const models: RegistryQuotaModel[] = clientModelConfigs
         .filter((item) => item && typeof item === "object")
         .map((item) => item as Record<string, unknown>)
-        .filter((item) => item.quotaInfo && typeof item.quotaInfo === "object")
+        // Upstream AntigravityQuota >=v1.1.1 may emit snake_case keys; read both
+        // casings so models[] is not silently emptied on the newer wire format.
+        .filter((item) => {
+            const quotaInfo = item.quotaInfo ?? item.quota_info;
+            return quotaInfo && typeof quotaInfo === "object";
+        })
         .map((item) => {
-            const quotaInfo = item.quotaInfo as Record<string, unknown>;
-            const resetTime = typeof quotaInfo.resetTime === "string" ? quotaInfo.resetTime : "";
+            const quotaInfo = (item.quotaInfo ?? item.quota_info) as Record<string, unknown>;
+            const resetTimeRaw = quotaInfo.resetTime ?? quotaInfo.reset_time;
+            const resetTime = typeof resetTimeRaw === "string" ? resetTimeRaw : "";
             const resetMs = resetTime ? Date.parse(resetTime) : NaN;
+            const modelOrAliasRaw = item.modelOrAlias ?? item.model_or_alias;
             const modelOrAlias =
-                item.modelOrAlias && typeof item.modelOrAlias === "object"
-                    ? (item.modelOrAlias as Record<string, unknown>)
+                modelOrAliasRaw && typeof modelOrAliasRaw === "object"
+                    ? (modelOrAliasRaw as Record<string, unknown>)
                     : {};
             const modelId = String(
                 (typeof modelOrAlias.model === "string" && modelOrAlias.model) ||
@@ -103,7 +113,8 @@ function normalizeQuotaSnapshot(data: unknown, activeModelId: string | null): Re
                     ""
             );
             const label = String((typeof item.label === "string" && item.label) || "");
-            const remainingFraction = typeof quotaInfo.remainingFraction === "number" ? quotaInfo.remainingFraction : undefined;
+            const remainingFractionRaw = quotaInfo.remainingFraction ?? quotaInfo.remaining_fraction;
+            const remainingFraction = typeof remainingFractionRaw === "number" ? remainingFractionRaw : undefined;
             const selectedHint =
                 item.isSelected === true ||
                 item.selected === true ||

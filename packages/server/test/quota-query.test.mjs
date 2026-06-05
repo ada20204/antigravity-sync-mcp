@@ -5,6 +5,7 @@ import {
   extractActiveModelId,
   summarizeQuota,
   formatQuotaReport,
+  normalizeQuotaSnapshot,
 } from "../build/dist/quota-query.js";
 
 test("extractActiveModelId resolves nested selectedModel id", () => {
@@ -52,4 +53,51 @@ test("formatQuotaReport renders source and tracked models", () => {
   assert.match(text, /targetDir: \/tmp\/demo/);
   assert.match(text, /models:/);
   assert.match(text, /gemini-3-flash/);
+});
+
+test("normalizeQuotaSnapshot reads camelCase wire format", () => {
+  const snap = normalizeQuotaSnapshot(
+    {
+      userStatus: {
+        cascadeModelConfigData: {
+          clientModelConfigs: [
+            {
+              label: "Gemini 3 Flash",
+              modelOrAlias: { model: "gemini-3-flash" },
+              quotaInfo: { remainingFraction: 0.5, resetTime: "2026-06-05T00:00:00Z" },
+            },
+          ],
+        },
+      },
+    },
+    null
+  );
+  assert.equal(snap.models.length, 1);
+  assert.equal(snap.models[0].modelId, "gemini-3-flash");
+  assert.equal(snap.models[0].remainingFraction, 0.5);
+  assert.equal(snap.models[0].resetTime, "2026-06-05T00:00:00Z");
+});
+
+test("normalizeQuotaSnapshot reads snake_case wire format (upstream >=v1.1.1)", () => {
+  const snap = normalizeQuotaSnapshot(
+    {
+      userStatus: {
+        cascade_model_config_data: {
+          client_model_configs: [
+            {
+              label: "Gemini 3 Flash",
+              model_or_alias: { model: "gemini-3-flash" },
+              quota_info: { remaining_fraction: 0.5, reset_time: "2026-06-05T00:00:00Z" },
+            },
+          ],
+        },
+      },
+    },
+    null
+  );
+  // Without snake_case fallback this array would be empty → quota "unavailable".
+  assert.equal(snap.models.length, 1);
+  assert.equal(snap.models[0].modelId, "gemini-3-flash");
+  assert.equal(snap.models[0].remainingFraction, 0.5);
+  assert.equal(snap.models[0].resetTime, "2026-06-05T00:00:00Z");
 });

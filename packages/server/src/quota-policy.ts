@@ -39,6 +39,11 @@ const MODE_CHAINS: Record<AskMode, string[]> = {
 };
 
 const MODEL_ALIASES: Record<string, string[]> = {
+    // Distinct from gemini-3-flash: substring matching treats "gemini 3 flash"
+    // and "gemini 3.5 flash" as different tokens, so 3.5 needs its own family or
+    // its quota goes untracked. Chain placement (fast chain) intentionally left
+    // unchanged until the 3.5 Flash tier's relative speed/quota is confirmed.
+    "gemini-3.5-flash": ["gemini-3.5-flash", "gemini 3.5 flash", "3.5 flash"],
     "gemini-3-flash": ["gemini-3-flash", "gemini 3 flash", "flash"],
     "gemini-3-pro-low": [
         "gemini-3-pro-low",

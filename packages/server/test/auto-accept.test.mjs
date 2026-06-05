@@ -49,3 +49,40 @@ test('does not click cancel button regardless', () => {
 test('clicks accept button with no nearby command', () => {
     assert.deepEqual(wouldClick('Accept', ''), { click: true, blocked: false });
 });
+
+// --- Mirror the isAcceptButton gate (container/zero-rect/div-vs-button) ---
+function isAcceptCandidate({ text, tagName = 'DIV', inExcludedContainer = false, width = 10, height = 10 }) {
+    const t = text.trim().toLowerCase();
+    if (t.length === 0 || t.length > 50) return false;
+    if (REJECT_PATTERNS.some(r => t.includes(r))) return false;
+    if (!ACCEPT_PATTERNS.some(p => t.includes(p))) return false;
+    if (inExcludedContainer) return false;
+    const isRealButton = tagName === 'BUTTON';
+    const isMultiWord = t.split(/\s+/).filter(Boolean).length > 1;
+    if (!isRealButton && !isMultiWord) return false;
+    if (width === 0 || height === 0) return false;
+    return true;
+}
+
+test('rejects bare single-word accept on a non-button div', () => {
+    assert.equal(isAcceptCandidate({ text: 'Run', tagName: 'DIV' }), false);
+    assert.equal(isAcceptCandidate({ text: 'Accept', tagName: 'DIV' }), false);
+});
+
+test('allows bare single-word accept on a real button', () => {
+    assert.equal(isAcceptCandidate({ text: 'Accept', tagName: 'BUTTON' }), true);
+});
+
+test('allows multi-word accept phrase on a div (cursor-pointer edit bar)', () => {
+    assert.equal(isAcceptCandidate({ text: 'Accept all', tagName: 'DIV' }), true);
+});
+
+test('rejects candidates inside excluded chrome containers', () => {
+    assert.equal(isAcceptCandidate({ text: 'Accept all', tagName: 'DIV', inExcludedContainer: true }), false);
+    assert.equal(isAcceptCandidate({ text: 'Run', tagName: 'BUTTON', inExcludedContainer: true }), false);
+});
+
+test('rejects zero-size candidates', () => {
+    assert.equal(isAcceptCandidate({ text: 'Accept', tagName: 'BUTTON', width: 0, height: 10 }), false);
+    assert.equal(isAcceptCandidate({ text: 'Accept', tagName: 'BUTTON', width: 10, height: 0 }), false);
+});

@@ -125,3 +125,37 @@ test('selectModelWithQuotaPolicy matches real registry full snapshot', () => {
   assert.equal(result.selectedModel, 'opus-4.6');
   assert.equal(result.staleQuota, false);
 });
+
+test('selectModelWithQuotaPolicy resolves requested "gemini 3.5 flash" to its own family', () => {
+  const now = Date.now();
+  const result = selectModelWithQuotaPolicy({
+    mode: 'fast',
+    requestedModel: 'gemini 3.5 flash',
+    quota: { timestamp: now, models: [] },
+    nowMs: now,
+  });
+
+  // 3.5 flash must not collapse into gemini-3-flash; quota unknown → selected.
+  assert.equal(result.selectedModel, 'gemini-3.5-flash');
+});
+
+test('selectModelWithQuotaPolicy tracks "Gemini 3.5 Flash" label quota distinctly from 3 Flash', () => {
+  const now = Date.now();
+  const result = selectModelWithQuotaPolicy({
+    mode: 'fast',
+    requestedModel: 'gemini-3.5-flash',
+    quota: {
+      timestamp: now,
+      models: [
+        { modelId: 'MODEL_PLACEHOLDER_M40', label: 'Gemini 3.5 Flash (High)', remainingFraction: 0 },
+      ],
+    },
+    nowMs: now,
+  });
+
+  // 3.5 flash exhausted via its own label → skipped, not silently untracked.
+  assert.ok(
+    result.skipped.some((s) => s.model === 'gemini-3.5-flash'),
+    'expected gemini-3.5-flash to be skipped on exhaustion'
+  );
+});
