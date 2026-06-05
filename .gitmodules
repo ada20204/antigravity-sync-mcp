@@ -22,3 +22,12 @@
 [submodule "references/zero-gravity"]
 	path = references/zero-gravity
 	url = https://github.com/zhe-gu/zero-gravity
+[submodule "references/Claude-Code-Antigravity-CLI-MCP-Server"]
+	path = references/Claude-Code-Antigravity-CLI-MCP-Server
+	url = https://github.com/SinanTufekci/Claude-Code-Antigravity-CLI-MCP-Server
+[submodule "references/antigravity-cli-mcp"]
+	path = references/antigravity-cli-mcp
+	url = https://github.com/bill-kopp-ai-dev/antigravity-cli-mcp
+[submodule "references/agy-mcp-server"]
+	path = references/agy-mcp-server
+	url = https://github.com/toonPt0473/agy-mcp-server
