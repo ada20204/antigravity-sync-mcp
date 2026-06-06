@@ -1,9 +1,9 @@
 /**
  * Smoke tests for the agy CLI process-driver layer, using a FAKE agy binary
- * (no real agy, no quota). Covers the runtime behavior the pure-logic unit
- * tests can't: PTY spawn, idle completion, global-mutex serialization, async
+ * (no real agy, no quota). Covers runtime behavior the pure-logic tests can't:
+ * subprocess spawn, process-exit completion, global-mutex serialization, async
  * task lifecycle, and cancellation. AGY_BIN points at a shell stub that prints
- * a reply then sleeps (mimicking agy not self-exiting under a PTY).
+ * a reply then self-exits (mimicking agy with stdin closed).
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -11,6 +11,8 @@ import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "fs";
 import os from "os";
 import path from "path";
 
+// SLOW -> long-running (for cancel); DELAY -> ~1s (for measurable serialization);
+// default -> print and exit immediately (mimics agy self-exit on completion).
 const FAKE_SCRIPT = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "1.0.5"; exit 0; fi
 prompt=""
@@ -21,7 +23,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 printf 'FAKE_REPLY:%s\\n' "$prompt"
-sleep 30
+case "$prompt" in
+  *SLOW*) sleep 30 ;;
+  *DELAY*) sleep 1 ;;
+esac
 `;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -47,8 +52,8 @@ after(() => {
     } catch {}
 });
 
-test("runAgyPrompt returns cleaned reply from fake agy (PTY + idle completion)", async () => {
-    const r = await cli.runAgyPrompt("hello", { idleMs: 400, hardTimeoutMs: 20000 });
+test("runAgyPrompt returns cleaned reply (subprocess + self-exit completion)", async () => {
+    const r = await cli.runAgyPrompt("hello", { hardTimeoutMs: 20000 });
     assert.match(r.text, /FAKE_REPLY:hello/);
     assert.equal(r.timedOut, false);
 });
@@ -56,17 +61,17 @@ test("runAgyPrompt returns cleaned reply from fake agy (PTY + idle completion)",
 test("runAgyPrompt serializes concurrent calls via global mutex", async () => {
     const t0 = Date.now();
     await Promise.all([
-        cli.runAgyPrompt("a", { idleMs: 400, hardTimeoutMs: 20000 }),
-        cli.runAgyPrompt("b", { idleMs: 400, hardTimeoutMs: 20000 }),
+        cli.runAgyPrompt("aDELAY", { hardTimeoutMs: 20000 }),
+        cli.runAgyPrompt("bDELAY", { hardTimeoutMs: 20000 }),
     ]);
     const elapsed = Date.now() - t0;
-    // Each run is ~(spawn + 400ms idle). Serialized => ~2x; parallel would be ~1x.
-    assert.ok(elapsed > 800, `expected serialized (>800ms), got ${elapsed}ms`);
+    // Each DELAY run sleeps ~1s before exiting. Serialized => ~2s; parallel ~1s.
+    assert.ok(elapsed > 1800, `expected serialized (>1800ms), got ${elapsed}ms`);
 });
 
 test("startTask lifecycle: queued/running -> done with result", async () => {
     tasks.__resetTasksForTest();
-    const id = tasks.startTask("xyz", { idleMs: 400, hardTimeoutMs: 20000 });
+    const id = tasks.startTask("xyz", { hardTimeoutMs: 20000 });
     let p;
     for (let i = 0; i < 60; i++) {
         await sleep(200);
@@ -79,8 +84,7 @@ test("startTask lifecycle: queued/running -> done with result", async () => {
 
 test("cancelTask cancels a running task and reports cancelled", async () => {
     tasks.__resetTasksForTest();
-    // Large idle so the task stays running (fake outputs immediately, then sleeps).
-    const id = tasks.startTask("slow", { idleMs: 8000, hardTimeoutMs: 30000 });
+    const id = tasks.startTask("SLOW", { hardTimeoutMs: 30000 });
     let running = false;
     for (let i = 0; i < 20; i++) {
         await sleep(150);

@@ -1,27 +1,22 @@
 /**
  * agy-cli — drive the Antigravity CLI (`agy`) in print mode and capture its reply.
  *
- * Why a PTY is required (and gemini-mcp-tool gets away without one):
- * `agy -p` writes nothing and never exits when stdin/stdout are not a TTY — it
- * only produces output under a real pseudo-terminal, unlike gemini CLI which
- * supports headless pipes. Even under a PTY, agy keeps running after printing
- * its answer, so we detect completion by output going idle, then kill it.
- *
- * Uses node-pty (a Node addon) to keep this a pure-TypeScript implementation
- * with no external interpreter at runtime.
+ * Runs `agy -p` as a plain subprocess with stdin closed (stdio "ignore" = EOF).
+ * With a clean end-of-input, agy prints its full reply to stdout and SELF-EXITS
+ * on completion — that process exit is a deterministic completion signal, so no
+ * pseudo-terminal and no idle heuristic are needed. (Closing stdin is the key;
+ * the earlier "non-TTY hangs / empty stdout" symptom was a missing stdin EOF.)
  */
 
-import * as pty from "node-pty";
-import { execFile } from "child_process";
-import { existsSync, statSync, chmodSync } from "fs";
-import { createRequire } from "module";
+import { spawn, execFile } from "child_process";
+import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 
 // Last agy version this wrapper was verified against. agy ships a private,
 // fast-moving format; warn (once, non-blocking) if the local binary differs so
 // breakage from upstream changes is loud rather than silent.
-const VERIFIED_AGY_VERSION = "1.0.5";
+const VERIFIED_AGY_VERSION = "1.0.6";
 let versionChecked = false;
 
 function logAgy(message: string): void {
@@ -41,40 +36,14 @@ function checkAgyVersion(bin: string): void {
         if (version && version !== VERIFIED_AGY_VERSION) {
             logAgy(
                 `WARNING: agy ${version} differs from verified ${VERIFIED_AGY_VERSION}; ` +
-                "PTY/print behavior may have changed."
+                "print behavior may have changed."
             );
         }
     });
 }
 
 /**
- * node-pty ships a prebuilt `spawn-helper`, but npm extraction can drop its
- * executable bit, which makes pty.spawn fail with "posix_spawnp failed". Restore
- * the bit best-effort before the first spawn so deploys self-heal after install.
- */
-let spawnHelperChecked = false;
-function ensureSpawnHelperExecutable(): void {
-    if (spawnHelperChecked || process.platform === "win32") return;
-    spawnHelperChecked = true;
-    try {
-        const requireFromHere = createRequire(import.meta.url);
-        const ptyRoot = path.resolve(path.dirname(requireFromHere.resolve("node-pty")), "..");
-        const helper = path.join(
-            ptyRoot,
-            "prebuilds",
-            `${process.platform}-${process.arch}`,
-            "spawn-helper"
-        );
-        if (existsSync(helper) && !(statSync(helper).mode & 0o111)) {
-            chmodSync(helper, 0o755);
-        }
-    } catch {
-        // best-effort; spawn will surface a clear error if the helper is unusable
-    }
-}
-
-/**
- * Resolve the `agy` executable. node-pty does not use a shell, so a bare "agy"
+ * Resolve the `agy` executable. spawn does not use a shell, so a bare "agy"
  * fails unless it is on the launching process's PATH — which often excludes
  * ~/.local/bin under a GUI-launched MCP host. Honor AGY_BIN, then search PATH
  * plus common install dirs.
@@ -113,8 +82,6 @@ export function stripAnsi(text: string): string {
 }
 
 export interface AgyRunOptions {
-    /** Idle window (ms) with no new output before the reply is considered complete. */
-    idleMs?: number;
     /** Hard ceiling (ms) for the whole run. */
     hardTimeoutMs?: number;
     /**
@@ -179,12 +146,6 @@ export interface AgyRunHandle {
     cancel: () => void;
 }
 
-// agy pauses between reasoning and the final result (observed ~3s, but unbounded
-// for deep tasks / tool calls). A short idle window mis-fires completion mid-task
-// and truncates the answer. 12s covers common pauses; deep tasks should use the
-// async task model with a larger timeout. (Idle is heuristic — see README; a
-// transcript-based completion signal is the eventual root fix.)
-const DEFAULT_IDLE_MS = 12000;
 const DEFAULT_HARD_MS = 5 * 60 * 1000;
 const PRINT_TIMEOUT_MARGIN_S = 10;
 const MAX_OUTPUT_CHARS = 10 * 1024 * 1024; // 10MB cap; stop appending past this to avoid OOM
@@ -266,29 +227,28 @@ export function runAgyPrompt(prompt: string, options: AgyRunOptions = {}): Promi
  * global concurrency guard is never bypassed.
  */
 function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle {
-    const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     const hardMs = options.hardTimeoutMs ?? DEFAULT_HARD_MS;
     const printTimeoutS = Math.max(5, Math.ceil(hardMs / 1000) - PRINT_TIMEOUT_MARGIN_S);
 
     let cancelImpl: () => void = () => {};
     const promise = new Promise<AgyRunResult>((resolve, reject) => {
-        ensureSpawnHelperExecutable();
         const agyBin = resolveAgyBin();
         checkAgyVersion(agyBin);
-        // sandbox is refused at enqueue time (see enqueueAgyRun) — never passed here.
+        // sandbox refused at enqueue time. stdin is closed (ignore = EOF) so agy
+        // gets a clean end-of-input and SELF-EXITS on completion — that process
+        // exit is our deterministic completion signal. No idle heuristic, no PTY.
         const agyArgs = ["--print-timeout", `${printTimeoutS}s`, "-p", prompt];
-        let child: pty.IPty;
+        let child: ReturnType<typeof spawn>;
         try {
-            child = pty.spawn(agyBin, agyArgs, {
-                name: "xterm-color",
-                cols: 120,
-                rows: 40,
-                env: process.env as Record<string, string>,
+            child = spawn(agyBin, agyArgs, {
+                stdio: ["ignore", "pipe", "pipe"],
+                detached: true, // own process group, so -pid kills agy + its children
+                env: process.env,
             });
         } catch (error) {
             reject(
                 new Error(
-                    `Failed to spawn agy via PTY (resolved bin: ${agyBin}): ${(error as Error).message}. ` +
+                    `Failed to spawn agy (resolved bin: ${agyBin}): ${(error as Error).message}. ` +
                     "Ensure agy is installed, or set AGY_BIN to its absolute path."
                 )
             );
@@ -297,16 +257,12 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
 
         let raw = "";
         let settled = false;
-        let sawOutput = false;
-        let lastDataAt = Date.now();
         let timedOut = false;
         let truncated = false;
         let cancelled = false;
 
-        // agy ignores gentle signals (node-pty's default SIGHUP leaves it running),
-        // so go straight to SIGKILL. agy may fork children (git, language tools);
-        // node-pty children are session leaders (pgid == pid), so kill the whole
-        // process group via -pid first, then the leader + raw pid as backstops.
+        // agy may fork children (git, language tools). Spawned detached, so kill
+        // the whole process group via -pid, then the pid itself as a backstop.
         const forceKill = () => {
             const pid = child.pid;
             if (pid) {
@@ -321,21 +277,12 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
             } catch {
                 // already gone
             }
-            if (pid) {
-                try {
-                    process.kill(pid, "SIGKILL");
-                } catch {
-                    // already gone
-                }
-            }
         };
 
         const finish = () => {
             if (settled) return;
             settled = true;
-            clearInterval(idleTimer);
             clearTimeout(hardTimer);
-            forceKill();
             if (cancelled) {
                 reject(new AgyCancelledError());
                 return;
@@ -348,21 +295,18 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         };
         cancelImpl = () => {
             cancelled = true;
+            forceKill();
             finish();
         };
 
-        const idleTimer = setInterval(() => {
-            if (sawOutput && Date.now() - lastDataAt > idleMs) finish();
-        }, 500);
-
         const hardTimer = setTimeout(() => {
             timedOut = true;
+            forceKill();
             finish();
         }, hardMs);
 
-        child.onData((chunk: string) => {
-            sawOutput = true;
-            lastDataAt = Date.now();
+        child.stdout?.on("data", (d: Buffer) => {
+            const chunk = d.toString();
             if (!truncated) {
                 raw += chunk;
                 if (raw.length > MAX_OUTPUT_CHARS) {
@@ -373,9 +317,20 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
             options.onProgress?.(chunk);
         });
 
-        child.onExit(() => {
-            finish();
+        child.on("error", (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(hardTimer);
+            reject(
+                new Error(
+                    `Failed to spawn agy (resolved bin: ${agyBin}): ${error.message}. ` +
+                    "Ensure agy is installed, or set AGY_BIN to its absolute path."
+                )
+            );
         });
+
+        // Process exit = deterministic completion. No idle heuristic needed.
+        child.on("close", () => finish());
     });
 
     return { promise, cancel: () => cancelImpl() };
