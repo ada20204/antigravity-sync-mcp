@@ -1,7 +1,7 @@
 {
   "name": "@antigravity-mcp/cli-server",
   "version": "0.1.15",
-  "description": "Standalone MCP server driving the Antigravity CLI (agy) via PTY",
+  "description": "Standalone MCP server driving the Antigravity CLI (agy) in headless print mode",
   "type": "module",
   "main": "build/dist/index.js",
   "bin": {

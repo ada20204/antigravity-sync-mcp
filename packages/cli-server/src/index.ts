@@ -3,8 +3,8 @@
 /**
  * antigravity-cli-mcp — standalone MCP server for the Antigravity CLI (`agy`).
  *
- * Drives the agy binary directly via a PTY (no IDE/CDP). Independent from the
- * CDP server (packages/server) — they only share this monorepo. Exposes the
+ * Drives the agy binary directly as a subprocess (no IDE/CDP). Independent from
+ * the CDP server (packages/server) — they only share this monorepo. Exposes the
  * sync ask tool and the async task model.
  */
 
@@ -56,15 +56,26 @@ const TOOLS: Tool[] = [
         name: "ask-antigravity-cli",
         description:
             "Send a prompt to the Antigravity CLI (`agy`) in headless print mode and return its reply. " +
-            "Drives the `agy` binary directly via a PTY (no IDE/CDP), so no workspace needs to be open.\n\n" +
+            "Drives the `agy` binary directly as a subprocess (no IDE/CDP), so no workspace needs to be open.\n\n" +
             "Requirements: `agy` must be installed and already logged in (run `agy` once in a terminal to complete " +
-            "Google OAuth). Note: the CLI has no model-selection flag, so the active CLI model is used as-is.",
+            "Google OAuth).",
         inputSchema: {
             type: "object" as const,
             properties: {
                 prompt: {
                     type: "string",
                     description: "The task or question to send to the Antigravity CLI. Use @path to reference files.",
+                },
+                model: {
+                    type: "string",
+                    description:
+                        "Model for this run (must match a name from `agy models`, e.g. \"Gemini 3.1 Pro (High)\"). " +
+                        "CAUTION: agy silently ignores unknown names and falls back to the active CLI model. " +
+                        "Omit to use the active CLI model.",
+                },
+                workDir: {
+                    type: "string",
+                    description: "Absolute directory to add to agy's workspace (agy --add-dir), scoping the run to that directory.",
                 },
                 sandbox: {
                     type: "boolean",
@@ -96,6 +107,13 @@ const TOOLS: Tool[] = [
             type: "object" as const,
             properties: {
                 prompt: { type: "string", description: "The task to send to the Antigravity CLI. Use @path to reference files." },
+                model: {
+                    type: "string",
+                    description:
+                        "Model for this run (must match a name from `agy models`; agy silently ignores unknown names). " +
+                        "Omit to use the active CLI model.",
+                },
+                workDir: { type: "string", description: "Absolute directory to add to agy's workspace (agy --add-dir)" },
                 sandbox: { type: "boolean", description: "REFUSED: agy --sandbox is a no-op in -p mode; passing true returns an error" },
                 changeMode: { type: "boolean", description: "Return structured OLD/NEW edit blocks instead of free-form text" },
                 timeoutMs: { type: "number", description: "Optional hard timeout in ms (default 300000 = 5 minutes)" },
@@ -138,7 +156,7 @@ const TOOLS: Tool[] = [
 ];
 
 async function handleAskAntigravityCli(
-    params: { prompt: string; timeoutMs?: number; sandbox?: boolean; changeMode?: boolean },
+    params: { prompt: string; model?: string; workDir?: string; timeoutMs?: number; sandbox?: boolean; changeMode?: boolean },
     progressToken?: string | number
 ): Promise<string> {
     await sendProgressNotification(progressToken, 0, "🚀 Starting Antigravity CLI...");
@@ -147,6 +165,8 @@ async function handleAskAntigravityCli(
     const effectivePrompt = params.changeMode ? buildChangeModePrompt(params.prompt) : params.prompt;
     const result = await runAgyPrompt(effectivePrompt, {
         sandbox: params.sandbox === true,
+        model: params.model,
+        workDir: params.workDir,
         hardTimeoutMs:
             typeof params.timeoutMs === "number" && params.timeoutMs > 0 ? params.timeoutMs : undefined,
         onProgress: () => {
@@ -165,6 +185,8 @@ async function handleAskAntigravityCli(
 
 function handleStartTask(params: {
     prompt: string;
+    model?: string;
+    workDir?: string;
     sandbox?: boolean;
     changeMode?: boolean;
     timeoutMs?: number;
@@ -172,6 +194,8 @@ function handleStartTask(params: {
     const effectivePrompt = params.changeMode ? buildChangeModePrompt(params.prompt) : params.prompt;
     const runId = startTask(effectivePrompt, {
         sandbox: params.sandbox === true,
+        model: params.model,
+        workDir: params.workDir,
         hardTimeoutMs:
             typeof params.timeoutMs === "number" && params.timeoutMs > 0 ? params.timeoutMs : undefined,
     });
@@ -238,6 +262,8 @@ server.setRequestHandler(
                     resultText = await handleAskAntigravityCli(
                         {
                             prompt: args.prompt,
+                            model: typeof args.model === "string" && args.model ? args.model : undefined,
+                            workDir: typeof args.workDir === "string" && args.workDir ? args.workDir : undefined,
                             sandbox: args.sandbox === true,
                             changeMode: args.changeMode === true,
                             timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
@@ -251,6 +277,8 @@ server.setRequestHandler(
                     }
                     resultText = handleStartTask({
                         prompt: args.prompt,
+                        model: typeof args.model === "string" && args.model ? args.model : undefined,
+                        workDir: typeof args.workDir === "string" && args.workDir ? args.workDir : undefined,
                         sandbox: args.sandbox === true,
                         changeMode: args.changeMode === true,
                         timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,

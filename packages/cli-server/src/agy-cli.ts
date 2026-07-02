@@ -16,7 +16,7 @@ import path from "path";
 // Last agy version this wrapper was verified against. agy ships a private,
 // fast-moving format; warn (once, non-blocking) if the local binary differs so
 // breakage from upstream changes is loud rather than silent.
-const VERIFIED_AGY_VERSION = "1.0.6";
+const VERIFIED_AGY_VERSION = "1.0.15";
 let versionChecked = false;
 
 function logAgy(message: string): void {
@@ -90,6 +90,14 @@ export interface AgyRunOptions {
      * so it is NOT a real security boundary — do not rely on it for isolation.
      */
     sandbox?: boolean;
+    /**
+     * Model for this run (agy --model). Must match a name from `agy models`
+     * (e.g. "Gemini 3.1 Pro (High)"); agy SILENTLY ignores unknown names and
+     * falls back to the active CLI model — it does not error.
+     */
+    model?: string;
+    /** Directory to add to agy's workspace (agy --add-dir). */
+    workDir?: string;
     /** Streaming progress callback with newly captured (raw) output. */
     onProgress?: (chunk: string) => void;
 }
@@ -151,7 +159,7 @@ const PRINT_TIMEOUT_MARGIN_S = 10;
 const MAX_OUTPUT_CHARS = 10 * 1024 * 1024; // 10MB cap; stop appending past this to avoid OOM
 
 /**
- * Interpret captured PTY output into a result, or throw a typed error.
+ * Interpret captured output into a result, or throw a typed error.
  * Pure function (no I/O) so the auth/timeout/empty branches are unit-testable.
  */
 export function interpretAgyResult(raw: string, timedOut: boolean): AgyRunResult {
@@ -237,7 +245,10 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         // sandbox refused at enqueue time. stdin is closed (ignore = EOF) so agy
         // gets a clean end-of-input and SELF-EXITS on completion — that process
         // exit is our deterministic completion signal. No idle heuristic, no PTY.
-        const agyArgs = ["--print-timeout", `${printTimeoutS}s`, "-p", prompt];
+        const agyArgs = ["--print-timeout", `${printTimeoutS}s`];
+        if (options.workDir) agyArgs.push("--add-dir", options.workDir);
+        if (options.model) agyArgs.push("--model", options.model);
+        agyArgs.push("-p", prompt);
         let child: ReturnType<typeof spawn>;
         try {
             child = spawn(agyBin, agyArgs, {

@@ -34,7 +34,7 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 
 | Tool | Description |
 |------|-------------|
-| `ask-antigravity-cli` | Synchronous: send a prompt to `agy -p`, block until done, return the reply. Params: `prompt` (required), `changeMode`, `timeoutMs`. |
+| `ask-antigravity-cli` | Synchronous: send a prompt to `agy -p`, block until done, return the reply. Params: `prompt` (required), `model`, `workDir`, `changeMode`, `timeoutMs`. |
 | `start-antigravity-task` | Asynchronous: start a long task, return a `runId` immediately (non-blocking). |
 | `poll-antigravity-task` | Poll a task by `runId`: rolling output tail while running, full result once finished. |
 | `cancel-antigravity-task` | Cancel a task by `runId` (kills the agy process group). |
@@ -57,8 +57,11 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 - **`sandbox`**: **refused** — `agy --sandbox` is a no-op in `-p` mode (no
   filesystem/network isolation), so passing it returns an error rather than a
   false sense of security.
-- **Model**: agy has no model flag; the active CLI model is used as-is (change via
-  the `agy` TUI `/model`).
+- **`model`**: passed through as `agy --model`. Must match a name from
+  `agy models` (e.g. `"Gemini 3.1 Pro (High)"`); agy **silently ignores** unknown
+  names and falls back to the active CLI model. Omit to use the active CLI model.
+- **`workDir`**: passed through as `agy --add-dir`, adding the directory to agy's
+  workspace so the run is scoped to it.
 - Output is capped at 10 MB; the result's `truncated` flag is set if exceeded.
 
 ## Configuration

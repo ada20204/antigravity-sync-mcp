@@ -16,13 +16,17 @@ import path from "path";
 const FAKE_SCRIPT = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "1.0.5"; exit 0; fi
 prompt=""
+model=""
+adddir=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) prompt="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    --add-dir) adddir="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
-printf 'FAKE_REPLY:%s\\n' "$prompt"
+printf 'FAKE_REPLY:%s|model=%s|adddir=%s\\n' "$prompt" "$model" "$adddir"
 case "$prompt" in
   *SLOW*) sleep 30 ;;
   *DELAY*) sleep 1 ;;
@@ -56,6 +60,21 @@ test("runAgyPrompt returns cleaned reply (subprocess + self-exit completion)", a
     const r = await cli.runAgyPrompt("hello", { hardTimeoutMs: 20000 });
     assert.match(r.text, /FAKE_REPLY:hello/);
     assert.equal(r.timedOut, false);
+});
+
+test("runAgyPrompt forwards model and workDir as --model / --add-dir", async () => {
+    const r = await cli.runAgyPrompt("flags", {
+        hardTimeoutMs: 20000,
+        model: "Gemini 3.1 Pro (High)",
+        workDir: "/tmp/agy-workdir",
+    });
+    assert.match(r.text, /model=Gemini 3\.1 Pro \(High\)/);
+    assert.match(r.text, /adddir=\/tmp\/agy-workdir/);
+});
+
+test("runAgyPrompt omits --model / --add-dir when not requested", async () => {
+    const r = await cli.runAgyPrompt("noflags", { hardTimeoutMs: 20000 });
+    assert.match(r.text, /model=\|adddir=/);
 });
 
 test("runAgyPrompt serializes concurrent calls via global mutex", async () => {
