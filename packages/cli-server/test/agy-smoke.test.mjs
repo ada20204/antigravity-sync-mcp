@@ -26,6 +26,9 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+case "$prompt" in
+  *STDERRONLY*) echo "fake agy diagnostic" >&2; exit 0 ;;
+esac
 printf 'FAKE_REPLY:%s|model=%s|adddir=%s\\n' "$prompt" "$model" "$adddir"
 case "$prompt" in
   *SLOW*) sleep 30 ;;
@@ -75,6 +78,13 @@ test("runAgyPrompt forwards model and workDir as --model / --add-dir", async () 
 test("runAgyPrompt omits --model / --add-dir when not requested", async () => {
     const r = await cli.runAgyPrompt("noflags", { hardTimeoutMs: 20000 });
     assert.match(r.text, /model=\|adddir=/);
+});
+
+test("empty-output error carries the agy stderr tail", async () => {
+    await assert.rejects(
+        cli.runAgyPrompt("STDERRONLY", { hardTimeoutMs: 20000 }),
+        /produced no reply.*fake agy diagnostic/s
+    );
 });
 
 test("runAgyPrompt serializes concurrent calls via global mutex", async () => {

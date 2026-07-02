@@ -161,8 +161,10 @@ const MAX_OUTPUT_CHARS = 10 * 1024 * 1024; // 10MB cap; stop appending past this
 /**
  * Interpret captured output into a result, or throw a typed error.
  * Pure function (no I/O) so the auth/timeout/empty branches are unit-testable.
+ * stderrTail is included in the empty-output error: agy intermittently
+ * self-exits with empty stdout, and its stderr is the only diagnostic.
  */
-export function interpretAgyResult(raw: string, timedOut: boolean): AgyRunResult {
+export function interpretAgyResult(raw: string, timedOut: boolean, stderrTail = ""): AgyRunResult {
     const text = stripAnsi(raw).trim();
     if (/Authentication required\.|Waiting for authentication/.test(text)) {
         throw new AgyAuthRequiredError();
@@ -171,7 +173,11 @@ export function interpretAgyResult(raw: string, timedOut: boolean): AgyRunResult
         throw new AgyTimeoutError();
     }
     if (!text && !timedOut) {
-        throw new Error("agy CLI produced no reply: no output captured");
+        const stderr = stripAnsi(stderrTail).trim();
+        throw new Error(
+            "agy CLI produced no reply: no output captured" +
+            (stderr ? `. agy stderr tail:\n${stderr}` : "")
+        );
     }
     return { text, raw, timedOut };
 }
@@ -267,6 +273,7 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         }
 
         let raw = "";
+        let stderrTail = "";
         let settled = false;
         let timedOut = false;
         let truncated = false;
@@ -299,7 +306,7 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
                 return;
             }
             try {
-                resolve({ ...interpretAgyResult(raw, timedOut), truncated });
+                resolve({ ...interpretAgyResult(raw, timedOut, stderrTail), truncated });
             } catch (error) {
                 reject(error);
             }
@@ -326,6 +333,12 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
                 }
             }
             options.onProgress?.(chunk);
+        });
+
+        // Keep only the last ~2KB of stderr: enough for agy's final error line
+        // without buffering a whole debug log.
+        child.stderr?.on("data", (d: Buffer) => {
+            stderrTail = (stderrTail + d.toString()).slice(-2048);
         });
 
         child.on("error", (error) => {

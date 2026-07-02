@@ -61,6 +61,20 @@ test("interpretAgyResult throws on empty output without timeout", () => {
     );
 });
 
+test("interpretAgyResult includes stderr tail in empty-output error", () => {
+    assert.throws(
+        () => interpretAgyResult("", false, "\x1b[31mquota exceeded for model\x1b[0m\n"),
+        /produced no reply.*agy stderr tail:\nquota exceeded for model/s
+    );
+});
+
+test("interpretAgyResult omits stderr section when stderr is empty", () => {
+    assert.throws(
+        () => interpretAgyResult("", false, "  \n"),
+        (err) => /produced no reply/.test(err.message) && !/stderr tail/.test(err.message)
+    );
+});
+
 test("buildChangeModePrompt wraps prompt with OLD/NEW contract", () => {
     const out = buildChangeModePrompt("rename foo to bar");
     assert.match(out, /CHANGEMODE INSTRUCTIONS/);
