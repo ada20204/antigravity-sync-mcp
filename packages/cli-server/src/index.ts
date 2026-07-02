@@ -22,8 +22,7 @@ import {
 
 import { runAgyPrompt, buildChangeModePrompt } from "./agy-cli.js";
 import { startTask, pollTask, cancelTask, listTasks } from "./agy-tasks.js";
-
-const VERSION = "0.1.15";
+import { VERSION } from "./version.js";
 
 const server = new Server(
     { name: "antigravity-cli-mcp", version: VERSION },
