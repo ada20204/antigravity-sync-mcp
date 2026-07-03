@@ -262,7 +262,9 @@ const TOOLS: Tool[] = [
                 },
                 model: {
                     type: "string",
-                    description: "Optional preferred model hint (for example: gemini-3-flash, gemini-3-pro-high, opus-4.6)",
+                    description:
+                        "Optional preferred model hint. Best: an exact UI label from list-antigravity-models " +
+                        "(e.g. \"Gemini 3.5 Flash (High)\"); short aliases like gemini-3-flash, opus-4.6 also work.",
                 },
                 targetDir: {
                     type: "string",
@@ -345,6 +347,24 @@ const TOOLS: Tool[] = [
                 requestedModel: {
                     type: "string",
                     description: "Optional preferred model to include in recommendation preview.",
+                },
+            },
+        },
+    },
+    {
+        name: "list-antigravity-models",
+        description:
+            "List the models available in the Antigravity IDE with their remaining quota, live from " +
+            "the language server (registry snapshot fallback). Model names are exact UI labels " +
+            "(e.g. \"Gemini 3.5 Flash (High)\") and can be passed directly as ask-antigravity's `model` hint.",
+        inputSchema: {
+            type: "object" as const,
+            properties: {
+                targetDir: {
+                    type: "string",
+                    description:
+                        "Optional workspace directory path used to locate the registry/CDP entry. " +
+                        "If omitted, uses --target-dir from server startup.",
                 },
             },
         },
@@ -931,6 +951,34 @@ async function handleLaunchAntigravity(params: {
     return lines.join("\n");
 }
 
+async function handleListModels(params: { targetDir?: string }): Promise<string> {
+    const targetDir = params.targetDir || globalTargetDir;
+    const discoveredResult = await discoverCDPDetailed(targetDir);
+    if (!discoveredResult.ok || !discoveredResult.discovered) {
+        return `Model list unavailable: ${formatDiscoverError(discoveredResult.error)}`;
+    }
+    const discovered = discoveredResult.discovered;
+    let quota = discovered.registry?.quota;
+    let source = "registry_snapshot";
+    try {
+        quota = await withTimeout(fetchLiveQuotaSnapshot(discovered), 10000, "fetchLiveQuotaSnapshot");
+        source = "live_ls";
+    } catch {
+        // Fall back to the registry snapshot already loaded above.
+    }
+    const models = (quota?.models ?? [])
+        .map((m) => ({
+            name: m.label || m.modelId || "unknown",
+            remainingPercent:
+                typeof m.remainingPercentage === "number" ? Number(m.remainingPercentage.toFixed(1)) : null,
+            active: m.isSelected === true,
+        }));
+    if (models.length === 0) {
+        return JSON.stringify({ source, models: [], hint: "No model data; is the IDE running with the sidecar?" }, null, 2);
+    }
+    return JSON.stringify({ source, models }, null, 2);
+}
+
 async function handleQuotaStatus(params: {
     targetDir?: string;
     live?: boolean;
@@ -1055,6 +1103,12 @@ server.setRequestHandler(
                         live: typeof args.live === "boolean" ? args.live : true,
                         mode: typeof args.mode === "string" ? args.mode : undefined,
                         requestedModel: typeof args.requestedModel === "string" ? args.requestedModel : undefined,
+                    });
+                    break;
+
+                case "list-antigravity-models":
+                    resultText = await handleListModels({
+                        targetDir: typeof args.targetDir === "string" ? args.targetDir : undefined,
                     });
                     break;
 
