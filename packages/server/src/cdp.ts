@@ -505,6 +505,37 @@ export async function connectCDP(wsUrl: string): Promise<CDPConnection> {
     return { ws, call, contexts, close };
 }
 
+/**
+ * Evaluate in exactly ONE context (the page's default world when identifiable).
+ * REQUIRED for expressions with DOM side effects: the workbench page has a
+ * default world plus an "Electron Isolated Context" sharing the SAME DOM, so
+ * the try-each-context loop of evaluateInAllContexts runs mutations twice
+ * (observed: prompt text injected twice into the chat input).
+ */
+export async function evaluateInDefaultContext(
+    cdp: CDPConnection,
+    expression: string,
+    awaitPromise = false
+): Promise<any> {
+    const ctx = cdp.contexts.find((c) => c.auxData?.isDefault) ?? cdp.contexts[0];
+    if (!ctx) return null;
+    try {
+        const result = await cdp.call("Runtime.evaluate", {
+            expression,
+            returnByValue: true,
+            awaitPromise,
+            contextId: ctx.id,
+        }) as {
+            exceptionDetails?: unknown;
+            result?: { value?: any };
+        };
+        if (result.exceptionDetails) return null;
+        return result.result?.value ?? null;
+    } catch {
+        return null;
+    }
+}
+
 export async function evaluateInAllContexts(
     cdp: CDPConnection,
     expression: string,

@@ -14,6 +14,8 @@ export interface ExecutionContext {
     id: number;
     name: string;
     origin: string;
+    /** CDP auxData; isDefault distinguishes the page's main world from isolated worlds. */
+    auxData?: { isDefault?: boolean; type?: string; frameId?: string };
 }
 
 /** An active CDP WebSocket connection with a helper call() method. */

@@ -9,7 +9,7 @@
  * - auto-accept-agent selectors
  */
 
-import { CDPConnection, evaluateInAllContexts } from "./cdp.js";
+import { CDPConnection, evaluateInAllContexts, evaluateInDefaultContext } from "./cdp.js";
 
 const COMPOSER_MARKER = "Ask anything, @ to mention, / for workflows";
 
@@ -19,6 +19,7 @@ function isNoiseSegment(segment: string): boolean {
     if (s.includes(COMPOSER_MARKER)) return true;
     if (/^Good\s*$/i.test(s) || /^Bad\s*$/i.test(s) || /^Good\s+Bad\s*$/i.test(s)) return true;
     if (/^Thought for\b/i.test(s)) return true;
+    if (/^Worked for\b/i.test(s)) return true;
     if (/^Fast\b[\s\S]*\bSend$/i.test(s)) return true;
     if (/^```$/.test(s)) return true;
     // Filter out UI button text
@@ -56,6 +57,9 @@ export function cleanExtractedResponseText(rawText: string, prompt?: string): st
         .replace(/\n+\s*Good\s+Bad\s*$/i, "")
         .trim();
 
+    // Drop the "Worked for Ns" collapsible header when the whole article was captured.
+    text = text.replace(/^Worked for\s+\S+\s*/i, "").trim();
+
     // Keep only the latest turn when the original prompt is visible in transcript.
     if (prompt) {
         const promptIdx = text.lastIndexOf(prompt);
@@ -68,7 +72,11 @@ export function cleanExtractedResponseText(rawText: string, prompt?: string): st
 }
 
 const MODEL_UI_LABELS: Record<string, string[]> = {
-    "gemini-3-flash": ["Gemini 3 Flash", "Gemini Flash", "Flash"],
+    "gemini-3-flash": ["Gemini 3.5 Flash (High)", "Gemini 3.5 Flash (Medium)", "Gemini 3 Flash", "Gemini Flash", "Flash"],
+    "gemini-3.5-flash": ["Gemini 3.5 Flash (High)", "Gemini 3.5 Flash (Medium)"],
+    "gemini-3.5-flash-low": ["Gemini 3.5 Flash (Low)"],
+    "gemini-3.5-flash-medium": ["Gemini 3.5 Flash (Medium)"],
+    "gemini-3.5-flash-high": ["Gemini 3.5 Flash (High)"],
     "gemini-3-pro-low": ["Gemini 3.1 Pro (Low)", "Gemini 3 Pro (Low)", "Pro (Low)"],
     "gemini-3-pro-high": ["Gemini 3.1 Pro (High)", "Gemini 3.1 Pro", "Gemini 3 Pro", "Pro (High)"],
     "opus-4.5": ["Claude Opus 4.5", "Opus 4.5"],
@@ -140,27 +148,44 @@ export async function applyModeAndModelSelection(
       if (targetLabels.length) {
         const targets = targetLabels.map((t) => normalize(t)).filter(Boolean);
         const matchesTarget = (text) => targets.some((t) => text === t || text.includes(t));
-        const actionNodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
-        const activeMatch = actionNodes.find((node) => visible(node) && matchesTarget(textFor(node)));
-        if (activeMatch) {
-          modelApplied = true;
-          details.push('model_already_active');
+
+        // IDE ≥1.107: the picker trigger carries aria-label
+        // "Select model, current: <name>" — read the active model from it.
+        const trigger = [...document.querySelectorAll('button[aria-label^="Select model"]')].find(visible);
+        if (trigger) {
+          const current = normalize((trigger.getAttribute('aria-label') || '').split('current:')[1] || '');
+          if (current && matchesTarget(current)) {
+            modelApplied = true;
+            details.push('model_already_active');
+          }
+        } else {
+          const actionNodes = [...document.querySelectorAll('button,[role="button"],div[role="button"]')];
+          const activeMatch = actionNodes.find((node) => visible(node) && matchesTarget(textFor(node)));
+          if (activeMatch) {
+            modelApplied = true;
+            details.push('model_already_active');
+          }
         }
 
         // Step 1: open model picker if available.
-        const triggerCandidates = actionNodes;
         let pickerOpened = false;
-        for (const node of triggerCandidates) {
-          if (modelApplied) break;
-          if (!visible(node)) continue;
-          const text = textFor(node);
-          const looksModelTrigger =
-            text.includes('model') || text.includes('gemini') || text.includes('claude') || text.includes('gpt');
-          const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
-          if (looksModelTrigger || hasPopup === 'listbox' || hasPopup === 'menu') {
-            node.click();
+        if (!modelApplied) {
+          if (trigger) {
+            trigger.click();
             pickerOpened = true;
-            break;
+          } else {
+            for (const node of [...document.querySelectorAll('button,[role="button"],div[role="button"]')]) {
+              if (!visible(node)) continue;
+              const text = textFor(node);
+              const looksModelTrigger =
+                text.includes('model') || text.includes('gemini') || text.includes('claude') || text.includes('gpt');
+              const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
+              if (looksModelTrigger || hasPopup === 'listbox' || hasPopup === 'menu') {
+                node.click();
+                pickerOpened = true;
+                break;
+              }
+            }
           }
         }
         if (pickerOpened) {
@@ -185,6 +210,15 @@ export async function applyModeAndModelSelection(
             }
           }
         }
+
+        // Never leave the picker hanging open: an unmatched label used to leave
+        // the dropdown covering the composer for the rest of the session.
+        if (pickerOpened && !modelApplied) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+          document.body.click();
+          details.push('picker_closed_without_match');
+        }
+
         if (details.indexOf('model_already_active') === -1) {
           details.push(modelApplied ? 'model_applied' : 'model_not_found');
         }
@@ -193,7 +227,8 @@ export async function applyModeAndModelSelection(
       return { modeApplied, modelApplied, details };
     })()`;
 
-    const result = await evaluateInAllContexts(cdp, expression, true);
+    // DOM-mutating (clicks): must run in exactly one execution context.
+    const result = await evaluateInDefaultContext(cdp, expression, true);
     if (!result || typeof result !== "object") {
         return { modeApplied: false, modelApplied: false, details: ["selection_no_context"] };
     }
@@ -206,9 +241,23 @@ export async function applyModeAndModelSelection(
 
 // --- injectMessage ---
 
+// Shared with the verify/submit steps below. IDE ≥1.107: a single Lexical
+// contenteditable (aria-label="Message input"); older layouts kept as fallbacks.
+const EDITOR_SELECTOR =
+    '#conversation [contenteditable="true"], [contenteditable="true"][data-lexical-editor="true"], [contenteditable="true"][aria-label="Message input"], #chat [contenteditable="true"], #cascade [contenteditable="true"]';
+
 /**
  * Inject a text message into Antigravity's chat input and submit it.
- * Ported from OmniRemote server.js injectMessage() (lines 432-490).
+ *
+ * Three phases, with all waiting done on the Node side: when the IDE window is
+ * occluded, the renderer throttles in-page timers to ~1s ticks and never fires
+ * requestAnimationFrame, so any in-page await either lies or blows the CDP call
+ * timeout. Node-side polling with quick synchronous evaluates is immune.
+ *   1. insert  — focus editor, selectAll + insertText (replaces selection)
+ *   2. verify  — poll editor text until it equals the prompt (Lexical renders
+ *                its DOM asynchronously, late under an occluded window)
+ *   3. submit  — click the send button only after the content is proven right
+ *                (a wrong send burns quota and cannot be recalled)
  */
 export async function injectMessage(
     cdp: CDPConnection,
@@ -219,24 +268,31 @@ export async function injectMessage(
     const pollIntervalMs = options.pollIntervalMs || 500;
     const startTime = Date.now();
     const safeText = JSON.stringify(text);
+    const safeEditorSelector = JSON.stringify(EDITOR_SELECTOR);
 
-    const tryInjectExpression = `(async () => {
-    // Check if AI is already generating
+    // Best effort: an unoccluded window is not throttled, which makes Lexical
+    // render promptly and keeps completion polling / extraction fresh too.
+    try {
+        await cdp.call("Page.bringToFront");
+    } catch {
+        // Not fatal; verification below still guards correctness.
+    }
+
+    // Phase 1: insert (synchronous side effects only, no in-page waits).
+    const insertExpression = `(() => {
     const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
     if (cancel && cancel.offsetParent !== null) return { ok: false, reason: "busy" };
 
-    // Find the visible contenteditable editor
-    const editors = [...document.querySelectorAll('#conversation [contenteditable="true"], #chat [contenteditable="true"], #cascade [contenteditable="true"]')]
-      .filter(el => el.offsetParent !== null);
+    const editors = [...document.querySelectorAll(${safeEditorSelector})].filter(el => el.offsetParent !== null);
     const editor = editors.at(-1);
     if (!editor) return { ok: false, error: "editor_not_found" };
 
     const textToInsert = ${safeText};
-
     editor.focus();
+    // selectAll + insertText REPLACES the selection. Do not use
+    // execCommand("delete") to clear: the Lexical editor ignores it, and a
+    // clear-then-insert sequence silently accumulates text instead.
     document.execCommand?.("selectAll", false, null);
-    document.execCommand?.("delete", false, null);
-
     let inserted = false;
     try { inserted = !!document.execCommand?.("insertText", false, textToInsert); } catch {}
     if (!inserted) {
@@ -244,39 +300,83 @@ export async function injectMessage(
       editor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: textToInsert }));
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: textToInsert }));
     }
+    return { ok: true };
+  })()`;
 
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const readEditorExpression = `(() => {
+    const editors = [...document.querySelectorAll(${safeEditorSelector})].filter(el => el.offsetParent !== null);
+    const editor = editors.at(-1);
+    return editor ? (editor.textContent || '') : null;
+  })()`;
 
-    // Try clicking the submit button
-    const submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
+    const submitExpression = `(() => {
+    // IDE ≥1.107 exposes data-testid; the lucide icon class is gone there but
+    // kept for older layouts.
+    const submit = document.querySelector('[data-testid="send-button"]')
+      || document.querySelector('[data-tooltip-id="input-send-button-send-tooltip"]')
+      || document.querySelector("svg.lucide-arrow-right")?.closest("button");
     if (submit && !submit.disabled) {
       submit.click();
       return { ok: true, method: "click_submit" };
     }
-
-    // Fallback: simulate Enter key
+    const editors = [...document.querySelectorAll(${safeEditorSelector})].filter(el => el.offsetParent !== null);
+    const editor = editors.at(-1);
+    if (!editor) return { ok: false, error: "editor_not_found" };
     editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
     editor.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" }));
-
     return { ok: true, method: "enter_keypress" };
   })()`;
 
-    // Poll until the editor is ready or timeout
+    const normalized = (s: string) => (s || "").replace(/\s+/g, " ").trim();
+    const expected = normalized(text);
+    const VERIFY_WINDOW_MS = 8000;
+    const VERIFY_POLL_MS = 250;
+    const MAX_INSERT_ATTEMPTS = 2;
+
+    // All expressions mutate or read the shared DOM: run them in exactly one
+    // execution context (see evaluateInDefaultContext).
     while (true) {
-        const result = await evaluateInAllContexts(cdp, tryInjectExpression, true);
+        const inserted = await evaluateInDefaultContext(cdp, insertExpression);
         const waitedMs = Date.now() - startTime;
-        if (!result) {
-            return { ok: false, reason: "no_context", waitedMs };
-        }
-        if (result.ok) {
-            return { ...result, waitedMs };
-        }
+        if (!inserted) return { ok: false, reason: "no_context", waitedMs };
+
+        if (inserted.ok) break;
         // Editor busy or not found — keep polling if time allows
         if (waitedMs >= maxWaitMs) {
-            return { ok: false, reason: result.reason || result.error || "timeout", waitedMs };
+            return { ok: false, reason: inserted.reason || inserted.error || "timeout", waitedMs };
         }
         await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
+
+    // Phase 2: verify from the Node side.
+    let verified = false;
+    for (let attempt = 1; attempt <= MAX_INSERT_ATTEMPTS && !verified; attempt++) {
+        if (attempt > 1) {
+            const again = await evaluateInDefaultContext(cdp, insertExpression);
+            if (!again?.ok) break;
+        }
+        const deadline = Date.now() + VERIFY_WINDOW_MS;
+        while (Date.now() < deadline) {
+            const content = await evaluateInDefaultContext(cdp, readEditorExpression);
+            if (typeof content === "string" && normalized(content) === expected) {
+                verified = true;
+                break;
+            }
+            await new Promise((r) => setTimeout(r, VERIFY_POLL_MS));
+        }
+    }
+    if (!verified) {
+        return { ok: false, reason: "insert_verify_failed", waitedMs: Date.now() - startTime };
+    }
+
+    // Phase 3: submit.
+    const submitted = await evaluateInDefaultContext(cdp, submitExpression);
+    const waitedMs = Date.now() - startTime;
+    if (!submitted) return { ok: false, reason: "no_context", waitedMs };
+    if (!submitted.ok) {
+        return { ok: false, reason: submitted.reason || submitted.error || "submit_failed", waitedMs };
+    }
+    return { ...submitted, waitedMs };
 }
 
 // --- pollCompletionStatus ---
@@ -360,7 +460,24 @@ export async function extractLatestResponse(
       || document.getElementById('cascade');
     if (!container) return { error: 'chat_container_not_found' };
 
-    // Strategy 1: Look for message containers with role attributes
+    // Strategy 0 (IDE ≥1.107): messages are role="article" with an aria-label
+    // distinguishing "Agent response" from "User message". The composer (with
+    // the model-selector label) also lives inside #conversation, so the old
+    // "last text block in container" heuristic grabs the model name — never
+    // fall through to it when articles exist.
+    const articles = container.querySelectorAll('[role="article"][aria-label="Agent response"]');
+    if (articles.length > 0) {
+      const last = articles[articles.length - 1];
+      // Content blocks skip the "Worked for Ns" collapsible header.
+      const blocks = last.querySelectorAll('div.px-2.py-1');
+      const text = blocks.length
+        ? [...blocks].map((b) => b.innerText || '').join('\\n\\n').trim()
+        : (last.innerText || last.textContent || '').trim();
+      if (text && !isGeneratingPlaceholder(text)) return { text };
+      return { error: 'agent_article_empty' };
+    }
+
+    // Strategy 1 (older layouts): message containers with role attributes
     const messages = container.querySelectorAll('[data-role="assistant"], [data-message-author="assistant"]');
     if (messages.length > 0) {
       const last = messages[messages.length - 1];
@@ -430,6 +547,7 @@ export async function stopGeneration(
     return { success: false, error: 'No active generation found to stop' };
   })()`;
 
-    const result = await evaluateInAllContexts(cdp, expression, true);
+    // DOM-mutating (clicks): must run in exactly one execution context.
+    const result = await evaluateInDefaultContext(cdp, expression, true);
     return result || { success: false, error: "no_context" };
 }
