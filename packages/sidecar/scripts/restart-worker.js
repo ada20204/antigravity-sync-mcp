@@ -327,10 +327,69 @@ function checkProcessExists(processPattern, dependencies = {}) {
             return parseInt(String(output || '').trim(), 10) > 0;
         }
 
-        execSyncImpl(`pgrep -f "${processPattern}"`, { stdio: 'ignore' });
-        return true;
+        return listMatchingPids(processPattern, dependencies).length > 0;
     } catch {
         return false;
+    }
+}
+
+// pgrep must run WITHOUT a shell and the result must exclude this worker:
+// both the sh -c wrapper and the worker's own argv contain the Antigravity
+// path, so a plain `pgrep -f` self-matches and "process gone" never becomes true.
+function listMatchingPids(processPattern, dependencies = {}) {
+    const spawnSyncImpl = dependencies.spawnSync || require('child_process').spawnSync;
+    try {
+        const result = spawnSyncImpl('pgrep', ['-f', String(processPattern)], { encoding: 'utf8' });
+        return String(result.stdout || '')
+            .split(/\s+/)
+            .map((value) => parseInt(value, 10))
+            .filter((pid) => Number.isFinite(pid) && pid > 0 && pid !== process.pid);
+    } catch {
+        return [];
+    }
+}
+
+function getAppProcessPattern() {
+    const executable = getAntigravityPath();
+    if (process.platform === 'win32') {
+        return path.basename(executable, path.extname(executable));
+    }
+    return executable.includes('Antigravity') ? 'Antigravity' : 'Cursor';
+}
+
+function isOldProcessAlive() {
+    const pid = getAntigravityPid();
+    if (pid) {
+        try {
+            process.kill(pid, 0);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+    return checkProcessExists(getAppProcessPattern());
+}
+
+// Kill by explicit PIDs (never pkill -f: its pattern would match this worker's
+// own argv and kill the worker mid-restart).
+async function escalateKillOldProcess() {
+    if (process.platform === 'win32') {
+        await phase1_killOldProcess();
+        return;
+    }
+    const pattern = getAppProcessPattern();
+    const pids = listMatchingPids(pattern);
+    log(`Escalating: SIGTERM ${pids.length} process(es) matching "${pattern}"`);
+    for (const pid of pids) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+    const survivors = listMatchingPids(pattern);
+    if (survivors.length > 0) {
+        log(`Escalating: SIGKILL ${survivors.length} surviving process(es)`);
+        for (const pid of survivors) {
+            try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+        }
     }
 }
 
@@ -794,6 +853,16 @@ async function main() {
         } else if (waitExit) {
             log('Wait-exit mode: skipping kill, waiting for process to exit on its own');
             await phase2_waitForExit();
+            // The graceful quit can silently no-op (e.g. workbench.action.quit broke
+            // after an IDE update). Launching anyway hands our args to the surviving
+            // instance via the single-instance lock and no new process appears, so
+            // escalate to a kill before launching.
+            if (isOldProcessAlive()) {
+                log('Old process still alive after wait-exit; escalating to kill');
+                v2Diagnostics.degraded_fallbacks.push('wait_exit_escalated_to_kill');
+                await escalateKillOldProcess();
+                await phase2_waitForExit();
+            }
         } else {
             await phase1_killOldProcess();
             await phase2_waitForExit();
@@ -850,12 +919,26 @@ async function main() {
         const cdpResult = await phase4_verifyCdp(launchResult);
 
         v2Diagnostics.cdp_verified = cdpResult.cdpVerified === true;
+        const mode = coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart';
+
+        if (getWaitForCdp() && cdpResult.cdpVerified !== true) {
+            updateStatus('complete', 'failed', cdpResult.error || 'CDP verification failed');
+            writeResultV2('failed', 'verify_cdp', {
+                port: getPort(),
+                workspace: getWorkspace(),
+                mode,
+                ...cdpResult,
+            });
+            clearTimeout(absoluteTimeout);
+            log(`=== ${mode} completed WITHOUT CDP: reporting failure ===`);
+            process.exit(1);
+        }
 
         updateStatus('complete', 'success');
         writeResultV2('success', 'complete', {
             port: getPort(),
             workspace: getWorkspace(),
-            mode: coldStart ? 'cold-start' : waitExit ? 'wait-exit' : 'restart',
+            mode,
             ...cdpResult,
         });
 
@@ -896,6 +979,7 @@ module.exports = {
         getPortSource,
         getPidSource,
         checkProcessExists,
+        getAppProcessPattern,
         checkListeningPort,
         launchWindowsDetached,
         replaceFileWithRetry,
