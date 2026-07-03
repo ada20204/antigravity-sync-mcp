@@ -41,6 +41,14 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 | `list-antigravity-tasks` | List running + recent finished tasks (LRU-bounded). |
 | `list-antigravity-models` | List usable model names live (`agy models`) — pass these to `model`. |
 
+### No quota data (agy limitation)
+
+There is no quota tool here on purpose: `agy` exposes no quota command or cache
+file (its internal `quota_manager` only surfaces in logs). If you also run the
+CDP server against the IDE with the same account, its `quota-status` /
+`list-antigravity-models` report the same account's quota. Revisit if a future
+agy version adds a quota subcommand.
+
 ## Design
 
 - **Subprocess + closed stdin**: runs `agy -p` as a plain subprocess with stdin
