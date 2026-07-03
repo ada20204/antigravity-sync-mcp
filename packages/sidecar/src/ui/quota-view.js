@@ -132,18 +132,17 @@ function updateQuotaStatusBar(params) {
         ? Date.now() - Number(latestQuota.timestamp)
         : Number.POSITIVE_INFINITY;
     const isStale = !Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000;
-    if (summary && summary.activeModelName && summary.activeModelRemaining !== null) {
-        const modelShort = summary.activeModelName.replace(/^.*\//, '').slice(0, 16);
-        quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
-    } else if (summary && summary.primaryPercent !== null) {
-        quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} Quota ${Math.max(0, summary.primaryPercent).toFixed(0)}%`;
+    // No percentage in the pill: models share GROUP quota, so any single number
+    // (lowest model, prompt credits) misleads — e.g. "0%" while another group
+    // sits at 99%. The pill is a click entry; details live in tooltip + report,
+    // and low-quota alerting is handled by the getQuotaLevel notifications.
+    if (summary) {
+        quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} Quota`;
     } else if (latestQuotaError) {
-        quotaStatusBarItem.text = '$(warning) Quota N/A';
+        quotaStatusBarItem.text = '$(warning) Quota';
     } else {
-        quotaStatusBarItem.text = '$(sync~spin) Quota ...';
+        quotaStatusBarItem.text = '$(sync~spin) Quota';
     }
-    // No background plates: low quota still shows via the icon/percentage text
-    // (and the getQuotaLevel-driven notifications in extension.js).
     quotaStatusBarItem.backgroundColor = undefined;
     quotaStatusBarItem.tooltip = formatQuotaTooltip(latestQuota, latestQuotaError, summarizeQuota);
     quotaStatusBarItem.show();
