@@ -892,8 +892,6 @@ async function activate(context) {
             latestQuotaError,
             quotaStaleMinutes,
             summarizeQuota,
-            quotaWarnThresholdPercent,
-            quotaCriticalThresholdPercent,
         });
     }
 

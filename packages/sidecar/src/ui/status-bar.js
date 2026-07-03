@@ -12,7 +12,7 @@ function updateStatusBar(params) {
 
     if (isEnabled) {
         statusBarItem.text = '$(zap) Sidecar: ON';
-        statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        statusBarItem.backgroundColor = undefined;
         statusBarItem.tooltip = 'Auto-accept is ACTIVE — click to disable';
         statusBarItem.show();
         return;

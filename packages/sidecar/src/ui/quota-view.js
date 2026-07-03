@@ -120,8 +120,6 @@ function updateQuotaStatusBar(params) {
         latestQuotaError,
         quotaStaleMinutes,
         summarizeQuota,
-        quotaWarnThresholdPercent,
-        quotaCriticalThresholdPercent,
     } = params;
 
     if (!cdpTarget) {
@@ -134,10 +132,6 @@ function updateQuotaStatusBar(params) {
         ? Date.now() - Number(latestQuota.timestamp)
         : Number.POSITIVE_INFINITY;
     const isStale = !Number.isFinite(snapshotAgeMs) || snapshotAgeMs > quotaStaleMinutes * 60_000;
-    const level = getQuotaLevel(summary, {
-        quotaWarnThresholdPercent,
-        quotaCriticalThresholdPercent,
-    }).level;
     if (summary && summary.activeModelName && summary.activeModelRemaining !== null) {
         const modelShort = summary.activeModelName.replace(/^.*\//, '').slice(0, 16);
         quotaStatusBarItem.text = `${isStale ? '$(history)' : '$(graph)'} ${modelShort} ${Math.max(0, summary.activeModelRemaining).toFixed(0)}%`;
@@ -148,13 +142,9 @@ function updateQuotaStatusBar(params) {
     } else {
         quotaStatusBarItem.text = '$(sync~spin) Quota ...';
     }
-    if (level === 'critical') {
-        quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-    } else if (level === 'warning') {
-        quotaStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-    } else {
-        quotaStatusBarItem.backgroundColor = undefined;
-    }
+    // No background plates: low quota still shows via the icon/percentage text
+    // (and the getQuotaLevel-driven notifications in extension.js).
+    quotaStatusBarItem.backgroundColor = undefined;
     quotaStatusBarItem.tooltip = formatQuotaTooltip(latestQuota, latestQuotaError, summarizeQuota);
     quotaStatusBarItem.show();
 }
