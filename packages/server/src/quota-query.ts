@@ -198,6 +198,73 @@ export async function fetchLiveQuotaSnapshot(discovered: DiscoveredCDP): Promise
     return normalizeQuotaSnapshot(userStatus, activeModelId);
 }
 
+export interface QuotaGroup {
+    name: string;
+    remainingPercentage: number | null;
+    resetTime: string;
+    resetInMs?: number;
+    /** Which window is currently binding, inferred from reset distance. */
+    window: "5-hour limit" | "weekly limit" | "unknown";
+    models: string[];
+}
+
+// Official grouping (IDE settings page): models share a weekly + a 5-hour limit
+// per group. The wire only exposes the BINDING window's remaining fraction and
+// its reset time per model, so the group view infers the window from the reset
+// distance: a rolling 5-hour window always resets within 5 hours.
+const FIVE_HOUR_WINDOW_MS = 5.25 * 60 * 60 * 1000;
+
+function quotaGroupName(label: string): string {
+    if (/^gemini/i.test(label)) return "Gemini models";
+    if (/^(claude|gpt)/i.test(label)) return "Claude/GPT models";
+    return "Other models";
+}
+
+export function groupQuotaModels(models: RegistryQuotaModel[]): QuotaGroup[] {
+    const groups = new Map<string, QuotaGroup>();
+    for (const model of models) {
+        const label = model.label || model.modelId || "unknown";
+        const name = quotaGroupName(label);
+        let group = groups.get(name);
+        if (!group) {
+            group = { name, remainingPercentage: null, resetTime: "", resetInMs: undefined, window: "unknown", models: [] };
+            groups.set(name, group);
+        }
+        group.models.push(label);
+        const remaining = typeof model.remainingPercentage === "number" ? model.remainingPercentage : null;
+        if (remaining !== null && (group.remainingPercentage === null || remaining < group.remainingPercentage)) {
+            group.remainingPercentage = remaining;
+            group.resetTime = model.resetTime || "";
+            group.resetInMs = typeof model.resetInMs === "number" ? model.resetInMs : undefined;
+            group.window =
+                typeof model.resetInMs === "number"
+                    ? model.resetInMs <= FIVE_HOUR_WINDOW_MS
+                        ? "5-hour limit"
+                        : "weekly limit"
+                    : "unknown";
+        }
+    }
+    for (const group of groups.values()) group.models.sort();
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 10-slot remaining bar: 99.9% -> "██████████", 0.3% -> "░░░░░░░░░░". */
+export function renderQuotaBar(percent: number | null, slots = 10): string {
+    if (typeof percent !== "number" || !Number.isFinite(percent)) return "░".repeat(slots);
+    const filled = Math.max(0, Math.min(slots, Math.round((percent / 100) * slots)));
+    return "█".repeat(filled) + "░".repeat(slots - filled);
+}
+
+/** "7h49m" / "12m" / "now" — human-readable reset distance. */
+export function formatResetIn(resetInMs: number | undefined): string {
+    if (typeof resetInMs !== "number" || !Number.isFinite(resetInMs)) return "";
+    if (resetInMs <= 0) return "now";
+    const totalMinutes = Math.round(resetInMs / 60000);
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return h > 0 ? `${h}h ${m.toString().padStart(2, "0")}m` : `${m}m`;
+}
+
 export interface QuotaSummary {
     activeModelName: string | null;
     activeModelRemaining: number | null;
@@ -283,18 +350,32 @@ export function formatQuotaReport(params: {
 
     const models = Array.isArray(quota.models) ? quota.models : [];
     if (models.length > 0) {
-        lines.push("models:");
-        // label first: modelId is an internal enum and unreleased models come
-        // through as MODEL_PLACEHOLDER_* — the label is the real display name.
-        const sorted = [...models].sort((a, b) =>
-            String(a.label || a.modelId || "").localeCompare(String(b.label || b.modelId || ""))
-        );
-        for (const model of sorted) {
-            const name = model.label || model.modelId || "unknown";
-            const selected = model.isSelected ? " [active]" : "";
-            const remaining = typeof model.remainingPercentage === "number" ? `${model.remainingPercentage.toFixed(1)}%` : "n/a";
-            const reset = model.resetTime || "n/a";
-            lines.push(`- ${name}${selected}: remaining=${remaining}, reset=${reset}`);
+        // Official-style group view: models share a weekly + 5-hour limit per
+        // group; remaining reflects whichever window is currently binding.
+        const active = models.find((m) => m.isSelected);
+        // Collect rows first so every column (name, percent, reset, window) can
+        // be padded to the width of its widest value.
+        const rows = groupQuotaModels(models).map((group) => ({
+            group,
+            remaining:
+                typeof group.remainingPercentage === "number" ? `${group.remainingPercentage.toFixed(1)}%` : "n/a",
+            resetIn: formatResetIn(group.resetInMs),
+            windowShort: group.window === "5-hour limit" ? "5h" : group.window === "weekly limit" ? "weekly" : "?",
+        }));
+        const w = {
+            name: Math.max(...rows.map((r) => r.group.name.length)),
+            remaining: Math.max(...rows.map((r) => r.remaining.length)),
+            resetIn: Math.max(...rows.map((r) => r.resetIn.length)),
+        };
+        for (const row of rows) {
+            lines.push("");
+            const bar = renderQuotaBar(row.group.remainingPercentage);
+            const tail = row.resetIn ? ` (${row.resetIn.padStart(w.resetIn)} / ${row.windowShort})` : "";
+            lines.push(`${row.group.name.padEnd(w.name)} — ${bar} ${row.remaining.padStart(w.remaining)} left${tail}`);
+            for (const name of row.group.models) {
+                const activeMark = active && (active.label || active.modelId) === name ? " [active]" : "";
+                lines.push(`  - ${name}${activeMark}`);
+            }
         }
     } else {
         lines.push("models: none");

@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const { formatAgeMs } = require('../common/runtime');
+const { groupQuotaModels, formatResetIn, renderQuotaBar } = require('../core/quota');
 
 function getQuotaLevel(summary, thresholds) {
     const {
@@ -18,7 +19,9 @@ function getQuotaLevel(summary, thresholds) {
     }
     if (summary.minModelRemaining !== null) {
         const percent = summary.minModelRemaining;
-        const target = 'lowest model quota';
+        const target = summary.lowestGroupName
+            ? `${summary.lowestGroupName} · ${summary.lowestGroupWindow || 'quota'}`
+            : 'lowest model quota';
         if (percent <= quotaCriticalThresholdPercent) return { level: 'critical', watchedPercent: percent, target };
         if (percent <= quotaWarnThresholdPercent) return { level: 'warning', watchedPercent: percent, target };
         return { level: 'none', watchedPercent: percent, target };
@@ -91,19 +94,33 @@ function formatQuotaReport(quota, quotaError) {
 
     const models = Array.isArray(quota.models) ? quota.models : [];
     if (models.length > 0) {
-        lines.push('models:');
-        // label first: modelId is an internal enum and unreleased models come
-        // through as MODEL_PLACEHOLDER_* — the label is the real display name.
-        const sorted = [...models].sort((a, b) =>
-            String(a.label || a.modelId || '').localeCompare(String(b.label || b.modelId || ''))
-        );
-        for (const model of sorted) {
-            const name = model.label || model.modelId || 'unknown';
-            const remaining = typeof model.remainingPercentage === 'number'
-                ? `${model.remainingPercentage.toFixed(1)}%`
-                : 'n/a';
-            const selected = model.isSelected ? ', selected=yes' : '';
-            lines.push(`- ${name}: remaining=${remaining}, exhausted=${model.isExhausted ? 'yes' : 'no'}${selected}`);
+        // Official-style group view: models share a weekly + 5-hour limit per
+        // group; remaining reflects whichever window is currently binding.
+        const active = models.find((m) => m && m.isSelected);
+        // Collect rows first so every column (name, percent, reset, window) can
+        // be padded to the width of its widest value.
+        const rows = groupQuotaModels(models).map((group) => ({
+            group,
+            remaining: typeof group.remainingPercentage === 'number'
+                ? `${group.remainingPercentage.toFixed(1)}%`
+                : 'n/a',
+            resetIn: formatResetIn(group.resetInMs),
+            windowShort: group.window === '5-hour limit' ? '5h' : group.window === 'weekly limit' ? 'weekly' : '?',
+        }));
+        const w = {
+            name: Math.max(...rows.map((r) => r.group.name.length)),
+            remaining: Math.max(...rows.map((r) => r.remaining.length)),
+            resetIn: Math.max(...rows.map((r) => r.resetIn.length)),
+        };
+        for (const row of rows) {
+            lines.push('');
+            const bar = renderQuotaBar(row.group.remainingPercentage);
+            const tail = row.resetIn ? ` (${row.resetIn.padStart(w.resetIn)} / ${row.windowShort})` : '';
+            lines.push(`${row.group.name.padEnd(w.name)} — ${bar} ${row.remaining.padStart(w.remaining)} left${tail}`);
+            for (const name of row.group.models) {
+                const activeMark = active && (active.label || active.modelId) === name ? ' [active]' : '';
+                lines.push(`  - ${name}${activeMark}`);
+            }
         }
     } else {
         lines.push('models: none');

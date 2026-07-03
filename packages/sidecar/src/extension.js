@@ -932,7 +932,7 @@ async function activate(context) {
             (now - lastQuotaAlertAt) > quotaAlertCooldownMs;
         if (!shouldNotify) return;
 
-        const message = `Antigravity quota low: ${levelInfo.target} remaining ${watchedPercent.toFixed(1)}%`;
+        const message = `Antigravity quota low: ${levelInfo.target} — ${watchedPercent.toFixed(1)}% left`;
         // No popup alerts for quota; keep logs/status bar only.
         log(`Quota alert (${level}): ${message}`);
         lastQuotaAlertLevel = level;

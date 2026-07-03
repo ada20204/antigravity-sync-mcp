@@ -112,6 +112,61 @@ function normalizeQuotaSnapshot(data, activeModelId) {
     };
 }
 
+// Official grouping (IDE settings page): models share a weekly + a 5-hour limit
+// per group. The wire only exposes the BINDING window's remaining fraction and
+// its reset time per model, so the group view infers the window from the reset
+// distance: a rolling 5-hour window always resets within 5 hours.
+const FIVE_HOUR_WINDOW_MS = 5.25 * 60 * 60 * 1000;
+
+function quotaGroupName(label) {
+    if (/^gemini/i.test(label)) return 'Gemini models';
+    if (/^(claude|gpt)/i.test(label)) return 'Claude/GPT models';
+    return 'Other models';
+}
+
+function groupQuotaModels(models) {
+    const groups = new Map();
+    for (const model of models || []) {
+        if (!model) continue;
+        const label = model.label || model.modelId || 'unknown';
+        const name = quotaGroupName(label);
+        let group = groups.get(name);
+        if (!group) {
+            group = { name, remainingPercentage: null, resetTime: '', resetInMs: undefined, window: 'unknown', models: [] };
+            groups.set(name, group);
+        }
+        group.models.push(label);
+        const remaining = typeof model.remainingPercentage === 'number' ? model.remainingPercentage : null;
+        if (remaining !== null && (group.remainingPercentage === null || remaining < group.remainingPercentage)) {
+            group.remainingPercentage = remaining;
+            group.resetTime = model.resetTime || '';
+            group.resetInMs = typeof model.resetInMs === 'number' ? model.resetInMs : undefined;
+            group.window = typeof model.resetInMs === 'number'
+                ? (model.resetInMs <= FIVE_HOUR_WINDOW_MS ? '5-hour limit' : 'weekly limit')
+                : 'unknown';
+        }
+    }
+    for (const group of groups.values()) group.models.sort();
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// 10-slot remaining bar: 99.9% -> "██████████", 0.3% -> "░░░░░░░░░░".
+function renderQuotaBar(percent, slots = 10) {
+    if (typeof percent !== 'number' || !Number.isFinite(percent)) return '░'.repeat(slots);
+    const filled = Math.max(0, Math.min(slots, Math.round((percent / 100) * slots)));
+    return '█'.repeat(filled) + '░'.repeat(slots - filled);
+}
+
+// "7h49m" / "12m" / "now" — human-readable reset distance.
+function formatResetIn(resetInMs) {
+    if (typeof resetInMs !== 'number' || !Number.isFinite(resetInMs)) return '';
+    if (resetInMs <= 0) return 'now';
+    const totalMinutes = Math.round(resetInMs / 60000);
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
+}
+
 function summarizeQuota(quota) {
     if (!quota || typeof quota !== 'object') return null;
 
@@ -130,6 +185,13 @@ function summarizeQuota(quota) {
         ? prompt.remainingPercentage
         : null;
     const minModelRemaining = modelPercents.length > 0 ? Math.min(...modelPercents) : null;
+    // Models share group quota, so "lowest" is really a group's remaining —
+    // name the group so alerts read as the settings page does.
+    const groups = groupQuotaModels(models);
+    const lowestGroup = groups.reduce(
+        (min, g) => (typeof g.remainingPercentage === 'number' && (min === null || g.remainingPercentage < min.remainingPercentage) ? g : min),
+        null
+    );
     const activeModelRemaining = activeModel && typeof activeModel.remainingPercentage === 'number'
         ? activeModel.remainingPercentage
         : null;
@@ -142,13 +204,15 @@ function summarizeQuota(quota) {
         : (minModelRemaining !== null ? minModelRemaining : promptRemaining);
     const primaryLabel = activeModelName
         ? `model ${activeModelName}`
-        : (minModelRemaining !== null ? 'lowest model quota' : 'prompt credits');
+        : (lowestGroup ? `${lowestGroup.name} · ${lowestGroup.window}` : (minModelRemaining !== null ? 'lowest model quota' : 'prompt credits'));
 
     return {
         primaryPercent,
         primaryLabel,
         promptRemaining,
         minModelRemaining,
+        lowestGroupName: lowestGroup ? lowestGroup.name : null,
+        lowestGroupWindow: lowestGroup ? lowestGroup.window : null,
         activeModelName,
         activeModelRemaining,
         modelCount: models.length,
@@ -157,10 +221,13 @@ function summarizeQuota(quota) {
 }
 
 module.exports = {
+    formatResetIn,
+    renderQuotaBar,
     normalizeModelKey,
     modelIdMatches,
     collectStringByKeys,
     extractActiveModelId,
     normalizeQuotaSnapshot,
+    groupQuotaModels,
     summarizeQuota,
 };

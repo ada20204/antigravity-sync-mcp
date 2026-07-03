@@ -51,8 +51,9 @@ test("formatQuotaReport renders source and tracked models", () => {
   });
   assert.match(text, /source: live_ls/);
   assert.match(text, /targetDir: \/tmp\/demo/);
-  assert.match(text, /models:/);
-  assert.match(text, /gemini-3-flash/);
+  // group-style body: "<group> — <pct>% left (<reset> / <window>)" then a member line
+  assert.match(text, /% left/);
+  assert.match(text, /gemini-3-flash \[active\]/);
 });
 
 test("normalizeQuotaSnapshot reads camelCase wire format", () => {
@@ -100,4 +101,24 @@ test("normalizeQuotaSnapshot reads snake_case wire format (upstream >=v1.1.1)", 
   assert.equal(snap.models[0].modelId, "gemini-3-flash");
   assert.equal(snap.models[0].remainingFraction, 0.5);
   assert.equal(snap.models[0].resetTime, "2026-06-05T00:00:00Z");
+});
+
+test('groupQuotaModels groups by family and infers the binding window', async () => {
+  const { groupQuotaModels } = await import('../build/dist/quota-query.js');
+  const H = 60 * 60 * 1000;
+  const groups = groupQuotaModels([
+    { label: 'Gemini 3.5 Flash (High)', remainingPercentage: 0.3, resetTime: '2026-07-03T18:08:01Z', resetInMs: 8 * H },
+    { label: 'Gemini 3.1 Pro (Low)', remainingPercentage: 0.3, resetTime: '2026-07-03T18:08:01Z', resetInMs: 8 * H },
+    { label: 'Claude Sonnet 4.6 (Thinking)', remainingPercentage: 99.9, resetTime: '2026-07-03T13:24:36Z', resetInMs: 3 * H },
+    { label: 'GPT-OSS 120B (Medium)', remainingPercentage: 99.9, resetTime: '2026-07-03T13:24:36Z', resetInMs: 3 * H },
+  ]);
+
+  const gemini = groups.find((g) => g.name === 'Gemini models');
+  const claudeGpt = groups.find((g) => g.name === 'Claude/GPT models');
+  assert.equal(groups.length, 2);
+  assert.equal(gemini.remainingPercentage, 0.3);
+  assert.equal(gemini.window, 'weekly limit');
+  assert.equal(gemini.models.length, 2);
+  assert.equal(claudeGpt.remainingPercentage, 99.9);
+  assert.equal(claudeGpt.window, '5-hour limit');
 });

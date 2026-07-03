@@ -151,7 +151,7 @@ function registerCommands(context, deps) {
         }
         const summary = summarizeQuota(latestQuota);
         if (summary && summary.primaryPercent !== null) {
-            log(`Quota: ${summary.primaryPercent.toFixed(1)}% remaining (${summary.primaryLabel})`);
+            log(`Quota: ${summary.primaryLabel} — ${summary.primaryPercent.toFixed(1)}% left`);
         } else {
             log('Quota snapshot written to output channel.');
         }
@@ -187,7 +187,7 @@ function registerCommands(context, deps) {
             await refreshQuota();
             const summary = summarizeQuota(getLatestQuota());
             if (summary && summary.primaryPercent !== null) {
-                log(`Quota refreshed: ${summary.primaryPercent.toFixed(1)}% (${summary.primaryLabel})`);
+                log(`Quota refreshed: ${summary.primaryLabel} — ${summary.primaryPercent.toFixed(1)}% left`);
             } else {
                 log('Quota refreshed.');
             }
