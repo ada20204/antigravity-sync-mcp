@@ -132,6 +132,11 @@ function getRemainingFraction(snapshot: RegistryQuotaSnapshot | undefined, model
     return undefined;
 }
 
+// Models share group quota (weekly + 5h limits); a group at e.g. 0.3% remaining
+// is drained by one or two calls, so recommending it as the primary is useless —
+// demote candidates below this floor to the next model in the chain.
+const LOW_QUOTA_THRESHOLD = 0.02;
+
 function canUseModel(snapshot: RegistryQuotaSnapshot | undefined, model: string): { ok: boolean; reason?: string } {
     const remaining = getRemainingFraction(snapshot, model);
     if (remaining === undefined) {
@@ -139,6 +144,9 @@ function canUseModel(snapshot: RegistryQuotaSnapshot | undefined, model: string)
     }
     if (remaining <= 0) {
         return { ok: false, reason: "quota_exhausted" };
+    }
+    if (remaining < LOW_QUOTA_THRESHOLD) {
+        return { ok: false, reason: "quota_low" };
     }
     return { ok: true };
 }

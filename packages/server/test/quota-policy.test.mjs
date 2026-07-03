@@ -159,3 +159,38 @@ test('selectModelWithQuotaPolicy tracks "Gemini 3.5 Flash" label quota distinctl
     'expected gemini-3.5-flash to be skipped on exhaustion'
   );
 });
+
+test('selectModelWithQuotaPolicy demotes near-drained models (group quota low)', () => {
+  // Real post-split scenario: the Gemini group at 0.3% remaining, Claude/GPT healthy.
+  const result = selectModelWithQuotaPolicy({
+    mode: 'fast',
+    quota: {
+      timestamp: Date.now(),
+      models: [
+        { modelId: 'MODEL_PLACEHOLDER_M132', label: 'Gemini 3.5 Flash (High)', remainingFraction: 0.003 },
+        { modelId: 'MODEL_PLACEHOLDER_M36', label: 'Gemini 3.1 Pro (Low)', remainingFraction: 0.003 },
+        { modelId: 'MODEL_PLACEHOLDER_M16', label: 'Gemini 3.1 Pro (High)', remainingFraction: 0.003 },
+        { modelId: 'MODEL_PLACEHOLDER_M35', label: 'Claude Sonnet 4.6 (Thinking)', remainingFraction: 0.99 },
+        { modelId: 'MODEL_OPENAI_GPT_OSS_120B_MEDIUM', label: 'GPT-OSS 120B (Medium)', remainingFraction: 0.99 },
+      ],
+    },
+  });
+
+  assert.equal(result.selectedModel, 'sonnet-4.6');
+  assert.deepEqual(result.skipped, [{ model: 'gemini-3-flash', reason: 'quota_low' }]);
+});
+
+test('selectModelWithQuotaPolicy keeps models just above the low-quota floor', () => {
+  const result = selectModelWithQuotaPolicy({
+    mode: 'fast',
+    quota: {
+      timestamp: Date.now(),
+      models: [
+        { modelId: 'MODEL_PLACEHOLDER_M132', label: 'Gemini 3.5 Flash (High)', remainingFraction: 0.05 },
+      ],
+    },
+  });
+
+  assert.equal(result.selectedModel, 'gemini-3-flash');
+  assert.equal(result.skipped.length, 0);
+});
