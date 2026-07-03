@@ -1,5 +1,36 @@
 import type { DiscoveredCDP, RegistryQuotaModel, RegistryQuotaSnapshot } from "./cdp.js";
+import { connectCDP, evaluateInDefaultContext } from "./cdp.js";
 import { callLsJson } from "./ls-client.js";
+
+/**
+ * Read the active model's display name from the chat composer's model-picker
+ * trigger (aria-label "Select model, current: <name>"). Fallback for when the
+ * LS conversation endpoint does not expose the selected model.
+ */
+async function readActiveModelFromDom(discovered: DiscoveredCDP): Promise<string | null> {
+    const wsUrl = discovered.target?.webSocketDebuggerUrl;
+    if (!wsUrl) return null;
+    try {
+        const cdp = await connectCDP(wsUrl);
+        try {
+            // Execution contexts arrive via async events after Runtime.enable.
+            for (let i = 0; i < 10 && cdp.contexts.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 100));
+            }
+            const label = await evaluateInDefaultContext(cdp, `(() => {
+              const t = [...document.querySelectorAll('button[aria-label^="Select model"]')].find(el => el.offsetParent !== null);
+              const aria = t ? (t.getAttribute('aria-label') || '') : '';
+              const idx = aria.indexOf('current:');
+              return idx >= 0 ? aria.slice(idx + 'current:'.length).trim() : null;
+            })()`);
+            return typeof label === "string" && label ? label : null;
+        } finally {
+            cdp.close();
+        }
+    } catch {
+        return null;
+    }
+}
 
 function normalizeToken(value: string): string {
     return String(value || "")
@@ -160,6 +191,9 @@ export async function fetchLiveQuotaSnapshot(discovered: DiscoveredCDP): Promise
     } catch {
         // Best effort only; quota query should still succeed.
     }
+    if (!activeModelId) {
+        activeModelId = await readActiveModelFromDom(discovered);
+    }
 
     return normalizeQuotaSnapshot(userStatus, activeModelId);
 }
@@ -250,15 +284,17 @@ export function formatQuotaReport(params: {
     const models = Array.isArray(quota.models) ? quota.models : [];
     if (models.length > 0) {
         lines.push("models:");
+        // label first: modelId is an internal enum and unreleased models come
+        // through as MODEL_PLACEHOLDER_* — the label is the real display name.
         const sorted = [...models].sort((a, b) =>
-            String(a.modelId || a.label || "").localeCompare(String(b.modelId || b.label || ""))
+            String(a.label || a.modelId || "").localeCompare(String(b.label || b.modelId || ""))
         );
         for (const model of sorted) {
-            const id = model.modelId || model.label || "unknown";
+            const name = model.label || model.modelId || "unknown";
             const selected = model.isSelected ? " [active]" : "";
             const remaining = typeof model.remainingPercentage === "number" ? `${model.remainingPercentage.toFixed(1)}%` : "n/a";
             const reset = model.resetTime || "n/a";
-            lines.push(`- ${id}${selected}: remaining=${remaining}, reset=${reset}`);
+            lines.push(`- ${name}${selected}: remaining=${remaining}, reset=${reset}`);
         }
     } else {
         lines.push("models: none");

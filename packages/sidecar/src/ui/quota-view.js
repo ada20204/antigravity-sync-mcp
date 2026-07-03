@@ -92,16 +92,18 @@ function formatQuotaReport(quota, quotaError) {
     const models = Array.isArray(quota.models) ? quota.models : [];
     if (models.length > 0) {
         lines.push('models:');
+        // label first: modelId is an internal enum and unreleased models come
+        // through as MODEL_PLACEHOLDER_* — the label is the real display name.
         const sorted = [...models].sort((a, b) =>
-            String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || ''))
+            String(a.label || a.modelId || '').localeCompare(String(b.label || b.modelId || ''))
         );
         for (const model of sorted) {
-            const id = model.modelId || model.label || 'unknown';
+            const name = model.label || model.modelId || 'unknown';
             const remaining = typeof model.remainingPercentage === 'number'
                 ? `${model.remainingPercentage.toFixed(1)}%`
                 : 'n/a';
             const selected = model.isSelected ? ', selected=yes' : '';
-            lines.push(`- ${id}: remaining=${remaining}, exhausted=${model.isExhausted ? 'yes' : 'no'}${selected}`);
+            lines.push(`- ${name}: remaining=${remaining}, exhausted=${model.isExhausted ? 'yes' : 'no'}${selected}`);
         }
     } else {
         lines.push('models: none');

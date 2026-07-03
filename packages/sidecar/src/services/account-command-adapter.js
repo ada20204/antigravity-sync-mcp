@@ -117,11 +117,13 @@ function formatAccountStatusReport({ currentAccount, quota, summarizeQuota: summ
   const models = Array.isArray(quota.models) ? quota.models : [];
   if (models.length > 0) {
     lines.push('model quota:');
+    // label first: modelId is an internal enum and unreleased models come
+    // through as MODEL_PLACEHOLDER_* — the label is the real display name.
     const sorted = [...models].sort((a, b) =>
-      String(a.modelId || a.label || '').localeCompare(String(b.modelId || b.label || '')),
+      String(a.label || a.modelId || '').localeCompare(String(b.label || b.modelId || '')),
     );
     for (const m of sorted) {
-      const id = m.modelId || m.label || 'unknown';
+      const id = m.label || m.modelId || 'unknown';
       const remaining = typeof m.remainingPercentage === 'number'
         ? `${m.remainingPercentage.toFixed(1)}%`
         : 'n/a';
