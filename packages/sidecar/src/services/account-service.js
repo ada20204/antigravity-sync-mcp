@@ -35,6 +35,11 @@ function getAntigravityDbPath() {
         baseDir = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
     }
 
+    // Antigravity split into separate products (~2026-06): the IDE keeps its state
+    // under "Antigravity IDE"; plain "Antigravity" is the pre-split dir (or the
+    // standalone non-IDE app on updated machines, which we must not touch).
+    const idePath = path.join(baseDir, 'Antigravity IDE', 'User', 'globalStorage', 'state.vscdb');
+    if (fs.existsSync(idePath)) return idePath;
     return path.join(baseDir, 'Antigravity', 'User', 'globalStorage', 'state.vscdb');
 }
 

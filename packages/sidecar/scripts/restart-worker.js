@@ -354,6 +354,11 @@ function getAppProcessPattern() {
     if (process.platform === 'win32') {
         return path.basename(executable, path.extname(executable));
     }
+    // Antigravity split into "Antigravity.app" (non-IDE) and "Antigravity IDE.app":
+    // a bare "Antigravity" pattern matches BOTH products, so kill/wait would hit
+    // the standalone app too. Match this executable's own .app bundle instead.
+    const bundle = executable.match(/\/([^/]+\.app)\//);
+    if (bundle) return bundle[1];
     return executable.includes('Antigravity') ? 'Antigravity' : 'Cursor';
 }
 
@@ -674,10 +679,7 @@ async function phase2_waitForExit() {
     // Fallback: check by process name/path
     log('WARNING: No PID available, falling back to process-name wait (degraded mode)');
     v2Diagnostics.degraded_fallbacks.push('pid_unresolved_process_name_fallback');
-    const executable = getAntigravityPath();
-    const processPattern = process.platform === 'win32'
-        ? path.basename(executable, path.extname(executable))
-        : (executable.includes('Antigravity') ? 'Antigravity' : 'Cursor');
+    const processPattern = getAppProcessPattern();
 
     const gone = await waitForProcessGone(processPattern, WAIT_EXIT_TIMEOUT_MS);
 

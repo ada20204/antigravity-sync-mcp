@@ -54,6 +54,12 @@ export function resolveAntigravityExecutable(): string | undefined {
 
     if (process.platform === "darwin") {
         const candidates = [
+            // Antigravity split into separate products (~2026-06): "Antigravity IDE"
+            // is the VSCode fork this CDP flow drives; plain "Antigravity.app" is now
+            // a different (non-IDE) app and must NOT be launched.
+            "/Applications/Antigravity IDE.app/Contents/Resources/app/bin/antigravity-ide",
+            "/Applications/Antigravity IDE.app/Contents/MacOS/Electron",
+            // pre-split layouts (older installs)
             "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
             "/Applications/Antigravity.app/Contents/MacOS/Electron",
             "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",

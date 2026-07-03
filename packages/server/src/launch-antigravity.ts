@@ -273,7 +273,13 @@ export async function launchAntigravityForWorkspace(params: {
         } else if (process.platform === "darwin") {
             if (killFirst) {
                 const { execSync } = await import("child_process");
-                const appName = executable.includes("Antigravity") ? "Antigravity" : "Cursor";
+                // Antigravity split into "Antigravity.app" (non-IDE) and "Antigravity
+                // IDE.app": a bare "Antigravity" pattern matches BOTH products, so kill
+                // by this executable's own .app bundle instead.
+                const bundleMatch = executable.match(/\/([^/]+\.app)\//);
+                const appName = bundleMatch
+                    ? bundleMatch[1]
+                    : executable.includes("Antigravity") ? "Antigravity" : "Cursor";
 
                 // Two-stage kill: try SIGTERM first, then SIGKILL if needed
                 try {

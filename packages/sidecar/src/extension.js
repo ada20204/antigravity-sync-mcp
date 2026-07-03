@@ -543,24 +543,17 @@ async function findCdpTarget(params) {
                 continue;
             }
 
-            if (looksLikeAntigravityVersion(version)) {
-                summary.push({ host: ip, port, stage: 'version', ok: true, source: 'version' });
-                return {
-                    target: { ip, port, source: 'version', version },
-                    summary: trimProbeSummary(summary),
-                    lastError: '',
-                    lastErrorCode: 'ok',
-                };
-            }
-
-            if (!canFallbackToListProbe(version)) {
+            // The version marker alone is NOT a positive hit: since the product
+            // split, the standalone Antigravity app also answers /json/version
+            // with an "Antigravity" UA but exposes no workbench page. Only the
+            // list probe (workbench page target) proves this is the IDE.
+            const versionLooksAntigravity = looksLikeAntigravityVersion(version);
+            if (!versionLooksAntigravity && !canFallbackToListProbe(version)) {
                 summary.push({ host: ip, port, stage: 'version', ok: false, error: 'non_antigravity_target' });
                 lastError = `${ip}:${port} version non_antigravity_target`;
                 lastErrorCode = 'cdp_version_non_antigravity';
                 continue;
             }
-
-            // Fallback for variants where version marker is not explicit.
             try {
                 const list = await getJson(`http://${ip}:${port}/json/list`, CDP_PROBE_TIMEOUT_MS);
                 const pages = Array.isArray(list)
