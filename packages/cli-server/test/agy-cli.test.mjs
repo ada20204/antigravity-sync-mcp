@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
     stripAnsi,
     interpretAgyResult,
+    parseAgyModelsOutput,
     AgyAuthRequiredError,
     AgyTimeoutError,
     buildChangeModePrompt,
@@ -73,6 +74,11 @@ test("interpretAgyResult omits stderr section when stderr is empty", () => {
         () => interpretAgyResult("", false, "  \n"),
         (err) => /produced no reply/.test(err.message) && !/stderr tail/.test(err.message)
     );
+});
+
+test("parseAgyModelsOutput splits lines, strips ANSI, drops blanks", () => {
+    const out = parseAgyModelsOutput("\x1b[36mGemini 3.5 Flash (High)\x1b[0m\n\nClaude Opus 4.6 (Thinking)\n  \n");
+    assert.deepEqual(out, ["Gemini 3.5 Flash (High)", "Claude Opus 4.6 (Thinking)"]);
 });
 
 test("buildChangeModePrompt wraps prompt with OLD/NEW contract", () => {

@@ -15,6 +15,7 @@ import path from "path";
 // default -> print and exit immediately (mimics agy self-exit on completion).
 const FAKE_SCRIPT = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "1.0.5"; exit 0; fi
+if [ "$1" = "models" ]; then printf 'Model A (High)\\nModel B (Low)\\n'; exit 0; fi
 prompt=""
 model=""
 adddir=""
@@ -78,6 +79,11 @@ test("runAgyPrompt forwards model and workDir as --model / --add-dir", async () 
 test("runAgyPrompt omits --model / --add-dir when not requested", async () => {
     const r = await cli.runAgyPrompt("noflags", { hardTimeoutMs: 20000 });
     assert.match(r.text, /model=\|adddir=/);
+});
+
+test("listAgyModels returns parsed model names from agy models", async () => {
+    const models = await cli.listAgyModels();
+    assert.deepEqual(models, ["Model A (High)", "Model B (Low)"]);
 });
 
 test("empty-output error carries the agy stderr tail", async () => {

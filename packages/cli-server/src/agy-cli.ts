@@ -360,6 +360,81 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
     return { promise, cancel: () => cancelImpl() };
 }
 
+/**
+ * Parse `agy models` output into a list of model names.
+ * Pure function (no I/O) so it is unit-testable.
+ */
+export function parseAgyModelsOutput(stdout: string): string[] {
+    return stdout
+        .split("\n")
+        .map((line) => stripAnsi(line).trim())
+        .filter(Boolean);
+}
+
+/**
+ * List the models the local agy CLI can use (`agy models`).
+ * Read-only and near-instant; does not touch conversation state, so it is
+ * intentionally NOT serialized behind the global agy mutex.
+ * stdin MUST be closed (stdio "ignore"), same contract as the -p path: with an
+ * open stdin pipe `agy models` blocks waiting for input instead of exiting.
+ */
+export function listAgyModels(timeoutMs = 15000): Promise<string[]> {
+    const agyBin = resolveAgyBin();
+    return new Promise((resolve, reject) => {
+        let child: ReturnType<typeof spawn>;
+        try {
+            child = spawn(agyBin, ["models"], {
+                stdio: ["ignore", "pipe", "pipe"],
+                env: process.env,
+            });
+        } catch (error) {
+            reject(
+                new Error(
+                    `Failed to list agy models (resolved bin: ${agyBin}): ${(error as Error).message}. ` +
+                    "Ensure agy is installed, or set AGY_BIN to its absolute path."
+                )
+            );
+            return;
+        }
+
+        let stdout = "";
+        let stderrTail = "";
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { child.kill("SIGKILL"); } catch { /* already gone */ }
+            reject(new Error(`agy models timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+
+        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+        child.stderr?.on("data", (d: Buffer) => { stderrTail = (stderrTail + d.toString()).slice(-2048); });
+        child.on("error", (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(
+                new Error(
+                    `Failed to list agy models (resolved bin: ${agyBin}): ${error.message}. ` +
+                    "Ensure agy is installed, or set AGY_BIN to its absolute path."
+                )
+            );
+        });
+        child.on("close", () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const models = parseAgyModelsOutput(stdout);
+            if (models.length === 0) {
+                const stderr = stripAnsi(stderrTail).trim();
+                reject(new Error("agy models produced no output" + (stderr ? `. agy stderr tail:\n${stderr}` : "")));
+                return;
+            }
+            resolve(models);
+        });
+    });
+}
+
 const CHANGE_MODE_INSTRUCTIONS = `[CHANGEMODE INSTRUCTIONS]
 You are generating code modifications that will be processed by an automated system.
 The output format is critical because it enables programmatic application of changes.

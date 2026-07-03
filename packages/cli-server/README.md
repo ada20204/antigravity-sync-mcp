@@ -39,6 +39,7 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 | `poll-antigravity-task` | Poll a task by `runId`: rolling output tail while running, full result once finished. |
 | `cancel-antigravity-task` | Cancel a task by `runId` (kills the agy process group). |
 | `list-antigravity-tasks` | List running + recent finished tasks (LRU-bounded). |
+| `list-antigravity-models` | List usable model names live (`agy models`) — pass these to `model`. |
 
 ## Design
 
@@ -57,9 +58,10 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 - **`sandbox`**: **refused** — `agy --sandbox` is a no-op in `-p` mode (no
   filesystem/network isolation), so passing it returns an error rather than a
   false sense of security.
-- **`model`**: passed through as `agy --model`. Must match a name from
-  `agy models` (e.g. `"Gemini 3.1 Pro (High)"`); agy **silently ignores** unknown
-  names and falls back to the active CLI model. Omit to use the active CLI model.
+- **`model`**: passed through as `agy --model`. Must be an exact name from
+  `list-antigravity-models` (e.g. `"Gemini 3.1 Pro (High)"`); agy **silently
+  ignores** unknown names and falls back to the active CLI model. Omit to use
+  the active CLI model.
 - **`workDir`**: passed through as `agy --add-dir`, adding the directory to agy's
   workspace so the run is scoped to it.
 - Output is capped at 10 MB; the result's `truncated` flag is set if exceeded.

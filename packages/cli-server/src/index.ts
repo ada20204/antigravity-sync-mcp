@@ -20,7 +20,7 @@ import {
     type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { runAgyPrompt, buildChangeModePrompt } from "./agy-cli.js";
+import { runAgyPrompt, buildChangeModePrompt, listAgyModels } from "./agy-cli.js";
 import { startTask, pollTask, cancelTask, listTasks } from "./agy-tasks.js";
 import { VERSION } from "./version.js";
 
@@ -68,7 +68,7 @@ const TOOLS: Tool[] = [
                 model: {
                     type: "string",
                     description:
-                        "Model for this run (must match a name from `agy models`, e.g. \"Gemini 3.1 Pro (High)\"). " +
+                        "Model for this run (must be an exact name from list-antigravity-models, e.g. \"Gemini 3.1 Pro (High)\"). " +
                         "CAUTION: agy silently ignores unknown names and falls back to the active CLI model. " +
                         "Omit to use the active CLI model.",
                 },
@@ -109,7 +109,7 @@ const TOOLS: Tool[] = [
                 model: {
                     type: "string",
                     description:
-                        "Model for this run (must match a name from `agy models`; agy silently ignores unknown names). " +
+                        "Model for this run (must be an exact name from list-antigravity-models; agy silently ignores unknown names). " +
                         "Omit to use the active CLI model.",
                 },
                 workDir: { type: "string", description: "Absolute directory to add to agy's workspace (agy --add-dir)" },
@@ -147,6 +147,18 @@ const TOOLS: Tool[] = [
     {
         name: "list-antigravity-tasks",
         description: "List Antigravity CLI tasks (running + recent finished, newest-bounded LRU).",
+        inputSchema: {
+            type: "object" as const,
+            properties: {},
+        },
+    },
+    {
+        name: "list-antigravity-models",
+        description:
+            "List the models the local Antigravity CLI can use (runs `agy models` live). " +
+            "Use these exact names for the `model` parameter of ask-antigravity-cli / " +
+            "start-antigravity-task — agy SILENTLY ignores unknown model names and falls " +
+            "back to the active CLI model.",
         inputSchema: {
             type: "object" as const,
             properties: {},
@@ -297,6 +309,9 @@ server.setRequestHandler(
                     break;
                 case "list-antigravity-tasks":
                     resultText = handleListTasks();
+                    break;
+                case "list-antigravity-models":
+                    resultText = JSON.stringify({ models: await listAgyModels() }, null, 2);
                     break;
                 default:
                     throw new Error(`Unknown tool: ${toolName}`);
