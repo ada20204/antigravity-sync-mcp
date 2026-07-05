@@ -564,7 +564,10 @@ async function findCdpTarget(params) {
                 const matchingWorkbench = workbenches.find((t) =>
                     !workspaceName || String(t.title || '').includes(workspaceName)
                 );
-                const workbench = matchingWorkbench || workbenches[0] || pages[0];
+                // Workbench pages ONLY — no pages[0] fallback: the standalone
+                // Antigravity app also exposes page targets (its chat window),
+                // and registering its port routes everything to the wrong product.
+                const workbench = matchingWorkbench || workbenches[0];
 
                 if (workbench) {
                     summary.push({ host: ip, port, stage: 'list', ok: true, source: 'list' });

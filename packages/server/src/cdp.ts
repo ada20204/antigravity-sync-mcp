@@ -184,17 +184,15 @@ function rankRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
 async function resolveTargetFromEndpoint(ip: string, port: number): Promise<CDPTarget | null> {
     const response = await fetch(`http://${ip}:${port}/json/list`);
     const list: CDPTarget[] = await response.json() as any;
-    const workbench = list.find((t) =>
+    // Workbench page ONLY — no any-page fallback: since the product split the
+    // standalone Antigravity app also serves CDP with page targets (its chat
+    // window, https://127.0.0.1:.../c/...), and accepting one silently routes
+    // asks to the wrong product. The IDE's page is always workbench.html.
+    return list.find((t) =>
         t.url?.includes("workbench.html") &&
         t.type === "page" &&
         !t.url?.includes("jetski")
-    );
-    const fallbackPage = list.find((t) =>
-        t.type === "page" &&
-        !!t.webSocketDebuggerUrl &&
-        !t.url?.includes("jetski")
-    );
-    return workbench || fallbackPage || null;
+    ) ?? null;
 }
 
 export async function discoverCDPDetailed(
