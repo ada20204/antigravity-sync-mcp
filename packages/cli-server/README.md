@@ -30,6 +30,30 @@ node packages/cli-server/build/dist/index.js   # runs as a stdio MCP server
 }
 ```
 
+## Global install (decoupled from the repo checkout)
+
+```bash
+npm --workspace packages/cli-server run install:global
+```
+
+Copies the build output plus the MCP SDK to `~/.config/antigravity-mcp/cli-server/`
+and generates a launcher at `~/.config/antigravity-mcp/bin/antigravity-mcp-cli`
+(Unix only). Register it globally with:
+
+```json
+{
+  "mcpServers": {
+    "antigravity-cli": {
+      "command": "~/.config/antigravity-mcp/bin/antigravity-mcp-cli",
+      "args": []
+    }
+  }
+}
+```
+
+No env needed: the `agy` binary is resolved at runtime via `AGY_BIN` / PATH /
+`~/.local/bin`. Re-run the script after a rebuild to refresh the installed copy.
+
 ## Tools
 
 | Tool | Description |

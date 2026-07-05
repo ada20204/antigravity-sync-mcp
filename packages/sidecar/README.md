@@ -1,6 +1,8 @@
 # Antigravity MCP Sidecar
 
-All-in-one companion extension for Antigravity.
+All-in-one companion extension for **Antigravity IDE** (install it in the IDE,
+not in the standalone Antigravity chat app — CDP discovery only registers IDE
+workbench pages).
 
 ## Features
 
@@ -159,8 +161,8 @@ Antigravity should run with debug port enabled, typically:
 
 1. Install the extension
 2. Open a workspace in Antigravity
-3. The status bar shows: `⚡ Sidecar: ON` / `🔴 Sidecar: OFF` / `⚠ Sidecar: No CDP`
-4. Click the status bar item to toggle auto-accept on/off
+3. The status bar shows: `⚡ Sidecar: ON` / `🔴 Sidecar: OFF` / `⚠ Sidecar: No CDP`, plus a `Quota` pill (click for the grouped quota report; details in tooltip)
+4. Click the Sidecar status bar item to toggle auto-accept on/off
 5. Use command palette for launch/restart and quota tools
 6. View logs: Output panel → "Antigravity MCP Sidecar"
 

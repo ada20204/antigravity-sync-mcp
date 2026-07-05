@@ -1,11 +1,18 @@
 # antigravity-mcp-server
 
-MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a local Antigravity instance via Chrome DevTools Protocol (CDP).
+MCP server that bridges external AI agents (Claude Code, Cursor, etc.) to a local **Antigravity IDE** instance via Chrome DevTools Protocol (CDP).
+
+> **Product split note**: Antigravity now ships as three products — Antigravity IDE
+> (VSCode fork), the standalone Antigravity chat app, and the `agy` CLI. This
+> server targets the **IDE only**: target discovery accepts workbench pages
+> exclusively, so the standalone app's CDP endpoint (which also serves page
+> targets since the split) is never routed to. For the CLI path use
+> `packages/cli-server`.
 
 ## Prerequisites
 
 1. **Node.js 18+**
-2. **Antigravity** running with debug port enabled, or allow cold-start auto launch (see Configuration)
+2. **Antigravity IDE** running with debug port enabled, or allow cold-start auto launch (see Configuration)
 3. **packages/sidecar** extension enabled in your active workspace (writes CDP/LS/quota registry)
 
 ## Quick Start
@@ -59,7 +66,9 @@ Add to your MCP config:
 | `antigravity-stop` | Stop the current AI generation in Antigravity. |
 | `ping` | Test connectivity and check CDP availability. |
 | `quota-status` | Query quota status for models/prompt credits. Prefers live LS query and falls back to registry snapshot; also prints policy recommendation preview for model routing. |
-| `launch-antigravity` | Launch Antigravity in a new window with CDP flags and optionally wait for CDP readiness. |
+| `launch-antigravity` | Launch Antigravity IDE in a new window with CDP flags and optionally wait for CDP readiness. |
+| `list-antigravity-models` | List models with remaining quota percentage and the active marker. Prefers a live LS query, falls back to the registry snapshot. Pass a returned name as `model` to `ask-antigravity`. |
+| `list-workspaces` | List schema-compatible Antigravity workspaces from the local registry (read-only, no CDP connection). |
 
 > **CLI path moved out**: the Antigravity CLI (`agy`) tools now live in a separate
 > package — `packages/cli-server` (`@antigravity-mcp/cli-server`). This server is
@@ -80,7 +89,7 @@ Add to your MCP config:
 `ask-antigravity` input schema:
 - `prompt` (required): prompt text
 - `mode` (optional): `fast` or `plan`
-- `model` (optional): preferred model (for example `gemini-3-flash`, `gemini-3-pro-high`, `opus-4.6`)
+- `model` (optional): preferred model — use an exact name from `list-antigravity-models` (for example `Gemini 3.1 Pro (High)`)
 - `targetDir` (optional): workspace directory for this request
 
 Target directory resolution order for `ask-antigravity`:
