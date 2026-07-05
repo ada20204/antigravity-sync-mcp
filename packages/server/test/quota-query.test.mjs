@@ -122,3 +122,38 @@ test('groupQuotaModels groups by family and infers the binding window', async ()
   assert.equal(claudeGpt.remainingPercentage, 99.9);
   assert.equal(claudeGpt.window, '5-hour limit');
 });
+
+test('groupQuotaModels skips null entries and falls back to unknown window', async () => {
+  const { groupQuotaModels } = await import('../build/dist/quota-query.js');
+  const groups = groupQuotaModels([
+    null,
+    { label: 'Gemini 3.5 Flash (High)', remainingPercentage: 42, resetTime: '' },
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].window, 'unknown');
+  assert.equal(groups[0].remainingPercentage, 42);
+  assert.equal(groups[0].models.length, 1);
+});
+
+test('renderQuotaBar clamps and rounds to the slot count', async () => {
+  const { renderQuotaBar } = await import('../build/dist/quota-query.js');
+  assert.equal(renderQuotaBar(99.9), '██████████');
+  assert.equal(renderQuotaBar(0.3), '░░░░░░░░░░');
+  assert.equal(renderQuotaBar(45), '█████░░░░░');
+  assert.equal(renderQuotaBar(null), '░░░░░░░░░░');
+  assert.equal(renderQuotaBar(NaN), '░░░░░░░░░░');
+  assert.equal(renderQuotaBar(150), '██████████');
+  assert.equal(renderQuotaBar(-5), '░░░░░░░░░░');
+});
+
+test('formatResetIn renders hours, minutes, zero and missing values', async () => {
+  const { formatResetIn } = await import('../build/dist/quota-query.js');
+  const H = 60 * 60 * 1000;
+  assert.equal(formatResetIn(7 * H + 49 * 60 * 1000), '7h 49m');
+  assert.equal(formatResetIn(2 * H + 5 * 60 * 1000), '2h 05m');
+  assert.equal(formatResetIn(12 * 60 * 1000), '12m');
+  assert.equal(formatResetIn(0), 'now');
+  assert.equal(formatResetIn(-1000), 'now');
+  assert.equal(formatResetIn(undefined), '');
+  assert.equal(formatResetIn(NaN), '');
+});

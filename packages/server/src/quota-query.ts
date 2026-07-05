@@ -222,7 +222,8 @@ function quotaGroupName(label: string): string {
 
 export function groupQuotaModels(models: RegistryQuotaModel[]): QuotaGroup[] {
     const groups = new Map<string, QuotaGroup>();
-    for (const model of models) {
+    for (const model of models || []) {
+        if (!model) continue;
         const label = model.label || model.modelId || "unknown";
         const name = quotaGroupName(label);
         let group = groups.get(name);

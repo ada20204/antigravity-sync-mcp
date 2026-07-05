@@ -361,7 +361,14 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         });
 
         // Process exit = deterministic completion. No idle heuristic needed.
-        child.on("close", () => finish());
+        child.on("close", () => {
+            // Flush a partial multi-byte character left in the decoders when the
+            // stream ends mid-character (end() emits it as U+FFFD).
+            const rest = stdoutDecoder.end();
+            if (rest && !truncated) raw += rest;
+            stderrTail = (stderrTail + stderrDecoder.end()).slice(-2048);
+            finish();
+        });
     });
 
     return { promise, cancel: () => cancelImpl() };
@@ -433,6 +440,7 @@ export function listAgyModels(timeoutMs = 15000): Promise<string[]> {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
+            stdout += outDecoder.end();
             const models = parseAgyModelsOutput(stdout);
             if (models.length === 0) {
                 const stderr = stripAnsi(stderrTail).trim();
