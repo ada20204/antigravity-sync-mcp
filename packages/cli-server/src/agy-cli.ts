@@ -12,6 +12,7 @@ import { spawn, execFile } from "child_process";
 import { existsSync } from "fs";
 import os from "os";
 import path from "path";
+import { StringDecoder } from "string_decoder";
 
 // Last agy version this wrapper was verified against. agy ships a private,
 // fast-moving format; warn (once, non-blocking) if the local binary differs so
@@ -323,8 +324,14 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
             finish();
         }, hardMs);
 
+        // StringDecoder, not per-chunk toString(): a multi-byte UTF-8 character
+        // split across chunk boundaries decodes to U+FFFD garbage otherwise
+        // (observed as "���" inside Chinese replies).
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
         child.stdout?.on("data", (d: Buffer) => {
-            const chunk = d.toString();
+            const chunk = stdoutDecoder.write(d);
+            if (!chunk) return;
             if (!truncated) {
                 raw += chunk;
                 if (raw.length > MAX_OUTPUT_CHARS) {
@@ -338,7 +345,7 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         // Keep only the last ~2KB of stderr: enough for agy's final error line
         // without buffering a whole debug log.
         child.stderr?.on("data", (d: Buffer) => {
-            stderrTail = (stderrTail + d.toString()).slice(-2048);
+            stderrTail = (stderrTail + stderrDecoder.write(d)).slice(-2048);
         });
 
         child.on("error", (error) => {
@@ -407,8 +414,10 @@ export function listAgyModels(timeoutMs = 15000): Promise<string[]> {
             reject(new Error(`agy models timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
-        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-        child.stderr?.on("data", (d: Buffer) => { stderrTail = (stderrTail + d.toString()).slice(-2048); });
+        const outDecoder = new StringDecoder("utf8");
+        const errDecoder = new StringDecoder("utf8");
+        child.stdout?.on("data", (d: Buffer) => { stdout += outDecoder.write(d); });
+        child.stderr?.on("data", (d: Buffer) => { stderrTail = (stderrTail + errDecoder.write(d)).slice(-2048); });
         child.on("error", (error) => {
             if (settled) return;
             settled = true;
