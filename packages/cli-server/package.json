@@ -11,6 +11,7 @@
     "prebuild": "node scripts/generate-version.mjs",
     "build": "tsc",
     "start": "node build/dist/index.js",
+    "install:global": "node scripts/install.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "keywords": [
