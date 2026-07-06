@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package-json.mjs && node scripts/create-esm-test-compat.mjs",
-    "test": "node --test test/**/*.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "keywords": ["mcp", "antigravity", "types"],
