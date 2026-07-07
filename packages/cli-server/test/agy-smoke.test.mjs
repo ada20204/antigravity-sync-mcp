@@ -19,18 +19,20 @@ if [ "$1" = "models" ]; then printf 'Model A (High)\\nModel B (Low)\\n'; exit 0;
 prompt=""
 model=""
 adddir=""
+skipperm=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) prompt="$2"; shift 2 ;;
     --model) model="$2"; shift 2 ;;
     --add-dir) adddir="$2"; shift 2 ;;
+    --dangerously-skip-permissions) skipperm=1; shift ;;
     *) shift ;;
   esac
 done
 case "$prompt" in
   *STDERRONLY*) echo "fake agy diagnostic" >&2; exit 0 ;;
 esac
-printf 'FAKE_REPLY:%s|model=%s|adddir=%s\\n' "$prompt" "$model" "$adddir"
+printf 'FAKE_REPLY:%s|model=%s|adddir=%s|skipperm=%s\\n' "$prompt" "$model" "$adddir" "$skipperm"
 case "$prompt" in
   *SLOW*) sleep 30 ;;
   *DELAY*) sleep 1 ;;
@@ -78,7 +80,12 @@ test("runAgyPrompt forwards model and workDir as --model / --add-dir", async () 
 
 test("runAgyPrompt omits --model / --add-dir when not requested", async () => {
     const r = await cli.runAgyPrompt("noflags", { hardTimeoutMs: 20000 });
-    assert.match(r.text, /model=\|adddir=/);
+    assert.match(r.text, /model=\|adddir=\|/);
+});
+
+test("runAgyPrompt always passes --dangerously-skip-permissions (headless has no approver)", async () => {
+    const r = await cli.runAgyPrompt("permcheck", { hardTimeoutMs: 20000 });
+    assert.match(r.text, /skipperm=1/);
 });
 
 test("listAgyModels returns parsed model names from agy models", async () => {

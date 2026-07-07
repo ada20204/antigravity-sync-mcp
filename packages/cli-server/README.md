@@ -81,6 +81,14 @@ agy version adds a quota subcommand.
   deterministic completion signal. No pseudo-terminal, no idle heuristic, no
   native dependencies. (Closing stdin is the key; the "non-TTY hangs / empty
   stdout" symptom was just a missing stdin EOF.)
+- **Permissions auto-approved**: every run passes `--dangerously-skip-permissions`.
+  agy's file-write/shell tools require interactive permission approval, and print
+  mode has no approver — without the flag they fail **silently** (exit 1, no
+  output, nothing written to disk), which surfaces as "done but nothing happened".
+  The flip side: agy can edit files and run shell commands unattended, so scope
+  runs with `workDir` and verify its changes yourself. Note that `done`/process
+  exit still only means the process ended, not that the task semantically
+  completed.
 - **Serialized**: `agy` is not concurrency-safe (it rewrites shared
   `~/.gemini/antigravity-cli` index files), so all runs go through a global mutex —
   concurrent calls queue rather than race.

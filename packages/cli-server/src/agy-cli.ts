@@ -252,7 +252,10 @@ function startAgyRun(prompt: string, options: AgyRunOptions = {}): AgyRunHandle 
         // sandbox refused at enqueue time. stdin is closed (ignore = EOF) so agy
         // gets a clean end-of-input and SELF-EXITS on completion — that process
         // exit is our deterministic completion signal. No idle heuristic, no PTY.
-        const agyArgs = ["--print-timeout", `${printTimeoutS}s`];
+        // Auto-approve tool permission requests: print mode has no interactive
+        // approver, so without this agy's file-write/shell tools die on the
+        // permission prompt — silently (exit 1, no output, nothing written).
+        const agyArgs = ["--print-timeout", `${printTimeoutS}s`, "--dangerously-skip-permissions"];
         if (options.workDir) agyArgs.push("--add-dir", options.workDir);
         if (options.model) agyArgs.push("--model", options.model);
         agyArgs.push("-p", prompt);

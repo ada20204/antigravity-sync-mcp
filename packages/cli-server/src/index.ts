@@ -56,6 +56,9 @@ const TOOLS: Tool[] = [
         description:
             "Send a prompt to the Antigravity CLI (`agy`) in headless print mode and return its reply. " +
             "Drives the `agy` binary directly as a subprocess (no IDE/CDP), so no workspace needs to be open.\n\n" +
+            "CAUTION: agy runs with --dangerously-skip-permissions (headless mode has no interactive " +
+            "approver), so file edits and shell commands it decides to run are auto-approved. Scope runs " +
+            "with workDir and verify resulting file changes yourself.\n\n" +
             "Requirements: `agy` must be installed and already logged in (run `agy` once in a terminal to complete " +
             "Google OAuth).",
         inputSchema: {
@@ -101,7 +104,9 @@ const TOOLS: Tool[] = [
             "Start a long-running Antigravity CLI task asynchronously and return a runId immediately " +
             "(non-blocking). Use this instead of ask-antigravity-cli for deep tasks that may take minutes. " +
             "Poll with poll-antigravity-task to get progress/result; cancel with cancel-antigravity-task. " +
-            "Runs are globally serialized (agy is not concurrency-safe), so a started task may sit queued briefly.",
+            "Runs are globally serialized (agy is not concurrency-safe), so a started task may sit queued briefly. " +
+            "CAUTION: agy runs with --dangerously-skip-permissions — its file edits and shell commands are " +
+            "auto-approved; scope with workDir.",
         inputSchema: {
             type: "object" as const,
             properties: {
@@ -124,7 +129,9 @@ const TOOLS: Tool[] = [
         name: "poll-antigravity-task",
         description:
             "Poll an async Antigravity task by runId. While running: returns status + a rolling tail of output. " +
-            "Once finished: returns status (done/failed/cancelled) + full result or error.",
+            "Once finished: returns status (done/failed/cancelled) + full result or error. " +
+            "NOTE: done means the agy process exited, not that the task semantically completed — for tasks " +
+            "that edit files or run tests, verify the results on disk yourself.",
         inputSchema: {
             type: "object" as const,
             properties: {
