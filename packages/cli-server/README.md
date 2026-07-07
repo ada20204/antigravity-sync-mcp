@@ -89,6 +89,16 @@ agy version adds a quota subcommand.
   runs with `workDir` and verify its changes yourself. Note that `done`/process
   exit still only means the process ended, not that the task semantically
   completed.
+- **Non-zero exits kill the run (agy bug, mitigated by plugin)**: in print mode,
+  a shell command exiting non-zero silently aborts agy's whole agent loop (agy
+  exits 0, stdout truncates, remaining steps are dropped) — test-red phases and
+  expected-failure probes die mid-flight. Commands wrapped as `<cmd> || true`
+  survive. Install the bundled `exit-code-guard` plugin (below) to enforce that
+  wrapping deterministically.
+- **Silent quota exhaustion**: when the selected model's quota is exhausted, agy
+  exits 0 with empty output; the 429 RESOURCE_EXHAUSTED error goes only to
+  `~/.gemini/antigravity-cli/cli.log`. The wrapper's empty-output error mentions
+  this; models in the other quota group (Gemini vs Claude/GPT) keep working.
 - **Serialized**: `agy` is not concurrency-safe (it rewrites shared
   `~/.gemini/antigravity-cli` index files), so all runs go through a global mutex —
   concurrent calls queue rather than race.
@@ -105,6 +115,22 @@ agy version adds a quota subcommand.
 - **`workDir`**: passed through as `agy --add-dir`, adding the directory to agy's
   workspace so the run is scoped to it.
 - Output is capped at 10 MB; the result's `truncated` flag is set if exceeded.
+
+## agy plugin: exit-code-guard (recommended)
+
+Bundled under `agy-plugin/exit-code-guard/`; `install:global` registers it
+automatically, or install manually:
+
+```bash
+agy plugin install packages/cli-server/agy-plugin/exit-code-guard
+```
+
+A `PreToolUse` hook that denies any `run_command` not ending in `|| true`, with
+a rewrite hint as the deny reason — the model resubmits the wrapped command and
+the run survives failing commands (verified: an intentionally failing step no
+longer kills the run; later steps complete). Cost: one extra deny/retry
+round-trip per unwrapped command. Machine-level, applies to every agy run, not
+just this MCP server. Remove with `agy plugin uninstall exit-code-guard`.
 
 ## Configuration
 

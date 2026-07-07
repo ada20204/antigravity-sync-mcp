@@ -29,6 +29,7 @@
   },
   "files": [
     "build/dist/",
+    "agy-plugin/",
     "README.md"
   ],
   "dependencies": {

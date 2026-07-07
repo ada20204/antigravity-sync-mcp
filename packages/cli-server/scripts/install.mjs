@@ -12,6 +12,7 @@
  */
 
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
@@ -71,6 +72,17 @@ writeFileSync(
     'utf8'
 );
 chmodSync(launcherPath, 0o755);
+
+// Best-effort: register the exit-code-guard agy plugin (PreToolUse gate that
+// forces `|| true` wrapping — agy print mode silently aborts on non-zero exits).
+const pluginDir = join(packageRoot, 'agy-plugin', 'exit-code-guard');
+try {
+    execFileSync('agy', ['plugin', 'install', pluginDir], { stdio: 'pipe' });
+    console.log('  Installed agy plugin: exit-code-guard');
+} catch {
+    console.log('  NOTE: could not auto-install the exit-code-guard agy plugin.');
+    console.log(`  Run manually: agy plugin install ${pluginDir}`);
+}
 
 console.log('Installed successfully.');
 console.log(`  Launcher: ${launcherPath}`);

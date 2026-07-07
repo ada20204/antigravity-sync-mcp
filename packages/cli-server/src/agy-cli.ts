@@ -176,7 +176,10 @@ export function interpretAgyResult(raw: string, timedOut: boolean, stderrTail = 
     if (!text && !timedOut) {
         const stderr = stripAnsi(stderrTail).trim();
         throw new Error(
-            "agy CLI produced no reply: no output captured" +
+            "agy CLI produced no reply: no output captured. " +
+            "Note: agy also exits silently like this when its model quota is exhausted " +
+            "(429 RESOURCE_EXHAUSTED goes to its log only) — check ~/.gemini/antigravity-cli/cli.log " +
+            "or try a model from the other quota group" +
             (stderr ? `. agy stderr tail:\n${stderr}` : "")
         );
     }

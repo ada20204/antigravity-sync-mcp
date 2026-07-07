@@ -1,0 +1,5 @@
+{
+  "name": "exit-code-guard",
+  "version": "0.1.0",
+  "description": "Deny run_command calls not wrapped with || true. agy print mode silently aborts the whole run when a shell command exits non-zero; this gate forces the model to wrap commands so failures are observable output instead of a run-killer."
+}
